@@ -45,7 +45,10 @@ doc:
 clean:
 	cargo clean
 
-check: fmt-check lint test
+check: fmt-check lint placeholder-check test
+
+placeholder-check:
+	bash scripts/check_no_runtime_placeholders.sh
 	@echo "✓ All checks passed!"
 
 install:

@@ -182,6 +182,20 @@ pub fn lift_function(
     func_index: u32,
 ) -> Result<JitFunction, LiftError> {
     let instrs = decode_function(&func.code)?;
+
+    // Hard correctness gate (Phase 0): refuse to lift any instruction whose
+    // native lowering is known to produce wrong results. Unlike the
+    // heuristic selection gate, this applies to every caller of the lifter,
+    // including jit_hints-driven prewarming and the AOT bytecode adapter.
+    for instr in &instrs {
+        if crate::jit::capability::produces_incorrect_native_results(instr.opcode) {
+            return Err(LiftError::UnsupportedOpcode {
+                opcode: instr.opcode,
+                offset: instr.offset,
+            });
+        }
+    }
+
     let cfg = build_cfg(&instrs);
 
     let name = if func.name.is_empty() {
@@ -535,20 +549,13 @@ fn lift_instruction(
                 .instrs
                 .push(JitInstr::StoreLocal { index: 1, value });
         }
-        Opcode::GetArgCount => {
-            // GetArgCount doesn't have any runtime effect in JIT (it reads from call frame)
-            // For now, we'll treat it as a no-op since JIT has different semantics
-            // TODO: Implement proper GetArgCount support in JIT
-        }
-        Opcode::LoadArgLocal => {
-            // LoadArgLocal loads from a dynamic local index
-            // For now, just push 0 as a placeholder
-            let _index = stack.pop(instr.offset)?;
-            let dest = func.alloc_reg(JitType::Value);
-            func.block_mut(block)
-                .instrs
-                .push(JitInstr::ConstI32 { dest, value: 0 });
-            stack.push(dest);
+        Opcode::GetArgCount | Opcode::LoadArgLocal => {
+            // No exact native lowering exists for dynamic argument access yet.
+            // Lifting these would silently produce wrong values (S2).
+            return Err(LiftError::UnsupportedOpcode {
+                opcode: instr.opcode,
+                offset: instr.offset,
+            });
         }
 
         // ===== Integer Arithmetic =====

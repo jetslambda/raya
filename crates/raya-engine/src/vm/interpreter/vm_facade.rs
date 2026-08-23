@@ -935,11 +935,22 @@ impl Vm {
     #[cfg(feature = "jit")]
     fn collect_prewarm_candidates(module: &Module, config: &crate::jit::JitConfig) -> Vec<usize> {
         if !module.jit_hints.is_empty() {
-            // Use pre-computed hints from compile time
+            // Use pre-computed hints from compile time. Hints are advisory:
+            // stale or hand-crafted modules may reference functions the
+            // current capability table rejects, so re-check before selection
+            // (Phase 0). Rejected functions simply stay on the interpreter.
+            let supported = |idx: u32| -> bool {
+                module
+                    .functions
+                    .get(idx as usize)
+                    .map(crate::jit::analysis::heuristics::function_supported_for_jit)
+                    .unwrap_or(false)
+            };
             return module
                 .jit_hints
                 .iter()
                 .filter(|h| h.score >= config.min_score && h.is_cpu_bound)
+                .filter(|h| supported(h.func_index))
                 .map(|h| h.func_index as usize)
                 .collect();
         }

@@ -5,6 +5,7 @@
 //! I/O-bound functions (spawn, await, mutex) score low.
 
 use super::decoder::{decode_function, Operands};
+use crate::jit::capability::opcode_supported_for_jit;
 use crate::compiler::bytecode::{Function, Module, Opcode};
 
 /// Analysis result for a single function
@@ -310,101 +311,10 @@ pub fn function_supported_for_jit(func: &Function) -> bool {
         return false;
     };
 
-    instrs.iter().all(|instr| {
-        matches!(
-            instr.opcode,
-            Opcode::Nop
-                | Opcode::Pop
-                | Opcode::Dup
-                | Opcode::Swap
-                | Opcode::ConstI32
-                | Opcode::ConstF64
-                | Opcode::ConstTrue
-                | Opcode::ConstFalse
-                | Opcode::ConstNull
-                | Opcode::ConstStr
-                | Opcode::LoadConst
-                | Opcode::LoadLocal
-                | Opcode::StoreLocal
-                | Opcode::LoadLocal0
-                | Opcode::LoadLocal1
-                | Opcode::StoreLocal0
-                | Opcode::StoreLocal1
-                | Opcode::Iadd
-                | Opcode::Isub
-                | Opcode::Imul
-                | Opcode::Idiv
-                | Opcode::Imod
-                | Opcode::Ineg
-                | Opcode::Ishl
-                | Opcode::Ishr
-                | Opcode::Iushr
-                | Opcode::Iand
-                | Opcode::Ior
-                | Opcode::Ixor
-                | Opcode::Inot
-                | Opcode::Fadd
-                | Opcode::Fsub
-                | Opcode::Fmul
-                | Opcode::Fdiv
-                | Opcode::Fmod
-                | Opcode::Fneg
-                | Opcode::Ieq
-                | Opcode::Ine
-                | Opcode::Ilt
-                | Opcode::Ile
-                | Opcode::Igt
-                | Opcode::Ige
-                | Opcode::Feq
-                | Opcode::Fne
-                | Opcode::Flt
-                | Opcode::Fle
-                | Opcode::Fgt
-                | Opcode::Fge
-                | Opcode::Eq
-                | Opcode::Ne
-                | Opcode::Not
-                | Opcode::And
-                | Opcode::Or
-                | Opcode::Sconcat
-                | Opcode::Slen
-                | Opcode::Seq
-                | Opcode::Sne
-                | Opcode::Slt
-                | Opcode::Sle
-                | Opcode::Sgt
-                | Opcode::Sge
-                | Opcode::ToString
-                | Opcode::Jmp
-                | Opcode::JmpIfTrue
-                | Opcode::JmpIfFalse
-                | Opcode::JmpIfNull
-                | Opcode::JmpIfNotNull
-                | Opcode::NativeCall
-                | Opcode::ModuleNativeCall
-                | Opcode::NewType
-                | Opcode::IsNominal
-                | Opcode::CastNominal
-                | Opcode::CastShape
-                | Opcode::ImplementsShape
-                | Opcode::LoadFieldExact
-                | Opcode::OptionalFieldExact
-                | Opcode::LoadFieldShape
-                | Opcode::OptionalFieldShape
-                | Opcode::StoreFieldShape
-                | Opcode::Call
-                | Opcode::CallMethodExact
-                | Opcode::OptionalCallMethodExact
-                | Opcode::CallMethodShape
-                | Opcode::OptionalCallMethodShape
-                | Opcode::ConstructType
-                | Opcode::CallConstructor
-                | Opcode::CallSuper
-                | Opcode::CallStatic
-                | Opcode::Return
-                | Opcode::ReturnVoid
-        )
-    })
+    // Single source of truth: the JIT capability table (S0).
+    instrs
+        .iter()
+        .all(|instr| opcode_supported_for_jit(instr.opcode))
 }
 
 #[cfg(test)]

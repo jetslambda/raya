@@ -431,13 +431,14 @@ impl<'a> LoweringContext<'a> {
                 let result = builder.ins().ineg(v);
                 self.def_reg(builder, *dest, result);
             }
-            JitInstr::IPow { dest, left, right } => {
-                // No native pow for integers in Cranelift; emit a loop or deopt
-                // For now, just pass through as multiply (placeholder)
-                let l = self.use_reg(builder, *left);
-                let r = self.use_reg(builder, *right);
-                let result = builder.ins().imul(l, r);
-                self.def_reg(builder, *dest, result);
+            JitInstr::IPow { .. } => {
+                // Integer pow has no exact Cranelift lowering and the previous
+                // multiply placeholder produced wrong results (S1). Functions
+                // containing it are rejected by the capability table before
+                // they reach this backend; this arm remains as defense in depth.
+                return Err(LowerError::UnsupportedInstruction(
+                    "IPow has no exact native lowering".to_string(),
+                ));
             }
 
             // ===== Integer Bitwise =====
@@ -513,18 +514,19 @@ impl<'a> LoweringContext<'a> {
                 let result = builder.ins().fneg(v);
                 self.def_reg(builder, *dest, result);
             }
-            JitInstr::FPow { dest, left, right } => {
-                // No native fpow in Cranelift; placeholder — would call runtime
-                let l = self.use_reg(builder, *left);
-                let r = self.use_reg(builder, *right);
-                let result = builder.ins().fmul(l, r);
-                self.def_reg(builder, *dest, result);
+            JitInstr::FPow { .. } => {
+                // Float pow has no exact Cranelift lowering; the previous
+                // multiply placeholder produced wrong results (S1).
+                return Err(LowerError::UnsupportedInstruction(
+                    "FPow has no exact native lowering".to_string(),
+                ));
             }
-            JitInstr::FMod { dest, left, right } => {
-                // No native fmod in Cranelift; placeholder — would call runtime fmod
-                let l = self.use_reg(builder, *left);
-                let _r = self.use_reg(builder, *right);
-                self.def_reg(builder, *dest, l);
+            JitInstr::FMod { .. } => {
+                // Float modulo must go through libm fmod; the previous
+                // pass-through-left placeholder produced wrong results (S1).
+                return Err(LowerError::UnsupportedInstruction(
+                    "FMod has no exact native lowering".to_string(),
+                ));
             }
 
             // ===== Integer Comparison =====

@@ -81,3 +81,12 @@ jobs:
 
       - name: Run node compat translation harness
         run: cargo test -p raya-runtime --test node_compat_translation -- --nocapture
+
+  placeholder-gate:
+    name: Runtime placeholder gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for placeholder runtime semantics
+        run: bash scripts/check_no_runtime_placeholders.sh

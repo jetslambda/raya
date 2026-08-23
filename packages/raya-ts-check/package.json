@@ -1,0 +1,25 @@
+{
+  "name": "raya-ts-check",
+  "version": "0.1.0",
+  "description": "TypeScript readiness checker: reports what prevents safe compilation to the Raya typed runtime.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "raya-ts-check": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "typescript": "^5.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0"
+  }
+}

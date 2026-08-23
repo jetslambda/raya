@@ -13,6 +13,7 @@
 //! - Pre-warming: compile CPU-intensive functions at module load time
 
 pub mod analysis;
+pub mod capability;
 pub mod backend;
 pub mod ir;
 pub mod pipeline;
