@@ -111,9 +111,11 @@ fn run_default(rt: &Runtime, _args: &RunArgs) -> anyhow::Result<()> {
         }
     }
 
-    // No manifest at all — try src/main.raya
-    if Path::new("src/main.raya").exists() {
-        return run_file(rt, "src/main.raya");
+    // No manifest at all — try conventional entry points
+    for candidate in ["src/main.raya", "src/main.ts", "main.ts"] {
+        if Path::new(candidate).exists() {
+            return run_file(rt, candidate);
+        }
     }
 
     Err(anyhow!(
@@ -216,6 +218,8 @@ fn list_scripts() -> anyhow::Result<()> {
 
 fn looks_like_file(s: &str) -> bool {
     s.ends_with(".raya")
+        || s.ends_with(".ts")
+        || s.ends_with(".tsx")
         || s.ends_with(".ryb")
         || s.contains('/')
         || s.contains('\\')

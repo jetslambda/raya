@@ -151,36 +151,50 @@ impl ModuleResolverV2 {
         }
 
         let exact = base.clone();
-        let with_ext = base.with_extension("raya");
-        let index = base.join("index.raya");
+        // C9: TypeScript entries participate in local resolution alongside
+        // .raya. Order is deterministic; multiple existing candidates are
+        // an ambiguity error rather than a silent pick.
+        let ext_candidates = [
+            base.with_extension("raya"),
+            base.with_extension("ts"),
+            base.with_extension("tsx"),
+        ];
+        let index_candidates = [
+            base.join("index.raya"),
+            base.join("index.ts"),
+            base.join("index.tsx"),
+        ];
         tried.push(exact.clone());
-        tried.push(with_ext.clone());
-        tried.push(index.clone());
+        for c in ext_candidates.iter().chain(index_candidates.iter()) {
+            tried.push(c.clone());
+        }
 
         let exact_exists = exact.is_file();
-        let ext_exists = with_ext.is_file();
-        let index_exists = index.is_file();
+        let existing_exts: Vec<&PathBuf> =
+            ext_candidates.iter().filter(|c| c.is_file()).collect();
+        let existing_idxs: Vec<&PathBuf> =
+            index_candidates.iter().filter(|c| c.is_file()).collect();
 
         if exact_exists {
             return exact.canonicalize().map_err(RuntimeError::Io);
         }
 
-        if ext_exists && index_exists {
+        if existing_exts.len() + existing_idxs.len() > 1 {
+            let all: Vec<String> = existing_exts
+                .iter()
+                .chain(existing_idxs.iter())
+                .map(|p| p.display().to_string())
+                .collect();
             return Err(RuntimeError::Dependency(format!(
-                "Ambiguous local import '{}' from '{}'. Candidates: {}, {}",
+                "Ambiguous local import '{}' from '{}'. Candidates: {}",
                 specifier,
                 importer.display(),
-                with_ext.display(),
-                index.display()
+                all.join(", ")
             )));
         }
 
-        if ext_exists {
-            return with_ext.canonicalize().map_err(RuntimeError::Io);
-        }
-
-        if index_exists {
-            return index.canonicalize().map_err(RuntimeError::Io);
+        if let Some(&single) = existing_exts.first().or_else(|| existing_idxs.first()) {
+            return single.canonicalize().map_err(RuntimeError::Io);
         }
 
         Err(RuntimeError::Dependency(format!(

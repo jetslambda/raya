@@ -197,6 +197,18 @@ impl Default for Runtime {
     }
 }
 
+/// Default [`TypeMode`] implied by an entry file's extension (task C9).
+///
+/// `.ts`/`.tsx`/`.mts`/`.cts` entries run with TypeScript semantics;
+/// anything else defers to the builtin-mode default. Explicit
+/// `RuntimeOptions::type_mode` always wins over this.
+pub(crate) fn default_type_mode_for_path(path: &Path) -> Option<TypeMode> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("ts") | Some("tsx") | Some("mts") | Some("cts") => Some(TypeMode::Ts),
+        _ => None,
+    }
+}
+
 impl Runtime {
     fn compile_program_source_with_virtual_entry(
         &self,
@@ -363,10 +375,10 @@ impl Runtime {
 
     /// Compile a full file program (entry + resolved local module graph).
     pub fn compile_program_file(&self, path: &Path) -> Result<CompiledProgram, RuntimeError> {
-        let type_mode = self
-            .options
-            .type_mode
-            .unwrap_or_else(|| compile::default_type_mode_for_builtin(self.options.builtin_mode));
+        let type_mode = self.options.type_mode.unwrap_or_else(|| {
+            default_type_mode_for_path(path)
+                .unwrap_or_else(|| compile::default_type_mode_for_builtin(self.options.builtin_mode))
+        });
         let ts_options = self.resolve_ts_options_for_path(path)?;
 
         let compiler = module_system::ProgramCompiler {
@@ -384,10 +396,10 @@ impl Runtime {
         path: &Path,
         options: &compile::CompileOptions,
     ) -> Result<CompiledProgram, RuntimeError> {
-        let type_mode = self
-            .options
-            .type_mode
-            .unwrap_or_else(|| compile::default_type_mode_for_builtin(self.options.builtin_mode));
+        let type_mode = self.options.type_mode.unwrap_or_else(|| {
+            default_type_mode_for_path(path)
+                .unwrap_or_else(|| compile::default_type_mode_for_builtin(self.options.builtin_mode))
+        });
         let ts_options = self.resolve_ts_options_for_path(path)?;
 
         let compiler = module_system::ProgramCompiler {
@@ -544,6 +556,9 @@ impl Runtime {
         let module = match path.extension().and_then(|e| e.to_str()) {
             Some("ryb") => self.load_bytecode(&path)?,
             Some("raya") => self.compile_file(&path)?,
+            Some("ts") | Some("tsx") | Some("mts") | Some("cts") => {
+                self.compile_program_file(&path)?.entry
+            }
             #[cfg(feature = "aot")]
             Some("bundle") => {
                 return self.run_bundle_file(&path);
