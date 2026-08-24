@@ -25,6 +25,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Analyze a TypeScript project for Raya conversion readiness
+    Readiness {
+        /// Path to tsconfig.json or project directory
+        #[arg(long)]
+        project: PathBuf,
+        /// Output format (pretty, json)
+        #[arg(long, default_value = "pretty")]
+        format: String,
+        /// Minimum severity to fail on (info, warning, error)
+        #[arg(long, default_value = "error")]
+        fail_on: String,
+    },
     /// Run a script or execute a file
     #[command(alias = "r")]
     Run {
@@ -434,6 +446,12 @@ fn main() -> anyhow::Result<()> {
 
 fn dispatch(cmd: Commands) -> anyhow::Result<()> {
     match cmd {
+        Commands::Readiness {
+            project,
+            format,
+            fail_on,
+        } => commands::readiness::execute(project, format, fail_on),
+
         Commands::Run {
             target,
             args,

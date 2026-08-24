@@ -10,6 +10,7 @@ pub mod init;
 pub mod install;
 pub mod lint;
 pub mod publish;
+pub mod readiness;
 pub mod remove;
 pub mod repl;
 pub mod run;
