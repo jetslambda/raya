@@ -4,10 +4,11 @@ import { analyzeProject } from "./index.js";
 import type { ReadinessSeverity } from "./types.js";
 import { categorize } from "./report.js";
 import { renderPretty } from "./formats/pretty.js";
+import { renderSarif } from "./formats/sarif.js";
 
 interface CliOptions {
   project: string;
-  format: "pretty" | "json";
+  format: "pretty" | "json" | "sarif";
   failOn: ReadinessSeverity;
 }
 
@@ -27,12 +28,12 @@ function parseOptions(): CliOptions {
   });
 
   if (!values.project) {
-    console.error("usage: raya-ts-check --project <tsconfig-or-dir> [--format pretty|json] [--fail-on info|warning|error]");
+    console.error("usage: raya-ts-check --project <tsconfig-or-dir> [--format pretty|json|sarif] [--fail-on info|warning|error]");
     process.exit(2);
   }
 
   const format = values.format as CliOptions["format"];
-  if (format !== "pretty" && format !== "json") {
+  if (format !== "pretty" && format !== "json" && format !== "sarif") {
     console.error(`invalid --format: ${values.format}`);
     process.exit(2);
   }
@@ -59,6 +60,8 @@ async function main(): Promise<void> {
 
   if (options.format === "json") {
     console.log(JSON.stringify({ ...report, categories: categorize(report) }, null, 2));
+  } else if (options.format === "sarif") {
+    console.log(renderSarif(report));
   } else {
     console.log(renderPretty(report, categorize(report)));
   }
