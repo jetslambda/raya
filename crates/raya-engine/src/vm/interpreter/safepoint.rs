@@ -1,34 +1,37 @@
 //! Safepoint Infrastructure for STW Pauses
 //!
-//! This module provides cooperative safepoint coordination for stop-the-world (STW)
-//! operations like garbage collection, VM snapshotting, and debugging.
+//! Epoch-based cooperative safepoint coordination for stop-the-world (STW)
+//! operations like garbage collection, VM snapshotting, and debugging
+//! (task G4).
 //!
-//! ## Safepoint Poll Locations
+//! ## Protocol
 //!
-//! The VM guarantees safepoint polls at these locations to ensure timely STW pauses:
+//! 1. A coordinator thread calls [`SafepointCoordinator::request_stw_pause`]
+//!    with a reason. This sets the fast-path flag and blocks until every
+//!    registered worker has arrived at a safepoint.
+//! 2. Workers call [`SafepointCoordinator::poll`] at allocation sites,
+//!    call boundaries, loop back-edges, and task operations. The fast path
+//!    is a single atomic load; the slow path arrives at the current epoch
+//!    and waits until that epoch is released.
+//! 3. When all workers have arrived, `request_stw_pause` returns — the
+//!    world is stopped and the caller may inspect or collect.
+//! 4. [`SafepointCoordinator::resume_from_pause`] bumps the epoch, clears
+//!    the flag, and releases all workers. Workers leave only after this
+//!    bump, so the stopped interval is exactly bounded by request/resume.
 //!
-//! ### Critical Locations (Always Polled)
-//! - **Before GC allocations**: NEW, NEW_ARRAY, OBJECT_LITERAL, ARRAY_LITERAL, SCONCAT
-//! - **Function calls**: CALL, CALL_METHOD, CALL_CONSTRUCTOR, CALL_SUPER
-//! - **Loop back-edges**: At the start of each interpreter loop iteration
-//! - **Task operations**: SPAWN (before task creation), AWAIT (on entry)
+//! ## Guarantees
 //!
-//! ### Guarantees
-//! - All workers will reach a safepoint within:
-//!   - One loop iteration (~microseconds for tight loops)
-//!   - One function call
-//!   - One allocation
-//! - No indefinite blocking of GC or snapshotting
-//! - Fast-path polling (single atomic load when no pause pending)
-//!
-//! ## Usage
-//!
-//! Safepoint polling should be inserted before allocations in the interpreter loop.
-//! Call `safepoint().poll()` before operations that allocate memory to ensure
-//! the VM can pause for garbage collection or snapshotting when needed.
+//! - All workers reach a safepoint within one loop iteration, one call, or
+//!   one allocation of the request.
+//! - Workers cannot resume before `resume_from_pause` (the previous
+//!   barrier design released them as soon as the count matched, racing
+//!   the external operation).
+//! - Worker registration is dynamic: registering and deregistering adjust
+//!   the arrival target under the same lock, so neither the coordinator
+//!   nor workers deadlock on count changes.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// Reasons for requesting a safepoint pause
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -72,35 +75,27 @@ impl SafepointStats {
     }
 }
 
+#[derive(Debug)]
+struct CoordinatorState {
+    worker_count: usize,
+    arrived: usize,
+    reason: Option<StopReason>,
+}
+
 /// Coordinates stop-the-world pauses across all worker threads
 pub struct SafepointCoordinator {
-    /// Number of active worker threads
-    worker_count: AtomicUsize,
+    /// Fast-path flag: a pause is pending (any reason)
+    pending: AtomicBool,
 
-    /// Workers currently at safepoint
-    workers_at_safepoint: AtomicUsize,
+    /// Completed stop-the-world epochs. Workers wait until this advances
+    /// past the epoch they arrived at.
+    epoch: AtomicU64,
 
-    /// GC pause is pending
-    #[cfg_attr(test, allow(dead_code))]
-    pub(crate) gc_pending: AtomicBool,
+    state: Mutex<CoordinatorState>,
 
-    /// Snapshot pause is pending
-    #[cfg_attr(test, allow(dead_code))]
-    pub snapshot_pending: AtomicBool,
-
-    /// Debug pause is pending
-    #[cfg_attr(test, allow(dead_code))]
-    pub(crate) debug_pending: AtomicBool,
-
-    /// Current pause reason
-    #[cfg_attr(test, allow(dead_code))]
-    pub current_reason: Mutex<Option<StopReason>>,
-
-    /// Barrier for synchronizing workers
-    barrier: Arc<Barrier>,
+    cv: Condvar,
 
     /// Statistics
-    #[cfg_attr(test, allow(dead_code))]
     pub stats: SafepointStats,
 }
 
@@ -108,13 +103,14 @@ impl SafepointCoordinator {
     /// Create a new SafepointCoordinator with the specified number of workers
     pub fn new(worker_count: usize) -> Self {
         Self {
-            worker_count: AtomicUsize::new(worker_count),
-            workers_at_safepoint: AtomicUsize::new(0),
-            gc_pending: AtomicBool::new(false),
-            snapshot_pending: AtomicBool::new(false),
-            debug_pending: AtomicBool::new(false),
-            current_reason: Mutex::new(None),
-            barrier: Arc::new(Barrier::new(worker_count)),
+            pending: AtomicBool::new(false),
+            epoch: AtomicU64::new(0),
+            state: Mutex::new(CoordinatorState {
+                worker_count,
+                arrived: 0,
+                reason: None,
+            }),
+            cv: Condvar::new(),
             stats: SafepointStats::default(),
         }
     }
@@ -122,50 +118,41 @@ impl SafepointCoordinator {
     /// Fast inline check - called frequently from interpreter
     #[inline(always)]
     pub fn poll(&self) {
-        // Fast path: check if any pause is pending (single atomic load)
         if self.is_pause_pending_fast() {
-            // Slow path: enter safepoint handler
             self.enter_safepoint();
         }
     }
 
-    /// Fast check for pending pauses (inlines to ~2 instructions)
     #[inline(always)]
     fn is_pause_pending_fast(&self) -> bool {
-        self.gc_pending.load(Ordering::Acquire)
-            || self.snapshot_pending.load(Ordering::Acquire)
-            || self.debug_pending.load(Ordering::Acquire)
+        self.pending.load(Ordering::Acquire)
     }
 
-    /// Slow path: handle safepoint entry
+    /// Slow path: arrive at the current epoch and wait for release.
     #[cold]
     #[inline(never)]
     fn enter_safepoint(&self) {
         let start = std::time::Instant::now();
 
-        // Increment workers at safepoint
-        let count = self.workers_at_safepoint.fetch_add(1, Ordering::AcqRel);
+        {
+            let mut st = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            st.arrived += 1;
+            // Wake the coordinator: arrival count changed.
+            self.cv.notify_all();
 
-        // Last worker to arrive triggers the STW operation
-        if count + 1 == self.worker_count.load(Ordering::Acquire) {
-            // All workers are paused - safe to proceed
-            self.execute_stw_operation();
+            // Hold the position until the epoch is released.
+            while st.reason.is_some() {
+                st = self.cv.wait(st).unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            st.arrived -= 1;
         }
 
-        // Wait at barrier for all workers
-        self.barrier.wait();
-
-        // Decrement workers at safepoint
-        self.workers_at_safepoint.fetch_sub(1, Ordering::AcqRel);
-
-        // Track statistics
         let elapsed = start.elapsed().as_micros() as usize;
         self.stats
             .total_pause_time_us
             .fetch_add(elapsed, Ordering::Relaxed);
         self.stats.total_safepoints.fetch_add(1, Ordering::Relaxed);
 
-        // Update max pause time
         let mut max = self.stats.max_pause_time_us.load(Ordering::Relaxed);
         while elapsed > max {
             match self.stats.max_pause_time_us.compare_exchange_weak(
@@ -180,127 +167,83 @@ impl SafepointCoordinator {
         }
     }
 
-    /// Execute the STW operation (called by last worker at safepoint)
-    fn execute_stw_operation(&self) {
-        let reason = self.current_reason.lock().unwrap();
-
-        match *reason {
-            Some(StopReason::GarbageCollection) => {
-                // GC will be triggered externally
-            }
-            Some(StopReason::Snapshot) => {
-                // Snapshot will be captured externally
-            }
-            Some(StopReason::Debug) => {
-                // Debugger will inspect state externally
-            }
-            None => {
-                // Should not happen
-                #[cfg(debug_assertions)]
-                eprintln!("Warning: Safepoint reached with no reason set");
-            }
-        }
-    }
-
-    /// Request a stop-the-world pause
+    /// Request a stop-the-world pause. Blocks until every registered worker
+    /// has arrived at a safepoint. The world remains stopped until
+    /// [`resume_from_pause`](Self::resume_from_pause) is called.
+    ///
+    /// # Panics
+    /// Panics if a pause is already active.
     pub fn request_stw_pause(&self, reason: StopReason) {
-        // Set the current reason
-        {
-            let mut current = self.current_reason.lock().unwrap();
-            if current.is_some() {
-                panic!("Cannot request STW pause while another is active");
-            }
-            *current = Some(reason);
+        let mut st = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if st.reason.is_some() {
+            panic!("Cannot request STW pause while another is active");
         }
+        st.reason = Some(reason);
+        drop(st);
 
-        // Set the appropriate atomic flag
-        match reason {
-            StopReason::GarbageCollection => {
-                self.gc_pending.store(true, Ordering::Release);
-            }
-            StopReason::Snapshot => {
-                self.snapshot_pending.store(true, Ordering::Release);
-            }
-            StopReason::Debug => {
-                self.debug_pending.store(true, Ordering::Release);
-            }
+        // Release-store makes the pause visible to poll()'s fast path.
+        self.pending.store(true, Ordering::Release);
+
+        let mut st = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while st.arrived < st.worker_count {
+            st = self.cv.wait(st).unwrap_or_else(|poisoned| poisoned.into_inner());
         }
-
-        // Wait for all workers to reach safepoint
-        self.wait_for_all_workers();
+        // World stopped: every registered worker is parked in enter_safepoint.
     }
 
-    /// Wait for all workers to reach safepoint
-    fn wait_for_all_workers(&self) {
-        let expected = self.worker_count.load(Ordering::Acquire);
-
-        // Spin-wait with exponential backoff
-        let mut backoff = 1;
-        loop {
-            let at_safepoint = self.workers_at_safepoint.load(Ordering::Acquire);
-
-            if at_safepoint == expected {
-                break;
-            }
-
-            // Exponential backoff
-            for _ in 0..backoff {
-                std::hint::spin_loop();
-            }
-
-            backoff = (backoff * 2).min(1000);
-        }
-    }
-
-    /// Resume from STW pause
+    /// Resume from STW pause. Releases all waiting workers by advancing the
+    /// epoch; they cannot re-execute user code before this call.
     pub fn resume_from_pause(&self) {
-        // Clear the atomic flags
-        self.gc_pending.store(false, Ordering::Release);
-        self.snapshot_pending.store(false, Ordering::Release);
-        self.debug_pending.store(false, Ordering::Release);
-
-        // Clear the current reason
         {
-            let mut current = self.current_reason.lock().unwrap();
-            *current = None;
+            let mut st = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            st.reason = None;
         }
-
-        // Workers will resume after barrier
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.pending.store(false, Ordering::Release);
+        self.cv.notify_all();
     }
 
-    /// Register a new worker thread
+    /// Register a new worker thread. Adjusts the arrival target under the
+    /// coordinator lock so an in-flight request accounts for the newcomer.
     pub fn register_worker(&self) {
-        self.worker_count.fetch_add(1, Ordering::AcqRel);
-        // Note: Barrier cannot be dynamically resized in std library
-        // In practice, workers should be registered during initialization
+        let mut st = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        st.worker_count += 1;
+        drop(st);
+        self.cv.notify_all();
     }
 
-    /// Deregister a worker thread
+    /// Deregister a worker thread. May unblock an in-flight request whose
+    /// arrival target just dropped.
     pub fn deregister_worker(&self) {
-        let count = self.worker_count.fetch_sub(1, Ordering::AcqRel);
-        if count == 1 {
-            // Last worker deregistered
-        }
+        let mut st = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        st.worker_count = st.worker_count.saturating_sub(1);
+        drop(st);
+        self.cv.notify_all();
     }
 
     /// Get current worker count
     pub fn worker_count(&self) -> usize {
-        self.worker_count.load(Ordering::Acquire)
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).worker_count
     }
 
     /// Get current workers at safepoint
     pub fn workers_at_safepoint(&self) -> usize {
-        self.workers_at_safepoint.load(Ordering::Acquire)
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).arrived
     }
 
     /// Get current pause reason
     pub fn current_reason(&self) -> Option<StopReason> {
-        *self.current_reason.lock().unwrap()
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).reason
     }
 
     /// Check if a pause is currently pending
     pub fn is_pause_pending(&self) -> bool {
         self.is_pause_pending_fast()
+    }
+
+    /// Completed stop-the-world epochs
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
     }
 
     /// Get safepoint statistics
@@ -324,6 +267,27 @@ impl Default for SafepointCoordinator {
     }
 }
 
+/// Arc-shared handle used by the scheduler and interpreter.
+#[derive(Clone)]
+pub struct SafepointCoordinatorHandle(Arc<SafepointCoordinator>);
+
+impl SafepointCoordinatorHandle {
+    pub fn new(coordinator: Arc<SafepointCoordinator>) -> Self {
+        Self(coordinator)
+    }
+
+    pub fn get(&self) -> &SafepointCoordinator {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for SafepointCoordinatorHandle {
+    type Target = SafepointCoordinator;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +299,7 @@ mod tests {
         assert_eq!(coord.workers_at_safepoint(), 0);
         assert!(!coord.is_pause_pending());
         assert_eq!(coord.current_reason(), None);
+        assert_eq!(coord.epoch(), 0);
     }
 
     #[test]
@@ -344,118 +309,134 @@ mod tests {
     }
 
     #[test]
-    fn test_no_pending_pause() {
+    fn test_poll_no_pause() {
         let coord = SafepointCoordinator::new(1);
-        assert!(!coord.is_pause_pending());
+        coord.poll(); // must return immediately
+        assert_eq!(coord.epoch(), 0);
     }
 
     #[test]
-    fn test_gc_pause_flag() {
-        let coord = SafepointCoordinator::new(1);
-        coord.gc_pending.store(true, Ordering::Release);
-        assert!(coord.is_pause_pending());
-    }
-
-    #[test]
-    fn test_snapshot_pause_flag() {
-        let coord = SafepointCoordinator::new(1);
-        coord.snapshot_pending.store(true, Ordering::Release);
-        assert!(coord.is_pause_pending());
-    }
-
-    #[test]
-    fn test_debug_pause_flag() {
-        let coord = SafepointCoordinator::new(1);
-        coord.debug_pending.store(true, Ordering::Release);
-        assert!(coord.is_pause_pending());
-    }
-
-    #[test]
-    fn test_worker_registration() {
+    fn test_worker_registration_is_dynamic() {
         let coord = SafepointCoordinator::new(2);
-        assert_eq!(coord.worker_count(), 2);
-
         coord.register_worker();
         assert_eq!(coord.worker_count(), 3);
-
         coord.deregister_worker();
         assert_eq!(coord.worker_count(), 2);
     }
 
     #[test]
-    fn test_statistics_initial() {
-        let coord = SafepointCoordinator::new(1);
-        let (total, time, max) = coord.stats();
-        assert_eq!(total, 0);
-        assert_eq!(time, 0);
-        assert_eq!(max, 0);
-    }
+    fn full_round_trip_two_workers() {
+        let coord = Arc::new(SafepointCoordinator::new(2));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    #[test]
-    fn test_statistics_reset() {
-        let coord = SafepointCoordinator::new(1);
-        coord.stats.total_safepoints.store(10, Ordering::Relaxed);
-        coord
-            .stats
-            .total_pause_time_us
-            .store(1000, Ordering::Relaxed);
-        coord.stats.max_pause_time_us.store(100, Ordering::Relaxed);
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let c = coord.clone();
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        c.poll();
+                        std::thread::sleep(std::time::Duration::from_micros(50));
+                    }
+                })
+            })
+            .collect();
 
-        coord.reset_stats();
+        // Give workers time to enter their poll loops.
+        std::thread::sleep(std::time::Duration::from_millis(5));
 
-        let (total, time, max) = coord.stats();
-        assert_eq!(total, 0);
-        assert_eq!(time, 0);
-        assert_eq!(max, 0);
-    }
+        coord.request_stw_pause(StopReason::GarbageCollection);
 
-    #[test]
-    fn test_poll_no_pause() {
-        let coord = SafepointCoordinator::new(1);
-        // Should return immediately without blocking
-        coord.poll();
-    }
-
-    #[test]
-    fn test_concurrent_pause_check() {
-        // Test that we can detect concurrent pause attempts
-        // (without actually blocking in request_stw_pause)
-        let coord = SafepointCoordinator::new(1);
-
-        // Manually set a reason to simulate active pause
-        {
-            let mut reason = coord.current_reason.lock().unwrap();
-            *reason = Some(StopReason::GarbageCollection);
-        }
-
-        // Try to set another reason - should panic
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut reason = coord.current_reason.lock().unwrap();
-            if reason.is_some() {
-                panic!("Cannot request STW pause while another is active");
-            }
-            *reason = Some(StopReason::Snapshot);
-        }));
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_pause_reason_tracking() {
-        let coord = SafepointCoordinator::new(1);
-
-        // Set GC reason
-        {
-            let mut reason = coord.current_reason.lock().unwrap();
-            *reason = Some(StopReason::GarbageCollection);
-        }
+        // World stopped: both workers parked, reason visible.
         assert_eq!(coord.current_reason(), Some(StopReason::GarbageCollection));
+        coord.resume_from_pause();
+        assert_eq!(coord.epoch(), 1);
+        assert!(!coord.is_pause_pending());
 
-        // Clear reason
-        {
-            let mut reason = coord.current_reason.lock().unwrap();
-            *reason = None;
+        stop.store(true, Ordering::Relaxed);
+        for h in handles {
+            h.join().unwrap();
         }
-        assert_eq!(coord.current_reason(), None);
+    }
+
+    #[test]
+    fn deregister_unblocks_coordinator() {
+        let coord = Arc::new(SafepointCoordinator::new(2));
+
+        // Only one worker will ever poll; the other "worker" deregisters.
+        let c2 = coord.clone();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let s = stop.clone();
+        let poller = std::thread::spawn(move || {
+            while !s.load(Ordering::Relaxed) {
+                c2.poll();
+                std::thread::sleep(std::time::Duration::from_micros(50));
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.deregister_worker();
+
+        coord.request_stw_pause(StopReason::Snapshot);
+        assert_eq!(coord.current_reason(), Some(StopReason::Snapshot));
+        coord.resume_from_pause();
+
+        stop.store(true, Ordering::Relaxed);
+        poller.join().unwrap();
+    }
+
+    #[test]
+    fn double_request_panics() {
+        let coord = Arc::new(SafepointCoordinator::new(1));
+        let c2 = coord.clone();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let s = stop.clone();
+        let poller = std::thread::spawn(move || {
+            while !s.load(Ordering::Relaxed) {
+                c2.poll();
+                std::thread::sleep(std::time::Duration::from_micros(50));
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        coord.request_stw_pause(StopReason::Debug);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            coord.request_stw_pause(StopReason::GarbageCollection);
+        }));
+        assert!(result.is_err());
+
+        coord.resume_from_pause();
+        stop.store(true, Ordering::Relaxed);
+        poller.join().unwrap();
+    }
+
+    #[test]
+    fn zero_workers_stop_immediately() {
+        let coord = SafepointCoordinator::new(0);
+        coord.request_stw_pause(StopReason::GarbageCollection);
+        coord.resume_from_pause();
+        assert_eq!(coord.epoch(), 1);
+    }
+
+    #[test]
+    fn statistics_track_pauses() {
+        let coord = Arc::new(SafepointCoordinator::new(1));
+        let c2 = coord.clone();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let s = stop.clone();
+        let poller = std::thread::spawn(move || {
+            while !s.load(Ordering::Relaxed) {
+                c2.poll();
+                std::thread::sleep(std::time::Duration::from_micros(50));
+            }
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.request_stw_pause(StopReason::GarbageCollection);
+        coord.resume_from_pause();
+        stop.store(true, Ordering::Relaxed);
+        poller.join().unwrap();
+
+        let (total, _time, _max) = coord.stats();
+        assert!(total >= 1, "at least one safepoint recorded");
     }
 }

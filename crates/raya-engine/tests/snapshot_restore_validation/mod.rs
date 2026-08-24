@@ -735,30 +735,22 @@ fn test_byteswap_round_trip() {
 fn test_safepoint_snapshot_coordination() {
     use raya_engine::vm::interpreter::{SafepointCoordinator, StopReason};
 
-    let coord = SafepointCoordinator::new(4);
+    let coord = SafepointCoordinator::new(0);
 
-    // Request snapshot pause
-    coord
-        .snapshot_pending
-        .store(true, std::sync::atomic::Ordering::Release);
+    // G4 epoch protocol: request with zero workers stops immediately.
+    coord.request_stw_pause(StopReason::Snapshot);
 
-    // Verify pause is pending
+    // Verify pause is active
     assert!(coord.is_pause_pending());
-
-    // Set reason
-    {
-        let mut reason = coord.current_reason.lock().unwrap();
-        *reason = Some(StopReason::Snapshot);
-    }
-
     assert_eq!(coord.current_reason(), Some(StopReason::Snapshot));
 
     // Resume from pause
     coord.resume_from_pause();
 
-    // Verify flags cleared
+    // Verify cleared
     assert!(!coord.is_pause_pending());
     assert_eq!(coord.current_reason(), None);
+    assert_eq!(coord.epoch(), 1);
 }
 
 #[test]
