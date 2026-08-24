@@ -2,6 +2,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import ts from "typescript";
 import type { ReadinessFinding, ReadinessReport } from "./types.js";
+import { createContext } from "./context.js";
+import { rules } from "./rules/registry.js";
 
 /**
  * Analyze a TypeScript project for Raya readiness.
@@ -15,15 +17,24 @@ export async function analyzeProject(projectPath: string): Promise<ReadinessRepo
     ? projectPath
     : path.resolve(process.cwd(), projectPath);
 
-  const config = readConfig(absolute);
-  const program = ts.createProgram(config.fileNames, config.options);
-  const _checker = program.getTypeChecker(); // retained: rules consume it from C3 onward
+  const { parsed, configPath } = readConfig(absolute);
+  const program = ts.createProgram(parsed.fileNames, parsed.options);
+  const ctx = createContext(program, path.dirname(configPath));
 
-  const findings: ReadinessFinding[] = []; // no rules registered yet (C1)
+  // Run every registered rule, then order findings deterministically
+  // (file, position, code) so reports are diff-stable across runs.
+  const findings: ReadinessFinding[] = [];
+  for (const rule of rules) {
+    findings.push(...rule.run(ctx));
+  }
+  findings.sort(
+    (a, b) =>
+      a.file.localeCompare(b.file) ||
+      a.start - b.start ||
+      a.code.localeCompare(b.code),
+  );
 
-  const filesAnalyzed = program
-    .getSourceFiles()
-    .filter((sf) => !sf.isDeclarationFile).length;
+  const filesAnalyzed = ctx.sourceFiles.length;
 
   return {
     schemaVersion: 1,
@@ -34,7 +45,7 @@ export async function analyzeProject(projectPath: string): Promise<ReadinessRepo
   };
 }
 
-function readConfig(projectPath: string): ts.ParsedCommandLine {
+function readConfig(projectPath: string): { parsed: ts.ParsedCommandLine; configPath: string } {
   const stat = fs.existsSync(projectPath)
     ? fs.statSync(projectPath)
     : undefined;
@@ -66,7 +77,7 @@ function readConfig(projectPath: string): ts.ParsedCommandLine {
       `config error in ${configPath}: ${ts.flattenDiagnosticMessageText(first.messageText, "\n")}`,
     );
   }
-  return parsed;
+  return { parsed, configPath };
 }
 
 function summarize(findings: ReadinessReport["findings"]): Record<string, number> {
