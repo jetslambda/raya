@@ -402,6 +402,43 @@ impl TypeTables {
     }
 }
 
+impl RuntimeTypeDescriptor {
+    /// Stable textual atom used in canonical signature strings (B3).
+    pub fn atom(&self) -> String {
+        match self {
+            RuntimeTypeDescriptor::I32 => "i32".into(),
+            RuntimeTypeDescriptor::F64 => "f64".into(),
+            RuntimeTypeDescriptor::Bool => "bool".into(),
+            RuntimeTypeDescriptor::String => "string".into(),
+            RuntimeTypeDescriptor::Null => "null".into(),
+            RuntimeTypeDescriptor::Void => "void".into(),
+            RuntimeTypeDescriptor::AnyValue => "any".into(),
+            RuntimeTypeDescriptor::Ref => "ref".into(),
+            RuntimeTypeDescriptor::Object {
+                nominal_id,
+                layout_id,
+            } => format!(
+                "obj({},{})",
+                nominal_id
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "_".into()),
+                layout_id
+            ),
+            RuntimeTypeDescriptor::Array { element } => format!("arr<{}>", element.atom()),
+            RuntimeTypeDescriptor::Tuple { elements } => format!(
+                "tup<{}>",
+                elements
+                    .iter()
+                    .map(|e| e.atom())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            RuntimeTypeDescriptor::Function { signature } => format!("fn#{}", signature.0),
+            RuntimeTypeDescriptor::Task { result } => format!("task<{}>", result.atom()),
+        }
+    }
+}
+
 /// Canonical function signature recorded in bytecode (task R3).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionSignature {
@@ -473,6 +510,55 @@ impl FunctionSignature {
             rest_element,
             flags,
         })
+    }
+
+    /// Canonical textual form, e.g. `(i32, i32) -> i32`.
+    ///
+    /// This shares the hash namespace with checker-derived structural
+    /// signatures only by construction discipline: it is hashed with the
+    /// same SHA-256 pipeline, but strings differ by design (runtime
+    /// descriptors vs type-system syntax).
+    pub fn canonical_string(&self) -> String {
+        let params: Vec<String> = self.params.iter().map(|p| p.atom()).collect();
+        let rest = self
+            .rest_element
+            .as_ref()
+            .map(|r| format!(" ...{}", r.atom()))
+            .unwrap_or_default();
+        format!("({}) -> {}{}", params.join(", "), self.return_type.atom(), rest)
+    }
+
+    /// Content hash over [`canonical_string`], stable across processes.
+    pub fn stable_hash(&self) -> u64 {
+        crate::parser::types::signature_hash(&self.canonical_string())
+    }
+}
+
+/// Fill zero-valued export signature fields from recorded function
+/// signatures (task B3).
+///
+/// Exports whose hash was already produced by the frontend keep it: the
+/// frontend hash participates in the structural-assignability machinery.
+/// This pass guarantees every function export backed by a typed signature
+/// (B1/B2) carries verifiable link data even when the frontend emitted none.
+pub fn attach_function_signature_hashes(module: &mut crate::compiler::bytecode::Module) {
+    use crate::compiler::bytecode::{SymbolType, UNTYPED_SIGNATURE_ID};
+
+    for export in &mut module.exports {
+        if export.symbol_type != SymbolType::Function || export.signature_hash != 0 {
+            continue;
+        }
+        let Some(func) = module.functions.get(export.index) else {
+            continue;
+        };
+        if func.signature_id == UNTYPED_SIGNATURE_ID {
+            continue;
+        }
+        let Some(sig) = module.function_signatures.get(func.signature_id as usize - 1) else {
+            continue;
+        };
+        export.type_signature = Some(sig.canonical_string());
+        export.signature_hash = sig.stable_hash();
     }
 }
 
@@ -581,5 +667,182 @@ mod tests {
             internal_union: None,
         }));
         assert!(runtime_type_of(&ctx, union).is_err());
+    }
+
+    #[test]
+    fn b3_canonical_strings_and_hashes_are_stable() {
+        let sig = FunctionSignature {
+            params: vec![RuntimeTypeDescriptor::I32, RuntimeTypeDescriptor::F64],
+            return_type: RuntimeTypeDescriptor::Bool,
+            rest_element: Some(RuntimeTypeDescriptor::String),
+            flags: FunctionFlags::HAS_REST,
+        };
+        assert_eq!(sig.canonical_string(), "(i32, f64) -> bool ...string");
+        assert_eq!(sig.stable_hash(), sig.stable_hash(), "deterministic");
+
+        let different = FunctionSignature {
+            params: vec![RuntimeTypeDescriptor::F64, RuntimeTypeDescriptor::I32],
+            return_type: RuntimeTypeDescriptor::Bool,
+            rest_element: None,
+            flags: Default::default(),
+        };
+        assert_ne!(sig.stable_hash(), different.stable_hash());
+    }
+
+    #[test]
+    fn b3_attach_fills_only_zero_hash_function_exports() {
+        use crate::compiler::bytecode::{
+            attach_function_signature_hashes, Export, Function, FunctionSignature,
+            RuntimeTypeDescriptor, SymbolScope, SymbolType, UNTYPED_SIGNATURE_ID,
+        };
+
+        let mut module = crate::compiler::bytecode::Module::new("m".into());
+        module.function_signatures.push(FunctionSignature {
+            params: vec![RuntimeTypeDescriptor::I32],
+            return_type: RuntimeTypeDescriptor::I32,
+            rest_element: None,
+            flags: Default::default(),
+        });
+        module.functions.push(Function {
+            name: "inc".into(),
+            param_count: 1,
+            local_count: 1,
+            code: vec![],
+            signature_id: 1,
+            local_types: vec![0],
+            abi_version: 1,
+        });
+        module.functions.push(Function {
+            name: "legacy".into(),
+            param_count: 0,
+            local_count: 0,
+            code: vec![],
+            signature_id: UNTYPED_SIGNATURE_ID,
+            local_types: Vec::new(),
+            abi_version: 1,
+        });
+        module.exports.push(Export {
+            name: "inc".into(),
+            symbol_type: SymbolType::Function,
+            index: 0,
+            symbol_id: 0,
+            scope: SymbolScope::Module,
+            signature_hash: 0,
+            type_signature: None,
+            nominal_type: None,
+        });
+        module.exports.push(Export {
+            name: "legacy".into(),
+            symbol_type: SymbolType::Function,
+            index: 1,
+            symbol_id: 0,
+            scope: SymbolScope::Module,
+            signature_hash: 0,
+            type_signature: None,
+            nominal_type: None,
+        });
+        module.exports.push(Export {
+            name: "frontend".into(),
+            symbol_type: SymbolType::Function,
+            index: 0,
+            symbol_id: 0,
+            scope: SymbolScope::Module,
+            signature_hash: 0xDEADBEEF,
+            type_signature: Some("fn(number) => number".into()),
+            nominal_type: None,
+        });
+
+        attach_function_signature_hashes(&mut module);
+
+        let inc = &module.exports[0];
+        assert_ne!(inc.signature_hash, 0, "typed export filled");
+        assert_eq!(inc.type_signature.as_deref(), Some("(i32) -> i32"));
+
+        assert_eq!(module.exports[1].signature_hash, 0, "untyped stays zero");
+
+        let frontend = &module.exports[2];
+        assert_eq!(
+            frontend.signature_hash, 0xDEADBEEF,
+            "frontend-provided hash preserved"
+        );
+    }
+
+    #[test]
+    fn b3_matching_and_mismatching_links() {
+        use crate::vm::module::ModuleLinker;
+        use crate::compiler::bytecode::{
+            attach_function_signature_hashes, Export, Function, FunctionSignature,
+            Import, Module as BcModule, RuntimeTypeDescriptor, SymbolScope, SymbolType,
+        };
+
+        fn build_exporter() -> BcModule {
+            let mut m = BcModule::new("math".into());
+            m.function_signatures.push(FunctionSignature {
+                params: vec![RuntimeTypeDescriptor::I32, RuntimeTypeDescriptor::I32],
+                return_type: RuntimeTypeDescriptor::I32,
+                rest_element: None,
+                flags: Default::default(),
+            });
+            m.functions.push(Function {
+                name: "add".into(),
+                param_count: 2,
+                local_count: 2,
+                code: vec![],
+                signature_id: 1,
+                local_types: vec![0, 0],
+                abi_version: 1,
+            });
+            let mut export = Export {
+                name: "add".into(),
+                symbol_type: SymbolType::Function,
+                index: 0,
+                symbol_id: 7,
+                scope: SymbolScope::Module,
+                signature_hash: 0,
+                type_signature: None,
+                nominal_type: None,
+            };
+            // simulate the attach pass for a single export
+            let sig = &m.function_signatures[0];
+            export.signature_hash = sig.stable_hash();
+            export.type_signature = Some(sig.canonical_string());
+            m.exports.push(export);
+            m
+        }
+
+        let exporter = build_exporter();
+        let good_hash = exporter.exports[0].signature_hash;
+        let good_string = exporter.exports[0].type_signature.clone().unwrap();
+
+        let mut linker = ModuleLinker::new();
+        linker.add_module(std::sync::Arc::new(exporter)).unwrap();
+
+        let make_import = |hash: u64, ts: Option<String>| Import {
+            module_specifier: "./math".into(),
+            symbol: "add".into(),
+            alias: None,
+            module_id: crate::compiler::bytecode::module_id_from_name("math"),
+            symbol_id: 7,
+            scope: SymbolScope::Module,
+            signature_hash: hash,
+            type_signature: ts,
+            runtime_global_slot: None,
+        };
+
+        // matching hash resolves
+        let mut importer = BcModule::new("app".into());
+        importer.imports.push(make_import(good_hash, Some(good_string.clone())));
+        let resolved = linker.link_module(&importer);
+        assert!(resolved.is_ok(), "matching link failed: {:?}", resolved.err());
+
+        // mismatched hash + incompatible strings must fail naming the symbol
+        let mut bad = BcModule::new("bad".into());
+        bad.imports.push(make_import(
+            crate::parser::types::signature_hash("(f64) -> f64"),
+            Some("(f64) -> f64".into()),
+        ));
+        let err = linker.link_module(&bad).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("add"), "error should name the symbol: {msg}");
     }
 }

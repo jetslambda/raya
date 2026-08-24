@@ -345,6 +345,9 @@ impl<'a> Compiler<'a> {
 
         // Generate bytecode from IR
         let mut bytecode_module = codegen::generate_with_types(&ir_module, need_sourcemap, Some(&self.type_ctx))?;
+        // B3: give function exports verifiable hashes derived from recorded
+        // signatures (frontend-provided hashes are preserved).
+        crate::compiler::bytecode::types::attach_function_signature_hashes(&mut bytecode_module);
         if let Some(module_identity) = &self.module_identity {
             bytecode_module.metadata.name = module_identity.clone();
         }

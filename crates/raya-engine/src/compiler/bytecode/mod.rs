@@ -21,8 +21,8 @@ pub use module::{
 };
 pub use opcode::Opcode;
 pub use types::{
-    runtime_type_of, FunctionFlags, FunctionSignature, FunctionSignatureId,
-    RuntimeTypeDescriptor, RuntimeTypeId, UnsupportedTypeError, CURRENT_ABI_VERSION,
-    UNTYPED_SIGNATURE_ID,
+    attach_function_signature_hashes, runtime_type_of, FunctionFlags, FunctionSignature,
+    FunctionSignatureId, RuntimeTypeDescriptor, RuntimeTypeId, TypeTables,
+    UnsupportedTypeError, CURRENT_ABI_VERSION, UNTYPED_SIGNATURE_ID,
 };
 pub use verify::{verify_module, VerifyError};
