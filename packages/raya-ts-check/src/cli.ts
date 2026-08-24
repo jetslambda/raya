@@ -2,6 +2,8 @@
 import { parseArgs } from "node:util";
 import { analyzeProject } from "./index.js";
 import type { ReadinessSeverity } from "./types.js";
+import { categorize } from "./report.js";
+import { renderPretty } from "./formats/pretty.js";
 
 interface CliOptions {
   project: string;
@@ -56,11 +58,9 @@ async function main(): Promise<void> {
   }
 
   if (options.format === "json") {
-    console.log(JSON.stringify(report, null, 2));
+    console.log(JSON.stringify({ ...report, categories: categorize(report) }, null, 2));
   } else {
-    console.log(`project:         ${report.project}`);
-    console.log(`files analyzed:  ${report.filesAnalyzed}`);
-    console.log(`findings:        ${report.findings.length}`);
+    console.log(renderPretty(report, categorize(report)));
   }
 
   const threshold = SEVERITY_ORDER[options.failOn];

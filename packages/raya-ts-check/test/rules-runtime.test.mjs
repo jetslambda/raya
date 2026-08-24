@@ -4,11 +4,9 @@ import { analyzeProject } from "../dist/index.js";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-const fixtureDir = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "fixtures",
-  "runtime-hazards",
-);
+const here = path.dirname(fileURLToPath(import.meta.url));
+const emptyDir = path.join(here, "fixtures", "empty-project");
+const fixtureDir = path.join(here, "fixtures", "runtime-hazards");
 
 test("runtime hazard rules fire with expected codes and lines", async () => {
   const report = await analyzeProject(fixtureDir);
@@ -43,4 +41,29 @@ test("all findings remain deterministically ordered", async () => {
   const a = await analyzeProject(fixtureDir);
   const b = await analyzeProject(fixtureDir);
   assert.equal(JSON.stringify(a), JSON.stringify(b));
+});
+
+test("category rollups reflect severity per gate", async () => {
+  const { categorize } = await import("../dist/report.js");
+  const report = await analyzeProject(fixtureDir);
+  const cats = categorize(report);
+
+  assert.equal(cats.typeSafety, "warn"); // RT1001/RT1002 warnings present
+  assert.equal(cats.runtimeCompatibility, "fail"); // RT2004 errors
+  assert.equal(cats.jitSpecialization, "unlikely"); // RT2003 jit-stage error
+
+  const empty = await analyzeProject(emptyDir);
+  const emptyCats = categorize(empty);
+  assert.equal(emptyCats.typeSafety, "pass");
+  assert.equal(emptyCats.jitSpecialization, "likely");
+});
+
+test("pretty renderer includes gates and located findings", async () => {
+  const { categorize } = await import("../dist/report.js");
+  const { renderPretty } = await import("../dist/formats/pretty.js");
+  const report = await analyzeProject(fixtureDir);
+  const text = renderPretty(report, categorize(report));
+  assert.ok(text.includes("conversion gates"));
+  assert.ok(text.includes("main.ts:7:"));
+  assert.ok(text.includes("FAIL"));
 });
