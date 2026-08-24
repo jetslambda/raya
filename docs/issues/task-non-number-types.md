@@ -1,6 +1,11 @@
 # Issue: `Task<T>` with Non-Number Types Returns Results Instead of Task IDs
 
 ## Status
+**RESOLVED** (verified 2026-08-24): async-callers of non-number promise
+functions now emit Spawn correctly. Regression guard:
+`crates/raya-runtime/tests/i4_task_types.rs`. Note the reproduction below
+uses `Task<T>` notation; the language type is `Promise<T>`.
+
 **Discovered:** 2026-02-22  
 **Severity:** High  
 **Affects:** Compiler (lowering/codegen)
