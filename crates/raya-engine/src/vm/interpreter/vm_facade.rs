@@ -1148,6 +1148,9 @@ mod tests {
     fn test_const_null() {
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1163,6 +1166,9 @@ mod tests {
     fn test_const_true() {
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1178,6 +1184,9 @@ mod tests {
     fn test_const_false() {
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1193,6 +1202,9 @@ mod tests {
     fn test_const_i32() {
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1209,6 +1221,9 @@ mod tests {
         // 10 + 20 = 30
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1238,6 +1253,9 @@ mod tests {
         // 100 - 25 = 75
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1267,6 +1285,9 @@ mod tests {
         // 6 * 7 = 42
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1296,6 +1317,9 @@ mod tests {
         // 100 / 5 = 20
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1325,6 +1349,9 @@ mod tests {
         // 10 / 0 should error
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1355,6 +1382,9 @@ mod tests {
         // Test DUP: push 42, dup, add
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1382,6 +1412,9 @@ mod tests {
         // return x + y
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 2,
@@ -1423,6 +1456,9 @@ mod tests {
         // 42 == 42
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1452,6 +1488,9 @@ mod tests {
         // 42 != 10
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1481,6 +1520,9 @@ mod tests {
         // 5 < 10
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1511,6 +1553,9 @@ mod tests {
         // Jump operands are i32 (4 bytes).
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1560,6 +1605,9 @@ mod tests {
         // Jump offset of +5 makes IP = 5 + 5 = 10 (start of second CONST_I32)
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1604,6 +1652,9 @@ mod tests {
         // Execute a module, then snapshot — completed tasks should be captured
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1627,6 +1678,9 @@ mod tests {
 
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "test_fn".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1675,6 +1729,9 @@ mod tests {
 
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "test_fn".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1721,6 +1778,9 @@ mod tests {
         let vm_with_task = Vm::new();
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "test_fn".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1794,6 +1854,9 @@ mod tests {
         let mut module = Module::new("test".to_string());
         // Create a simple loop: local x = 0; while(x < 1000) { x = x + 1 }; return x
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 1,
@@ -1850,6 +1913,9 @@ mod tests {
         // Use a simple program and verify profiling lifecycle works
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -1911,6 +1977,9 @@ mod tests {
         // Create a simple module for resolution
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,

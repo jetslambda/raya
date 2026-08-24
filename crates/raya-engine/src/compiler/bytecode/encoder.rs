@@ -19,6 +19,10 @@ pub enum DecodeError {
     /// Invalid opcode
     #[error("Invalid opcode {0} at offset {1}")]
     InvalidOpcode(u8, usize),
+
+    /// Structurally invalid data that is not any known encoding
+    #[error("Corrupted bytecode: {0}")]
+    Corrupted(String),
 }
 
 /// Bytecode writer for encoding instructions

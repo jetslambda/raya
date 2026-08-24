@@ -10,6 +10,8 @@ use raya_engine::jit::analysis::heuristics::function_supported_for_jit;
 
 fn make_module(functions: Vec<Function>) -> Module {
     Module {
+        runtime_types: Vec::new(),
+        function_signatures: Vec::new(),
         magic: *b"RAYA",
         version: 1,
         flags: 0,
@@ -37,6 +39,9 @@ fn make_module(functions: Vec<Function>) -> Module {
 
 fn func(name: &str, code: Vec<u8>, local_count: usize) -> Function {
     Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: name.to_string(),
         param_count: 0,
         local_count,

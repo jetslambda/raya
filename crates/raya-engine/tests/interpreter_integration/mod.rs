@@ -21,6 +21,9 @@ fn test_simple_arithmetic() {
 
     let mut module = Module::new("test".to_string());
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -56,6 +59,9 @@ fn test_local_variables() {
 
     let mut module = Module::new("test".to_string());
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 2,
@@ -100,6 +106,9 @@ fn test_conditional_branch() {
 
     let mut module = Module::new("test".to_string());
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -148,6 +157,9 @@ fn test_subtraction_and_multiplication() {
     // Bytecode: (100 - 50) * 2
     let mut module = Module::new("test".to_string());
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -185,6 +197,9 @@ fn test_division_and_modulo() {
     // Bytecode: 17 / 5 (should be 3 for integer division)
     let mut module = Module::new("test".to_string());
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 2,
@@ -243,6 +258,9 @@ fn test_comparison_operations() {
     // Bytecode: (10 < 20) && (30 > 15)
     let mut module = Module::new("test".to_string());
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -352,6 +370,9 @@ fn test_simple_loop() {
     code.push(Opcode::Return as u8);
 
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 2, // local 0: sum, local 1: i
@@ -370,6 +391,9 @@ fn test_equality_operations() {
     // Bytecode: (42 == 42) && (10 != 20)
     let mut module = Module::new("test".to_string());
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -416,6 +440,9 @@ fn test_boolean_operations() {
     // Bytecode: (true || false) && (!false)
     let mut module = Module::new("test".to_string());
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -445,6 +472,9 @@ fn test_float_arithmetic() {
     // Bytecode: 3.5 + 2.5
     let mut module = Module::new("test".to_string());
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,

@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use crate::compiler::bytecode::{
     Function as BytecodeFunction, Module as BytecodeModule, NominalTypeExport, Opcode,
+    CURRENT_ABI_VERSION, UNTYPED_SIGNATURE_ID,
 };
 use crate::compiler::{
     module_id_from_name, symbol_id_from_name, CompileError, Compiler, Export, Import, SymbolScope,
@@ -711,6 +712,9 @@ impl ModuleCompiler {
                 param_count: 0,
                 local_count: 0,
                 code: vec![Opcode::ConstNull.to_u8(), Opcode::Return.to_u8()],
+                signature_id: UNTYPED_SIGNATURE_ID,
+                local_types: Vec::new(),
+                abi_version: CURRENT_ABI_VERSION,
             });
             bytecode.exports.push(Export {
                 name: exported.name.clone(),
@@ -1184,6 +1188,7 @@ impl ModuleCompiler {
                                     if let Some(exported) = module_exports.symbols.get(&export_name)
                                     {
                                         if exported.scope != SymbolScope::Module {
+
                                             continue;
                                         }
                                         if matches!(
@@ -1427,6 +1432,7 @@ impl ModuleCompiler {
             if let Some(module_scope_id) = Self::top_level_module_scope_id(symbols) {
                 if let Some(symbol) = symbols.resolve_from_scope(local_name, module_scope_id) {
                     if symbols.get_scope(symbol.scope_id).kind == ScopeKind::Module {
+
                         return Some(symbol);
                     }
                 }

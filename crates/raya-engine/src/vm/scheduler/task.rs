@@ -1308,6 +1308,9 @@ mod tests {
     fn create_test_module_named(name: &str) -> Arc<Module> {
         let mut module = Module::new(name.to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "test_fn".to_string(),
             param_count: 0,
             local_count: 0,

@@ -77,6 +77,10 @@ mod tests {
 
     fn make_module() -> crate::compiler::bytecode::Module {
         crate::compiler::bytecode::Module {
+            runtime_types: Vec::new(),
+
+            function_signatures: Vec::new(),
+
             magic: *b"RAYA",
             version: 1,
             flags: 0,

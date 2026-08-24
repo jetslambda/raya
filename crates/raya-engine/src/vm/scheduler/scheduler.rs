@@ -388,6 +388,9 @@ mod tests {
     fn create_test_task(name: &str) -> Arc<Task> {
         let mut module = Module::new("test".to_string());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: name.to_string(),
             param_count: 0,
             local_count: 0,

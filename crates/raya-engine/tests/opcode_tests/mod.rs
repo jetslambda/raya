@@ -37,6 +37,9 @@ use raya_engine::vm::value::Value;
 fn execute_bytecode(code: Vec<u8>) -> Value {
     let mut module = Module::new("test".to_string());
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 4, // Reserve locals for most tests

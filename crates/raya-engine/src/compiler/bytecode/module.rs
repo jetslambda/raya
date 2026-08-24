@@ -2,13 +2,14 @@
 
 use super::constants::ConstantPool;
 use super::encoder::{BytecodeReader, BytecodeWriter, DecodeError};
+use super::types::{FunctionSignature, RuntimeTypeDescriptor};
 use thiserror::Error;
 
 /// Magic number for Raya bytecode files: "RAYA"
 pub const MAGIC: [u8; 4] = *b"RAYA";
 
 /// Current bytecode version
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 
 /// Stable module ID derived from canonical module identity.
 pub type ModuleId = u64;
@@ -162,6 +163,12 @@ pub struct Module {
     /// JIT compilation hints (present when HAS_JIT_HINTS flag is set).
     /// Pre-computed heuristic scores for each candidate function.
     pub jit_hints: Vec<JitHint>,
+    /// Interned runtime type descriptors (v9+). Indexed by descriptor id;
+    /// primitive ids 0-7 are implicit and never stored here.
+    pub runtime_types: Vec<RuntimeTypeDescriptor>,
+    /// Interned function signatures (v9+). Index 0 is reserved for
+    /// UNTYPED_SIGNATURE_ID and must remain empty.
+    pub function_signatures: Vec<FunctionSignature>,
 }
 
 /// Module flags
@@ -642,6 +649,13 @@ pub struct Function {
     pub local_count: usize,
     /// Bytecode instructions
     pub code: Vec<u8>,
+    /// Index into the module's interned signature table.
+    /// `UNTYPED_SIGNATURE_ID` (0) marks functions without recorded signatures.
+    pub signature_id: u32,
+    /// Runtime descriptor id (index into `Module::runtime_types`) per local slot.
+    pub local_types: Vec<u32>,
+    /// Calling-convention ABI version recorded at compile time.
+    pub abi_version: u16,
 }
 
 impl Function {
@@ -658,6 +672,14 @@ impl Function {
         // Write code length and code
         writer.emit_u32(self.code.len() as u32);
         writer.buffer.extend_from_slice(&self.code);
+
+        // Typed-signature data (v9+)
+        writer.emit_u32(self.signature_id);
+        writer.emit_u32(self.local_types.len() as u32);
+        for ty in &self.local_types {
+            writer.emit_u32(*ty);
+        }
+        writer.emit_u16(self.abi_version);
     }
 
     /// Decode function from binary
@@ -673,11 +695,23 @@ impl Function {
         let code_len = reader.read_u32()? as usize;
         let code = reader.read_bytes(code_len)?;
 
+        // Typed-signature data (v9+)
+        let signature_id = reader.read_u32()?;
+        let local_type_count = reader.read_u32()? as usize;
+        let mut local_types = Vec::with_capacity(local_type_count.min(65536));
+        for _ in 0..local_type_count {
+            local_types.push(reader.read_u32()?);
+        }
+        let abi_version = reader.read_u16()?;
+
         Ok(Self {
             name,
             param_count,
             local_count,
             code,
+            signature_id,
+            local_types,
+            abi_version,
         })
     }
 }
@@ -1408,6 +1442,8 @@ impl Module {
             debug_info: None,
             native_functions: Vec::new(),
             jit_hints: Vec::new(),
+            runtime_types: Vec::new(),
+            function_signatures: Vec::new(),
         }
     }
 
@@ -1563,6 +1599,18 @@ impl Module {
             }
         }
 
+        // Encode interned runtime types (v9+)
+        writer.emit_u32(self.runtime_types.len() as u32);
+        for ty in &self.runtime_types {
+            ty.encode(&mut writer);
+        }
+
+        // Encode interned function signatures (v9+)
+        writer.emit_u32(self.function_signatures.len() as u32);
+        for sig in &self.function_signatures {
+            sig.encode(&mut writer);
+        }
+
         // Calculate checksums (of everything after header)
         let payload_start = header_start + 48; // Skip magic + version + flags + crc32 + sha256
         let payload = writer.buffer[payload_start..].to_vec(); // Clone to avoid borrow issues
@@ -1701,6 +1749,20 @@ impl Module {
             Vec::new()
         };
 
+        // Decode interned runtime types (v9+, written after JIT hints)
+        let runtime_type_count = reader.read_u32()? as usize;
+        let mut runtime_types = Vec::with_capacity(runtime_type_count.min(65536));
+        for _ in 0..runtime_type_count {
+            runtime_types.push(RuntimeTypeDescriptor::decode(&mut reader)?);
+        }
+
+        // Decode interned function signatures (v9+)
+        let signature_count = reader.read_u32()? as usize;
+        let mut function_signatures = Vec::with_capacity(signature_count.min(65536));
+        for _ in 0..signature_count {
+            function_signatures.push(FunctionSignature::decode(&mut reader)?);
+        }
+
         Ok(Self {
             magic,
             version,
@@ -1716,6 +1778,8 @@ impl Module {
             debug_info,
             native_functions,
             jit_hints,
+            runtime_types,
+            function_signatures,
         })
     }
 }
@@ -1761,6 +1825,9 @@ mod tests {
         writer.emit_return();
 
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 1,
@@ -1906,6 +1973,9 @@ mod tests {
         writer.emit_return();
 
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "add42".to_string(),
             param_count: 1,
             local_count: 2,

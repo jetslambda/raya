@@ -1969,6 +1969,9 @@ mod tests {
 
     fn make_function(code: Vec<u8>, param_count: u16, local_count: u16) -> Function {
         Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "test".to_string(),
             param_count: param_count as usize,
             local_count: local_count as usize,
@@ -1978,6 +1981,8 @@ mod tests {
 
     fn make_module() -> Module {
         Module {
+            runtime_types: Vec::new(),
+            function_signatures: Vec::new(),
             magic: *b"RAYA",
             version: 1,
             flags: 0,

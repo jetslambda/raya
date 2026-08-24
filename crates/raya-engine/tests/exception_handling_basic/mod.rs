@@ -18,6 +18,9 @@ use raya_engine::vm::{Vm, VmError};
 fn create_module_with_code(code: Vec<u8>) -> Module {
     let mut module = Module::new("test".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 3, // Increased to 3 for tests that need more locals

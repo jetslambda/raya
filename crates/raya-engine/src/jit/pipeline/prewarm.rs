@@ -106,6 +106,8 @@ mod tests {
 
     fn make_module(functions: Vec<Function>) -> Module {
         Module {
+            runtime_types: Vec::new(),
+            function_signatures: Vec::new(),
             magic: *b"RAYA",
             version: 1,
             flags: 0,
@@ -173,12 +175,18 @@ mod tests {
 
         let module = make_module(vec![
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "compute".to_string(),
                 param_count: 0,
                 local_count: 0,
                 code: math_code,
             },
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "trivial".to_string(),
                 param_count: 0,
                 local_count: 0,
@@ -231,6 +239,9 @@ mod tests {
             emit(&mut code, Opcode::Return);
 
             functions.push(Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: format!("func_{}", i),
                 param_count: 0,
                 local_count: 1,

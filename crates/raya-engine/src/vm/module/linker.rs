@@ -437,6 +437,8 @@ mod tests {
 
     fn create_test_module(name: &str) -> Module {
         Module {
+            runtime_types: Vec::new(),
+            function_signatures: Vec::new(),
             magic: *b"RAYA",
             version: 1,
             flags: 0,
@@ -543,6 +545,9 @@ mod tests {
             param_count: 0,
             local_count: 0,
             code: vec![],
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
         });
         module.exports.push(Export {
             name: "f".to_string(),
@@ -686,6 +691,12 @@ mod tests {
         let mut linker = ModuleLinker::new();
         let mut module = create_test_module("typed");
         module.functions.push(crate::compiler::Function {
+            signature_id: 0,
+
+            local_types: Vec::new(),
+
+            abi_version: 1,
+
             name: "f".to_string(),
             param_count: 1,
             local_count: 1,

@@ -27,11 +27,16 @@ fn emit_i32(code: &mut Vec<u8>, val: i32) {
 /// Create a simple module with a "main" function
 fn make_module(code: Vec<u8>, param_count: usize, local_count: usize) -> Module {
     Module {
+        runtime_types: Vec::new(),
+        function_signatures: Vec::new(),
         magic: *b"RAYA",
         version: VERSION,
         flags: 0,
         constants: ConstantPool::new(),
         functions: vec![Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count,
             local_count,

@@ -25,6 +25,9 @@ fn test_safepoint_no_pause() {
     // Test that execution works normally when no pause is pending
     let mut module = Module::new("test".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -57,6 +60,9 @@ fn test_safepoint_polls_during_execution() {
 
     let mut module = Module::new("test".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -93,6 +99,9 @@ fn test_safepoint_on_allocation() {
     let mut module = Module::new("test".to_string());
     module.classes.push(class_def("Point", 2, None));
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 1,
@@ -141,6 +150,9 @@ fn test_safepoint_on_array_allocation() {
 
     let mut module = Module::new("test".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 1,
@@ -217,6 +229,9 @@ fn test_safepoint_pause_and_resume() {
 
     let mut module = Module::new("test".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -244,6 +259,9 @@ fn test_statistics_tracking() {
     assert_eq!(max, 0);
     let mut module = Module::new("test".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -298,6 +316,9 @@ fn test_loop_back_edge_safepoints() {
 
     let mut module = Module::new("test".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -341,6 +362,9 @@ fn test_safepoint_on_object_literal() {
     code.extend_from_slice(&[Opcode::InitObject as u8, 1, 0]);
     code.extend_from_slice(&[Opcode::LoadFieldExact as u8, 0, 0, Opcode::Return as u8]);
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -361,6 +385,9 @@ fn test_safepoint_on_array_literal() {
 
     let mut module = Module::new("test".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -496,6 +523,9 @@ fn test_safepoint_at_all_allocation_types() {
         Opcode::Return as u8,
     ]);
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 4,
@@ -518,6 +548,9 @@ fn test_safepoint_integration_with_gc() {
     let mut module = Module::new("test".to_string());
     module.classes.push(class_def("Point", 2, None));
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,

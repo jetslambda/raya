@@ -115,11 +115,16 @@ mod tests {
 
     fn make_module_with_func(code: Vec<u8>, param_count: usize, local_count: usize) -> Module {
         Module {
+            runtime_types: Vec::new(),
+            function_signatures: Vec::new(),
             magic: *b"RAYA",
             version: 1,
             flags: 0,
             constants: ConstantPool::new(),
             functions: vec![Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "test_func".to_string(),
                 param_count,
                 local_count,
@@ -284,18 +289,26 @@ mod tests {
         emit(&mut code2, Opcode::Return);
 
         let module = Module {
+            runtime_types: Vec::new(),
+            function_signatures: Vec::new(),
             magic: *b"RAYA",
             version: 1,
             flags: 0,
             constants: ConstantPool::new(),
             functions: vec![
                 Function {
+                    signature_id: 0,
+                    local_types: Vec::new(),
+                    abi_version: 1,
                     name: "func_a".to_string(),
                     param_count: 0,
                     local_count: 0,
                     code: code1,
                 },
                 Function {
+                    signature_id: 0,
+                    local_types: Vec::new(),
+                    abi_version: 1,
                     name: "func_b".to_string(),
                     param_count: 0,
                     local_count: 0,

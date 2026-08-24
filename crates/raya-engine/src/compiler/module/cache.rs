@@ -191,6 +191,8 @@ mod tests {
             version: 1,
             flags: 0,
             checksum: [0u8; 32],
+            runtime_types: Vec::new(),
+            function_signatures: Vec::new(),
             constants: crate::compiler::bytecode::ConstantPool::default(),
             functions: vec![],
             classes: vec![],

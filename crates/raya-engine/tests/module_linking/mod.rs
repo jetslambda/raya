@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 fn create_module(name: &str) -> Module {
     Module {
+        runtime_types: Vec::new(),
+        function_signatures: Vec::new(),
         magic: *b"RAYA",
         version: 1,
         flags: 0,
@@ -93,6 +95,9 @@ fn test_link_simple_import() {
     // Create a logging module that exports an "info" function
     let mut logging = create_module("logging");
     logging.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "info".to_string(),
         param_count: 1,
         local_count: 0,
@@ -118,6 +123,9 @@ fn test_link_with_version_specifier() {
     // Create a module
     let mut utils = create_module("utils");
     utils.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "helper".to_string(),
         param_count: 0,
         local_count: 0,
@@ -141,6 +149,9 @@ fn test_link_scoped_package() {
     // Create a scoped package
     let mut org_package = create_module("@org/package");
     org_package.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "doWork".to_string(),
         param_count: 0,
         local_count: 0,
@@ -190,12 +201,18 @@ fn test_link_multiple_imports() {
     // Create utils module with two exports
     let mut utils = create_module("utils");
     utils.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "add".to_string(),
         param_count: 2,
         local_count: 0,
         code: vec![],
     });
     utils.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "multiply".to_string(),
         param_count: 2,
         local_count: 0,
@@ -223,6 +240,9 @@ fn test_link_with_alias() {
 
     let mut utils = create_module("utils");
     utils.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "log".to_string(),
         param_count: 1,
         local_count: 0,
@@ -247,12 +267,18 @@ fn test_link_prefers_symbol_id_over_name() {
     // Two exports intentionally share the same textual name.
     let mut dup = create_module("dup_mod");
     dup.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "f0".to_string(),
         param_count: 0,
         local_count: 0,
         code: vec![],
     });
     dup.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "f1".to_string(),
         param_count: 0,
         local_count: 0,
@@ -306,6 +332,9 @@ fn test_link_type_symbol_mismatch() {
     let mut linker = ModuleLinker::new();
     let mut typed = create_module("typed");
     typed.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "fn1".to_string(),
         param_count: 0,
         local_count: 0,
@@ -352,6 +381,9 @@ fn test_link_type_hash_diff_but_structurally_assignable() {
     let mut linker = ModuleLinker::new();
     let mut typed = create_module("typed");
     typed.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "fn1".to_string(),
         param_count: 0,
         local_count: 0,
@@ -391,6 +423,9 @@ fn test_link_scope_mismatch() {
     let mut linker = ModuleLinker::new();
     let mut scoped = create_module("scoped");
     scoped.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "global_like".to_string(),
         param_count: 0,
         local_count: 0,
@@ -432,12 +467,18 @@ fn test_add_module_rejects_duplicate_symbol_ids() {
     let mut linker = ModuleLinker::new();
     let mut module = create_module("dup_ids");
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "f0".to_string(),
         param_count: 0,
         local_count: 0,
         code: vec![],
     });
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "f1".to_string(),
         param_count: 0,
         local_count: 0,

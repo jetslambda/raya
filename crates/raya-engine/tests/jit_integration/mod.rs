@@ -160,11 +160,16 @@ fn is_null(val: u64) -> bool {
 
 fn make_module(code: Vec<u8>, param_count: usize, local_count: usize) -> Module {
     Module {
+        runtime_types: Vec::new(),
+        function_signatures: Vec::new(),
         magic: *b"RAYA",
         version: VERSION,
         flags: 0,
         constants: ConstantPool::new(),
         functions: vec![Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "test_func".to_string(),
             param_count,
             local_count,
@@ -193,11 +198,16 @@ fn make_module(code: Vec<u8>, param_count: usize, local_count: usize) -> Module 
 /// Make a module with a "main" function (required by Vm::execute)
 fn make_vm_module(code: Vec<u8>, param_count: usize, local_count: usize) -> Module {
     Module {
+        runtime_types: Vec::new(),
+        function_signatures: Vec::new(),
         magic: *b"RAYA",
         version: VERSION,
         flags: 0,
         constants: ConstantPool::new(),
         functions: vec![Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count,
             local_count,
@@ -225,6 +235,8 @@ fn make_vm_module(code: Vec<u8>, param_count: usize, local_count: usize) -> Modu
 
 fn make_custom_module(functions: Vec<Function>, classes: Vec<ClassDef>) -> Module {
     Module {
+        runtime_types: Vec::new(),
+        function_signatures: Vec::new(),
         magic: *b"RAYA",
         version: VERSION,
         flags: 0,
@@ -698,12 +710,18 @@ fn jit_call_executes_sync_callee_via_runtime_helper() {
     let module = finalize_module(make_custom_module(
         vec![
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "main".to_string(),
                 param_count: 0,
                 local_count: 0,
                 code: main_code,
             },
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "add".to_string(),
                 param_count: 2,
                 local_count: 2,
@@ -756,12 +774,18 @@ fn jit_call_static_executes_sync_callee_via_runtime_helper() {
     let module = finalize_module(make_custom_module(
         vec![
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "main".to_string(),
                 param_count: 0,
                 local_count: 0,
                 code: main_code,
             },
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "add".to_string(),
                 param_count: 2,
                 local_count: 2,
@@ -911,12 +935,18 @@ fn jit_call_method_exact_executes_via_runtime_helper() {
     let module = finalize_module(make_custom_module(
         vec![
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "main".to_string(),
                 param_count: 0,
                 local_count: 0,
                 code: main_code,
             },
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "value".to_string(),
                 param_count: 1,
                 local_count: 1,
@@ -978,12 +1008,18 @@ fn jit_call_method_shape_executes_via_runtime_helper() {
     let module = finalize_module(make_custom_module(
         vec![
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "main".to_string(),
                 param_count: 0,
                 local_count: 0,
                 code: main_code,
             },
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "value".to_string(),
                 param_count: 1,
                 local_count: 1,
@@ -1045,12 +1081,18 @@ fn jit_construct_type_executes_constructor_via_runtime_helper() {
     let module = finalize_module(make_custom_module(
         vec![
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "main".to_string(),
                 param_count: 0,
                 local_count: 0,
                 code: main_code,
             },
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "Target::constructor".to_string(),
                 param_count: 1,
                 local_count: 1,
@@ -1120,12 +1162,18 @@ fn jit_call_constructor_executes_via_runtime_helper() {
     let module = finalize_module(make_custom_module(
         vec![
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "main".to_string(),
                 param_count: 0,
                 local_count: 0,
                 code: main_code,
             },
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "Target::constructor".to_string(),
                 param_count: 1,
                 local_count: 1,
@@ -1198,12 +1246,18 @@ fn jit_call_super_executes_via_runtime_helper() {
     let module = finalize_module(make_custom_module(
         vec![
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "main".to_string(),
                 param_count: 0,
                 local_count: 0,
                 code: main_code,
             },
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "Parent::constructor".to_string(),
                 param_count: 1,
                 local_count: 1,
@@ -3613,18 +3667,26 @@ fn engine_prewarm_selects_hot() {
     emit(&mut heavy_code, Opcode::Return);
 
     let module = Module {
+        runtime_types: Vec::new(),
+        function_signatures: Vec::new(),
         magic: *b"RAYA",
         version: VERSION,
         flags: 0,
         constants: ConstantPool::new(),
         functions: vec![
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "trivial".to_string(),
                 param_count: 0,
                 local_count: 0,
                 code: trivial_code,
             },
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "heavy_math".to_string(),
                 param_count: 0,
                 local_count: 0,
@@ -3866,11 +3928,16 @@ fn background_compiler_processes_request() {
     emit(&mut func_code, Opcode::Return);
 
     let module = Arc::new(Module {
+        runtime_types: Vec::new(),
+        function_signatures: Vec::new(),
         magic: *b"RAYA",
         version: VERSION,
         flags: 0,
         constants: ConstantPool::new(),
         functions: vec![Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "hot_func".to_string(),
             param_count: 0,
             local_count: 0,
@@ -3944,18 +4011,26 @@ fn jit_hints_encode_decode_roundtrip() {
 
     // Create a module with JIT hints
     let mut module = Module {
+        runtime_types: Vec::new(),
+        function_signatures: Vec::new(),
         magic: *b"RAYA",
         version: VERSION,
         flags: flags::HAS_JIT_HINTS,
         constants: ConstantPool::new(),
         functions: vec![
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "hot_func".to_string(),
                 param_count: 0,
                 local_count: 0,
                 code: vec![Opcode::Return as u8],
             },
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "cold_func".to_string(),
                 param_count: 0,
                 local_count: 0,
@@ -4013,11 +4088,16 @@ fn jit_hints_encode_decode_roundtrip() {
 fn jit_hints_absent_when_no_flag() {
     // Module without HAS_JIT_HINTS flag should decode with empty hints
     let module = Module {
+        runtime_types: Vec::new(),
+        function_signatures: Vec::new(),
         magic: *b"RAYA",
         version: VERSION,
         flags: 0,
         constants: ConstantPool::new(),
         functions: vec![Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,
@@ -4104,11 +4184,16 @@ fn prewarm_candidates_submitted_to_background() {
     emit(&mut heavy_code, Opcode::Return);
 
     let module = Module {
+        runtime_types: Vec::new(),
+        function_signatures: Vec::new(),
         magic: *b"RAYA",
         version: VERSION,
         flags: 0,
         constants: ConstantPool::new(),
         functions: vec![Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "main".to_string(),
             param_count: 0,
             local_count: 0,

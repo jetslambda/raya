@@ -13,6 +13,9 @@ use std::time::Duration;
 fn create_simple_task(name: &str, result: i32) -> Arc<Task> {
     let mut module = Module::new("test".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: name.to_string(),
         param_count: 0,
         local_count: 0,
@@ -102,6 +105,9 @@ fn create_compute_task(name: &str, iterations: u32) -> Arc<Task> {
     code.push(Opcode::Return as u8);
 
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: name.to_string(),
         param_count: 0,
         local_count: 2, // counter and result

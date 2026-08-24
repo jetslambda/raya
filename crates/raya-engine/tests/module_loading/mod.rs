@@ -15,6 +15,9 @@ fn create_test_module(name: &str) -> Module {
 
     // Add a simple function
     let func = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "test_func".to_string(),
         param_count: 0,
         local_count: 0,
@@ -255,6 +258,9 @@ fn test_e2e_load_then_execute_simple() {
     // Build a module that returns 42
     let mut module = Module::new("e2e_simple".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -272,6 +278,9 @@ fn test_e2e_load_then_execute_arithmetic() {
     // Build: 7 * 8 = 56
     let mut module = Module::new("e2e_arith".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -302,6 +311,9 @@ fn test_e2e_load_then_execute_with_locals() {
     // let x = 100; let y = 23; return x - y  →  77
     let mut module = Module::new("e2e_locals".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 2,
@@ -345,6 +357,9 @@ fn test_e2e_load_then_execute_with_string_constant() {
     let mut module = Module::new("e2e_string".to_string());
     let idx = module.constants.add_string("hello world".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -371,6 +386,9 @@ fn test_e2e_load_then_execute_multi_function_call() {
 
     // Function 0: add_ten  (param_count=1, local_count=1 for the param)
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "add_ten".to_string(),
         param_count: 1,
         local_count: 1,
@@ -390,6 +408,9 @@ fn test_e2e_load_then_execute_multi_function_call() {
 
     // Function 1: main
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -422,6 +443,9 @@ fn test_e2e_load_then_execute_multi_function_call() {
 fn test_registry_tracks_loaded_module() {
     let mut module = Module::new("tracked_module".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "f".to_string(),
         param_count: 0,
         local_count: 0,
@@ -445,6 +469,9 @@ fn test_registry_tracks_multiple_modules() {
         let name = format!("mod_{}", i);
         let mut module = Module::new(name.clone());
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "f".to_string(),
             param_count: 0,
             local_count: 0,
@@ -476,6 +503,9 @@ fn test_registry_tracks_multiple_modules() {
 fn test_registry_deduplicates_same_module() {
     let mut module = Module::new("dedup_mod".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "f".to_string(),
         param_count: 0,
         local_count: 0,
@@ -518,6 +548,9 @@ fn test_e2e_load_module_with_class() {
 
     // A simple main function
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -544,6 +577,9 @@ fn test_e2e_load_module_with_class_hierarchy() {
 
     // Function 0: base_method (for parent)
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "base_method".to_string(),
         param_count: 0,
         local_count: 0,
@@ -552,6 +588,9 @@ fn test_e2e_load_module_with_class_hierarchy() {
 
     // Function 1: override_method (for child)
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "override_method".to_string(),
         param_count: 0,
         local_count: 0,
@@ -560,6 +599,9 @@ fn test_e2e_load_module_with_class_hierarchy() {
 
     // Function 2: main
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -623,6 +665,9 @@ fn test_load_rbin_file() {
 
     let mut module = Module::new("file_mod".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -662,6 +707,9 @@ fn test_e2e_exports_survive_encode_decode() {
 
     let mut module = Module::new("export_mod".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "add".to_string(),
         param_count: 2,
         local_count: 2,
@@ -677,6 +725,9 @@ fn test_e2e_exports_survive_encode_decode() {
         ],
     });
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -718,6 +769,9 @@ fn test_e2e_exports_survive_encode_decode() {
 fn test_e2e_imports_survive_encode_decode() {
     let mut module = Module::new("import_mod".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -762,6 +816,9 @@ fn test_e2e_constant_pool_survives_encode_decode() {
     module.constants.add_float(3.14);
 
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -788,6 +845,9 @@ fn test_e2e_snapshot_with_loaded_module() {
     // Create and encode a module
     let mut module = Module::new("snap_mod".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -817,6 +877,9 @@ fn test_e2e_snapshot_file_round_trip_with_module() {
     // Same as above but using file-based snapshot
     let mut module = Module::new("snap_file_mod".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -848,6 +911,9 @@ fn test_e2e_snapshot_file_round_trip_with_module() {
 fn test_e2e_execute_module_without_main() {
     let mut module = Module::new("no_main".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "helper".to_string(),
         param_count: 0,
         local_count: 0,
@@ -867,6 +933,9 @@ fn test_e2e_execute_module_without_main() {
 fn test_e2e_version_preserved_in_encode_decode() {
     let mut module = Module::new("version_test".to_string());
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -885,6 +954,9 @@ fn test_e2e_version_preserved_in_encode_decode() {
 fn test_e2e_checksum_differs_for_different_modules() {
     let mut m1 = Module::new("mod_a".to_string());
     m1.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -893,6 +965,9 @@ fn test_e2e_checksum_differs_for_different_modules() {
 
     let mut m2 = Module::new("mod_b".to_string());
     m2.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,

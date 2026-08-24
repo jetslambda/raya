@@ -30,6 +30,9 @@ fn test_object_creation_and_field_access() {
     let mut module = Module::new("test".to_string());
     module.classes.push(class_def("Point", 2, None));
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 1,
@@ -86,6 +89,9 @@ fn test_array_creation_and_access() {
     // Bytecode: arr = new Array(3), arr[0]=10, arr[1]=20, arr[2]=30, return arr[1]
     let mut module = Module::new("test".to_string());
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 1,
@@ -174,6 +180,9 @@ fn test_array_length() {
     // Bytecode: arr = new Array(5), return arr.length
     let mut module = Module::new("test".to_string());
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 1,
@@ -217,6 +226,9 @@ fn test_multiple_objects() {
     module.classes.push(class_def("Point", 2, None));
     module.classes.push(class_def("Rectangle", 4, None));
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 2,
@@ -310,6 +322,9 @@ fn test_object_with_gc() {
     let mut module = Module::new("test".to_string());
     module.classes.push(class_def("Point", 2, None));
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 1,
@@ -368,6 +383,9 @@ fn test_object_literal() {
     code.extend_from_slice(&[Opcode::InitObject as u8, 1, 0]);
     code.extend_from_slice(&[Opcode::LoadFieldExact as u8, 0, 0, Opcode::Return as u8]);
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -386,6 +404,9 @@ fn test_array_literal() {
     // So we push elements first: [10, 20, 30]
     let mut module = Module::new("test".to_string());
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -443,6 +464,9 @@ fn test_static_fields() {
     let mut module = Module::new("test".to_string());
     module.classes.push(class_def("Counter", 2, None));
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -504,6 +528,9 @@ fn test_optional_field_non_null() {
     let mut module = Module::new("test".to_string());
     module.classes.push(class_def("Point", 2, None));
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 1,
@@ -549,6 +576,9 @@ fn test_optional_field_null() {
     let mut vm = Vm::new();
     let mut module = Module::new("test".to_string());
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -578,6 +608,9 @@ fn test_constructor_no_args() {
 
     // Main function: calls constructor with no args
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 1,
@@ -620,6 +653,9 @@ fn test_constructor_no_args() {
 
     // Empty constructor
     let constructor_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "Point::constructor".to_string(),
         param_count: 1, // just this
         local_count: 1, // total locals = 1 (this only)
@@ -645,6 +681,9 @@ fn test_constructor_basic() {
 
     // Main function: calls constructor with args 10, 20
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 1,
@@ -686,6 +725,9 @@ fn test_constructor_basic() {
 
     // Constructor function: initializes fields from args
     let constructor_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "Point::constructor".to_string(),
         param_count: 3, // this + 2 args
         local_count: 3, // total locals = 3 (this + x + y)
@@ -736,6 +778,9 @@ fn test_call_super() {
 
     // Main function: creates Circle(5, "red")
     let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 1,
@@ -777,6 +822,9 @@ fn test_call_super() {
 
     // Shape constructor: sets color
     let shape_constructor = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "Shape::constructor".to_string(),
         param_count: 2, // this + color
         local_count: 2, // total locals = 2 (this + color)
@@ -799,6 +847,9 @@ fn test_call_super() {
 
     // Circle constructor: calls super, then sets radius
     let circle_constructor = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "Circle::constructor".to_string(),
         param_count: 3, // this + radius + color
         local_count: 3, // total locals = 3 (this + radius + color)

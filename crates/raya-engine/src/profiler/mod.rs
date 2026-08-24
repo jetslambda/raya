@@ -421,6 +421,12 @@ mod tests {
     fn test_resolve_frame_without_debug_info() {
         let mut module = Module::new("test".to_string());
         module.functions.push(crate::compiler::Function {
+            signature_id: 0,
+
+            local_types: Vec::new(),
+
+            abi_version: 1,
+
             name: "my_func".to_string(),
             param_count: 0,
             local_count: 0,
@@ -439,6 +445,12 @@ mod tests {
 
         let mut module = Module::new("test".to_string());
         module.functions.push(crate::compiler::Function {
+            signature_id: 0,
+
+            local_types: Vec::new(),
+
+            abi_version: 1,
+
             name: "fibonacci".to_string(),
             param_count: 1,
             local_count: 1,

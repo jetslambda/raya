@@ -1,6 +1,6 @@
 //! Module builder for constructing bytecode modules
 
-use crate::compiler::bytecode::{ClassDef, Function, Module, Opcode};
+use crate::compiler::bytecode::{ClassDef, Function, Module, Opcode, CURRENT_ABI_VERSION, UNTYPED_SIGNATURE_ID};
 use crate::compiler::error::{CompileError, CompileResult};
 use rustc_hash::FxHashMap;
 
@@ -73,6 +73,8 @@ pub struct FunctionBuilder {
     code: Vec<u8>,
     local_count: u16,
     locals: FxHashMap<String, u16>,
+    signature_id: u32,
+    local_types: Vec<u32>,
 }
 
 impl FunctionBuilder {
@@ -89,7 +91,9 @@ impl FunctionBuilder {
             code: Vec::new(),
             local_count: param_count as u16,
             locals,
-        }
+            signature_id: UNTYPED_SIGNATURE_ID,
+            local_types: Vec::new(),
+}
     }
 
     /// Allocate a new local variable, returning its index
@@ -164,12 +168,23 @@ impl FunctionBuilder {
     }
 
     /// Build the final function
+    /// Record a typed signature for this function.
+    ///
+    /// `local_types` holds one runtime-descriptor id per local slot.
+    pub fn set_signature(&mut self, signature_id: u32, local_types: Vec<u32>) {
+        self.signature_id = signature_id;
+        self.local_types = local_types;
+    }
+
     pub fn build(self) -> Function {
         Function {
             name: self.name,
             param_count: self.param_count as usize,
             local_count: self.local_count as usize,
             code: self.code,
+            signature_id: self.signature_id,
+            local_types: self.local_types,
+            abi_version: CURRENT_ABI_VERSION,
         }
     }
 }

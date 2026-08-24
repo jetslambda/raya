@@ -18,6 +18,9 @@ fn create_module_with_task(task_result: i32) -> Module {
 
     // Function 0: task that returns a value
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "task".to_string(),
         param_count: 0,
         local_count: 0,
@@ -33,6 +36,9 @@ fn create_module_with_task(task_result: i32) -> Module {
 
     // Function 1: main that spawns and awaits the task
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -58,6 +64,9 @@ fn create_module_with_multiple_tasks() -> Module {
 
     // Function 0: task1 returns 10
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "task1".to_string(),
         param_count: 0,
         local_count: 0,
@@ -66,6 +75,9 @@ fn create_module_with_multiple_tasks() -> Module {
 
     // Function 1: task2 returns 20
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "task2".to_string(),
         param_count: 0,
         local_count: 0,
@@ -74,6 +86,9 @@ fn create_module_with_multiple_tasks() -> Module {
 
     // Function 2: task3 returns 30
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "task3".to_string(),
         param_count: 0,
         local_count: 0,
@@ -82,6 +97,9 @@ fn create_module_with_multiple_tasks() -> Module {
 
     // Function 3: main spawns all three tasks and awaits them
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 3, // Store 3 TaskIds
@@ -178,6 +196,9 @@ fn create_module_with_compute_task(iterations: u32) -> Module {
     compute_code.push(Opcode::Return as u8);
 
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "compute".to_string(),
         param_count: 0,
         local_count: 2, // counter, result
@@ -186,6 +207,9 @@ fn create_module_with_compute_task(iterations: u32) -> Module {
 
     // Function 1: main spawns and awaits compute task
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -287,6 +311,9 @@ fn test_spawn_await_with_scheduler_stress() {
 
     // Function 0: simple task
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "task".to_string(),
         param_count: 0,
         local_count: 0,
@@ -319,6 +346,9 @@ fn test_spawn_await_with_scheduler_stress() {
     main_code.push(Opcode::Return as u8);
 
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 10, // Store 10 TaskIds
@@ -338,6 +368,9 @@ fn test_nested_task_spawning() {
 
     // Function 0: leaf task returns 5
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "leaf".to_string(),
         param_count: 0,
         local_count: 0,
@@ -346,6 +379,9 @@ fn test_nested_task_spawning() {
 
     // Function 1: middle task spawns leaf and doubles result
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "middle".to_string(),
         param_count: 0,
         local_count: 0,
@@ -363,6 +399,9 @@ fn test_nested_task_spawning() {
 
     // Function 2: main spawns middle task
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,
@@ -388,6 +427,9 @@ fn test_spawn_await_returns_null() {
 
     // Function 0: task with no explicit return
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "task".to_string(),
         param_count: 0,
         local_count: 0,
@@ -396,6 +438,9 @@ fn test_spawn_await_returns_null() {
 
     // Function 1: main
     module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
         name: "main".to_string(),
         param_count: 0,
         local_count: 0,

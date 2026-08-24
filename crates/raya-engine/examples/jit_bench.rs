@@ -82,6 +82,8 @@ fn patch_jump(code: &mut [u8], jump_pos: usize, target_pos: usize) {
 
 fn make_module(name: &str, functions: Vec<Function>) -> Module {
     Module {
+        runtime_types: Vec::new(),
+        function_signatures: Vec::new(),
         magic: *b"RAYA",
         version: 1,
         flags: 0,
@@ -609,6 +611,9 @@ fn main() {
         let module = make_module(
             "bench",
             vec![Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "bench_fn".to_string(),
                 param_count: 0,
                 local_count: 0,
@@ -633,6 +638,9 @@ fn main() {
         let module = make_module(
             "bench",
             vec![Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "bench_fn".to_string(),
                 param_count: 0,
                 local_count: 0,
@@ -663,6 +671,9 @@ fn main() {
         let module = make_module(
             "bench",
             vec![Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "bench_fn".to_string(),
                 param_count: 0,
                 local_count: 1,
@@ -698,6 +709,9 @@ fn main() {
         let module = make_module(
             "bench",
             vec![Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "main".to_string(),
                 param_count: 0,
                 local_count: 1,
@@ -731,6 +745,9 @@ fn main() {
         for i in 0..func_count {
             let code = build_arithmetic_workload(50);
             functions.push(Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: format!("func_{}", i),
                 param_count: 0,
                 local_count: 0,
@@ -775,6 +792,9 @@ fn main() {
         let jit_module = make_module(
             "bench",
             vec![Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "bench_fn".to_string(),
                 param_count: 0,
                 local_count: 1,
@@ -794,6 +814,9 @@ fn main() {
         let interp_module = make_module(
             "bench",
             vec![Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "main".to_string(),
                 param_count: 0,
                 local_count: 1,
@@ -845,6 +868,9 @@ fn main() {
         let module = make_module(
             "bench",
             vec![Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "bench_fn".to_string(),
                 param_count: 0,
                 local_count: 0,
@@ -915,6 +941,9 @@ fn main() {
         let interp_module = make_module(
             "verify",
             vec![Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "main".to_string(),
                 param_count: 0,
                 local_count: 0,
@@ -927,6 +956,9 @@ fn main() {
         let jit_module = make_module(
             "verify",
             vec![Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "bench_fn".to_string(),
                 param_count: 0,
                 local_count: 0,
@@ -978,6 +1010,9 @@ fn main() {
         let jit_module = make_module(
             "bench",
             vec![Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "bench_fn".to_string(),
                 param_count: 0,
                 local_count: 3,
@@ -988,6 +1023,9 @@ fn main() {
         let interp_module = make_module(
             "bench",
             vec![Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "main".to_string(),
                 param_count: 0,
                 local_count: 3,
@@ -1051,6 +1089,9 @@ fn main() {
         let jit_module = make_module(
             "bench",
             vec![Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "bench_fn".to_string(),
                 param_count: 0,
                 local_count: 5,
@@ -1061,6 +1102,9 @@ fn main() {
         let interp_module = make_module(
             "bench",
             vec![Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "main".to_string(),
                 param_count: 0,
                 local_count: 5,

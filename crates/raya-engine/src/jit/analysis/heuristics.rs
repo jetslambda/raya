@@ -324,6 +324,8 @@ mod tests {
 
     fn make_module(functions: Vec<Function>) -> Module {
         Module {
+            runtime_types: Vec::new(),
+            function_signatures: Vec::new(),
             magic: *b"RAYA",
             version: 1,
             flags: 0,
@@ -378,6 +380,9 @@ mod tests {
         emit(&mut code, Opcode::Return);
 
         let func = Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "trivial".to_string(),
             param_count: 0,
             local_count: 0,
@@ -435,6 +440,9 @@ mod tests {
         emit(&mut code, Opcode::Return);
 
         let func = Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "math_loop".to_string(),
             param_count: 0,
             local_count: 3,
@@ -466,6 +474,9 @@ mod tests {
         emit(&mut code, Opcode::Return);
 
         let func = Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "spawner".to_string(),
             param_count: 0,
             local_count: 0,
@@ -526,18 +537,27 @@ mod tests {
 
         let module = make_module(vec![
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "compute".to_string(),
                 param_count: 0,
                 local_count: 3,
                 code: math_code,
             },
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "trivial".to_string(),
                 param_count: 0,
                 local_count: 0,
                 code: trivial_code,
             },
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "io_bound".to_string(),
                 param_count: 0,
                 local_count: 0,
@@ -579,6 +599,9 @@ mod tests {
         emit(&mut code, Opcode::Return);
 
         let func = Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "float_compute".to_string(),
             param_count: 0,
             local_count: 0,
@@ -601,6 +624,9 @@ mod tests {
     #[test]
     fn test_empty_function() {
         let func = Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "empty".to_string(),
             param_count: 0,
             local_count: 0,
@@ -640,12 +666,18 @@ mod tests {
 
         let module = make_module(vec![
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "slower".to_string(),
                 param_count: 0,
                 local_count: 0,
                 code: slow_code,
             },
             Function {
+                signature_id: 0,
+                local_types: Vec::new(),
+                abi_version: 1,
                 name: "faster".to_string(),
                 param_count: 0,
                 local_count: 0,
@@ -682,6 +714,9 @@ mod tests {
         emit(&mut code, Opcode::Return);
 
         let func = Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "loop".to_string(),
             param_count: 0,
             local_count: 1,
@@ -697,6 +732,9 @@ mod tests {
         emit(&mut code, Opcode::Return);
 
         let func = Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "caller".to_string(),
             param_count: 0,
             local_count: 0,
@@ -713,6 +751,9 @@ mod tests {
         emit(&mut code, Opcode::Return);
 
         let func = Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "spawner".to_string(),
             param_count: 0,
             local_count: 0,

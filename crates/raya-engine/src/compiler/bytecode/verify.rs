@@ -641,6 +641,9 @@ mod tests {
         writer.emit_return();
 
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "test".to_string(),
             param_count: 0,
             local_count: 1,
@@ -655,6 +658,9 @@ mod tests {
         let mut module = Module::new("test".to_string());
 
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "test".to_string(),
             param_count: 0,
             local_count: 0,
@@ -674,6 +680,9 @@ mod tests {
         writer.emit_return();
 
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "test".to_string(),
             param_count: 0,
             local_count: 0,
@@ -693,6 +702,9 @@ mod tests {
         writer.emit_return();
 
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "test".to_string(),
             param_count: 0,
             local_count: 2,
@@ -714,6 +726,9 @@ mod tests {
         writer.emit_return();
 
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "test".to_string(),
             param_count: 2,
             local_count: 3,
@@ -732,6 +747,9 @@ mod tests {
         // Missing return!
 
         module.functions.push(Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "test".to_string(),
             param_count: 0,
             local_count: 0,

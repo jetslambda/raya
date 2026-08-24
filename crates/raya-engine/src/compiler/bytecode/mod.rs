@@ -7,6 +7,7 @@ pub mod constants;
 pub mod encoder;
 pub mod module;
 pub mod opcode;
+pub mod types;
 pub mod verify;
 
 pub use constants::ConstantPool;
@@ -19,4 +20,9 @@ pub use module::{
     SymbolScope, SymbolType, TemplateSymbolEntry, TypeSignatureHash, VERSION,
 };
 pub use opcode::Opcode;
+pub use types::{
+    runtime_type_of, FunctionFlags, FunctionSignature, FunctionSignatureId,
+    RuntimeTypeDescriptor, RuntimeTypeId, UnsupportedTypeError, CURRENT_ABI_VERSION,
+    UNTYPED_SIGNATURE_ID,
+};
 pub use verify::{verify_module, VerifyError};

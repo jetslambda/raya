@@ -47,6 +47,9 @@ mod tests {
 
     fn make_function(code: Vec<u8>) -> Function {
         Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
             name: "f".to_string(),
             param_count: 0,
             local_count: 0,
