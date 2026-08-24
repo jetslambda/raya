@@ -338,6 +338,18 @@ impl GarbageCollector {
         let type_registry = self.heap.type_registry();
 
         if let Some(type_info) = type_registry.get(type_id) {
+            // G1: precise trace callback takes precedence. Required for
+            // payloads holding Vec<Value> or hash maps (closures, ref cells,
+            // maps, sets, proxies) that static offset maps cannot describe.
+            if let Some(trace) = type_info.trace_fn {
+                let mut children: Vec<Value> = Vec::new();
+                unsafe { trace(ptr, &mut |v| children.push(v)) };
+                for child in children {
+                    self.mark_value(child);
+                }
+                return;
+            }
+
             // Special handling for Object and Array types (dynamic field counts)
             let type_name = type_info.name;
             match type_name {
@@ -555,5 +567,140 @@ mod tests {
 
         let stats = gc.heap_stats();
         assert_eq!(stats.allocation_count, 1);
+    }
+}
+
+#[cfg(test)]
+mod g3_graph_tests {
+    //! Forced-collection reachability tests (task G3): every managed payload
+    //! kind must keep its children alive through collection when itself
+    //! rooted, and cycles must be reclaimed when unrooted.
+
+    use super::*;
+    use crate::vm::object::{Closure, MapObject, Proxy, RefCell, RayaString, SetObject};
+    use crate::vm::value::Value;
+    use std::collections::HashMap;
+
+    fn value_of<T: 'static>(gc: &mut GarbageCollector, t: T) -> Value {
+        let ptr = gc.allocate(t);
+        unsafe { Value::from_ptr(std::ptr::NonNull::new(ptr.as_ptr()).unwrap()) }
+    }
+
+    fn live_count(gc: &GarbageCollector) -> usize {
+        gc.heap_stats().allocation_count
+    }
+
+    #[test]
+    fn closure_captures_survive_forced_collection() {
+        let mut gc = GarbageCollector::default();
+
+        let captured = value_of(&mut gc, RayaString::new("captured".to_string()));
+        let closure = value_of(&mut gc, Closure::new(0, vec![captured]));
+
+        // Root ONLY the closure; the captured string is reachable solely
+        // through Closure.captures.
+        gc.add_root(closure);
+        gc.collect();
+
+        assert_eq!(
+            live_count(&gc),
+            2,
+            "closure and its capture must both survive"
+        );
+    }
+
+    #[test]
+    fn ref_cell_target_survives_forced_collection() {
+        let mut gc = GarbageCollector::default();
+        let inner = value_of(&mut gc, RayaString::new("cell".to_string()));
+        let cell = value_of(&mut gc, RefCell::new(inner));
+
+        gc.add_root(cell);
+        gc.collect();
+
+        assert_eq!(live_count(&gc), 2, "ref cell target must survive");
+    }
+
+    #[test]
+    fn map_keys_and_values_survive_forced_collection() {
+        let mut gc = GarbageCollector::default();
+        let key = value_of(&mut gc, RayaString::new("key".to_string()));
+        let val = value_of(&mut gc, RayaString::new("value".to_string()));
+
+        let mut map = MapObject::new();
+        map.inner.insert(crate::vm::object::HashableValue(key), val);
+        let map_val = value_of(&mut gc, map);
+
+        gc.add_root(map_val);
+        gc.collect();
+
+        // map + key + value
+        assert_eq!(live_count(&gc), 3, "map keys and values must survive");
+    }
+
+    #[test]
+    fn set_members_survive_forced_collection() {
+        let mut gc = GarbageCollector::default();
+        let member = value_of(&mut gc, RayaString::new("member".to_string()));
+
+        let mut set = SetObject::new();
+        set.inner.insert(crate::vm::object::HashableValue(member));
+        let set_val = value_of(&mut gc, set);
+
+        gc.add_root(set_val);
+        gc.collect();
+
+        assert_eq!(live_count(&gc), 2, "set members must survive");
+    }
+
+    #[test]
+    fn proxy_target_and_handler_survive_forced_collection() {
+        let mut gc = GarbageCollector::default();
+        let target = value_of(&mut gc, RayaString::new("target".to_string()));
+        let handler = value_of(&mut gc, RayaString::new("handler".to_string()));
+        let proxy = value_of(&mut gc, Proxy::new(target, handler));
+
+        gc.add_root(proxy);
+        gc.collect();
+
+        assert_eq!(live_count(&gc), 3, "proxy target and handler must survive");
+    }
+
+    #[test]
+    fn ref_cell_cycle_is_reclaimed_when_unrooted() {
+        let mut gc = GarbageCollector::default();
+
+        // Two cells forming a cycle: a -> b -> a.
+        let mut a_ptr = gc.allocate(RefCell::new(Value::null()));
+        let mut b_ptr = gc.allocate(RefCell::new(Value::null()));
+        let a_val = unsafe { Value::from_ptr(std::ptr::NonNull::new(a_ptr.as_ptr()).unwrap()) };
+        let b_val = unsafe { Value::from_ptr(std::ptr::NonNull::new(b_ptr.as_ptr()).unwrap()) };
+        (*a_ptr).value = b_val;
+        (*b_ptr).value = a_val;
+
+        // No roots: the unreachable cycle must be reclaimed.
+        gc.collect();
+        assert_eq!(live_count(&gc), 0, "unreachable cycle must be reclaimed");
+
+        // Rooted cycle survives.
+        let mut a_ptr = gc.allocate(RefCell::new(Value::null()));
+        let mut b_ptr = gc.allocate(RefCell::new(Value::null()));
+        let a_val = unsafe { Value::from_ptr(std::ptr::NonNull::new(a_ptr.as_ptr()).unwrap()) };
+        let b_val = unsafe { Value::from_ptr(std::ptr::NonNull::new(b_ptr.as_ptr()).unwrap()) };
+        (*a_ptr).value = b_val;
+        (*b_ptr).value = a_val;
+        gc.add_root(a_val);
+
+        gc.collect();
+        assert_eq!(live_count(&gc), 2, "rooted cycle must survive");
+    }
+
+    #[test]
+    fn unrooted_payloads_are_swept() {
+        let mut gc = GarbageCollector::default();
+        let _stray = value_of(&mut gc, RayaString::new("stray".to_string()));
+
+        gc.collect();
+        assert_eq!(live_count(&gc), 0, "unrooted payloads must be swept");
     }
 }

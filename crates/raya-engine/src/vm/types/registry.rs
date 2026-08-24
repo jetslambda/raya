@@ -11,6 +11,13 @@ use std::sync::Arc;
 /// Drop function type
 pub type DropFn = fn(*mut u8);
 
+/// Callback enumerating the GC-managed child [`Value`]s of a heap payload
+/// (task G1). Called with the payload pointer (past header and backlink).
+///
+/// # Safety
+/// The payload pointer must reference a live value of the registered type.
+pub type TraceFn = unsafe fn(*mut u8, &mut dyn FnMut(crate::vm::value::Value));
+
 /// Runtime type information for GC
 #[derive(Clone)]
 pub struct TypeInfo {
@@ -31,6 +38,11 @@ pub struct TypeInfo {
 
     /// Optional drop function
     pub drop_fn: Option<DropFn>,
+
+    /// Optional precise trace callback. When present, the collector uses it
+    /// instead of the pointer map — required for payloads holding `Vec<Value>`
+    /// or hash maps, which static offset maps cannot describe.
+    pub trace_fn: Option<TraceFn>,
 }
 
 impl TypeInfo {
@@ -43,6 +55,24 @@ impl TypeInfo {
             align: std::mem::align_of::<T>(),
             pointer_map,
             drop_fn: None,
+            trace_fn: None,
+        }
+    }
+
+    /// Create type info with a precise trace callback (G1).
+    pub fn with_trace<T: 'static>(
+        name: &'static str,
+        pointer_map: PointerMap,
+        trace_fn: TraceFn,
+    ) -> Self {
+        Self {
+            type_id: TypeId::of::<T>(),
+            name,
+            size: std::mem::size_of::<T>(),
+            align: std::mem::align_of::<T>(),
+            pointer_map,
+            drop_fn: None,
+            trace_fn: Some(trace_fn),
         }
     }
 
@@ -59,6 +89,7 @@ impl TypeInfo {
             align: std::mem::align_of::<T>(),
             pointer_map,
             drop_fn: Some(drop_fn),
+            trace_fn: None,
         }
     }
 
@@ -183,6 +214,18 @@ impl TypeRegistryBuilder {
         self
     }
 
+    /// Register a type with a precise trace callback (G1).
+    pub fn register_with_trace<T: 'static>(
+        mut self,
+        name: &'static str,
+        pointer_map: PointerMap,
+        trace_fn: TraceFn,
+    ) -> Self {
+        let type_info = TypeInfo::with_trace::<T>(name, pointer_map, trace_fn);
+        self.types.insert(type_info.type_id, type_info);
+        self
+    }
+
     /// Build the registry
     pub fn build(self) -> TypeRegistry {
         TypeRegistry {
@@ -193,7 +236,52 @@ impl TypeRegistryBuilder {
 
 /// Create a standard type registry with built-in types
 pub fn create_standard_registry() -> TypeRegistry {
-    use crate::vm::object::{Array, Object, RayaString};
+    use crate::vm::object::{
+        Array, BoundMethod, BoundNativeMethod, Closure, MapObject, Object, Proxy, RefCell,
+        RayaString, SetObject,
+    };
+
+    // Precise trace callbacks for payloads the pointer map cannot describe
+    // (G1/G2): Vec<Value>, hash maps, and multi-field managed references.
+    unsafe fn trace_closure(ptr: *mut u8, visit: &mut dyn FnMut(crate::vm::value::Value)) {
+        let c = &*(ptr as *const Closure);
+        for v in &c.captures {
+            visit(*v);
+        }
+    }
+    unsafe fn trace_ref_cell(ptr: *mut u8, visit: &mut dyn FnMut(crate::vm::value::Value)) {
+        let cell = &*(ptr as *const RefCell);
+        visit(cell.value);
+    }
+    unsafe fn trace_map(ptr: *mut u8, visit: &mut dyn FnMut(crate::vm::value::Value)) {
+        let m = &*(ptr as *const MapObject);
+        for (k, v) in &m.inner {
+            visit(k.0);
+            visit(*v);
+        }
+    }
+    unsafe fn trace_set(ptr: *mut u8, visit: &mut dyn FnMut(crate::vm::value::Value)) {
+        let s = &*(ptr as *const SetObject);
+        for k in &s.inner {
+            visit(k.0);
+        }
+    }
+    unsafe fn trace_proxy(ptr: *mut u8, visit: &mut dyn FnMut(crate::vm::value::Value)) {
+        let p = &*(ptr as *const Proxy);
+        visit(p.target);
+        visit(p.handler);
+    }
+    unsafe fn trace_bound_method(ptr: *mut u8, visit: &mut dyn FnMut(crate::vm::value::Value)) {
+        let bm = &*(ptr as *const BoundMethod);
+        visit(bm.receiver);
+    }
+    unsafe fn trace_bound_native_method(
+        ptr: *mut u8,
+        visit: &mut dyn FnMut(crate::vm::value::Value),
+    ) {
+        let bm = &*(ptr as *const BoundNativeMethod);
+        visit(bm.receiver);
+    }
 
     TypeRegistry::builder()
         // Primitives (no pointers)
@@ -209,6 +297,20 @@ pub fn create_standard_registry() -> TypeRegistry {
         .register::<Object>("Object", PointerMap::none())
         .register::<Array>("Array", PointerMap::none())
         .register::<RayaString>("RayaString", PointerMap::none())
+        // Managed containers and references (G2): precise tracing required —
+        // before this registration, closures were marked without traversing
+        // captures, so captured objects could be swept while referenced.
+        .register_with_trace::<Closure>("Closure", PointerMap::none(), trace_closure)
+        .register_with_trace::<RefCell>("RefCell", PointerMap::none(), trace_ref_cell)
+        .register_with_trace::<MapObject>("MapObject", PointerMap::none(), trace_map)
+        .register_with_trace::<SetObject>("SetObject", PointerMap::none(), trace_set)
+        .register_with_trace::<Proxy>("Proxy", PointerMap::none(), trace_proxy)
+        .register_with_trace::<BoundMethod>("BoundMethod", PointerMap::none(), trace_bound_method)
+        .register_with_trace::<BoundNativeMethod>(
+            "BoundNativeMethod",
+            PointerMap::none(),
+            trace_bound_native_method,
+        )
         .build()
 }
 
