@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
+import { writeFileSync } from "node:fs";
 import { analyzeProject } from "./index.js";
 import type { ReadinessSeverity } from "./types.js";
 import { categorize } from "./report.js";
+import { buildPlan } from "./plan.js";
 import { renderPretty } from "./formats/pretty.js";
 import { renderSarif } from "./formats/sarif.js";
 
@@ -10,6 +12,7 @@ interface CliOptions {
   project: string;
   format: "pretty" | "json" | "sarif";
   failOn: ReadinessSeverity;
+  emitPlan?: string;
 }
 
 const SEVERITY_ORDER: Record<ReadinessSeverity, number> = {
@@ -24,11 +27,12 @@ function parseOptions(): CliOptions {
       project: { type: "string" },
       format: { type: "string", default: "pretty" },
       "fail-on": { type: "string", default: "error" },
+      "emit-plan": { type: "string" },
     },
   });
 
   if (!values.project) {
-    console.error("usage: raya-ts-check --project <tsconfig-or-dir> [--format pretty|json|sarif] [--fail-on info|warning|error]");
+    console.error("usage: raya-ts-check --project <tsconfig-or-dir> [--format pretty|json|sarif] [--fail-on info|warning|error] [--emit-plan <file>]");
     process.exit(2);
   }
 
@@ -44,7 +48,7 @@ function parseOptions(): CliOptions {
     process.exit(2);
   }
 
-  return { project: values.project, format, failOn };
+  return { project: values.project, format, failOn, emitPlan: values["emit-plan"] };
 }
 
 async function main(): Promise<void> {
@@ -56,6 +60,19 @@ async function main(): Promise<void> {
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(2);
+  }
+
+  if (options.emitPlan !== undefined) {
+    try {
+      writeFileSync(
+        options.emitPlan,
+        `${JSON.stringify(buildPlan(report), null, 2)}\n`,
+        "utf8",
+      );
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exit(2);
+    }
   }
 
   if (options.format === "json") {
