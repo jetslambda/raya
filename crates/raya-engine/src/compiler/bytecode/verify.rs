@@ -58,6 +58,37 @@ pub enum VerifyError {
     #[error("Execution falls off end of function at offset {0}")]
     FallOffEnd(usize),
 
+    /// Operand stack depths disagree at a join point (B4)
+    #[error("Stack depth mismatch at offset {offset}: expected {expected}, got {actual}")]
+    StackDepthMismatch {
+        /// Join point offset
+        offset: usize,
+        /// Depth from the first path
+        expected: usize,
+        /// Depth from the second path
+        actual: usize,
+    },
+
+    /// Operand type violates the recorded signature contract (B5)
+    #[error("Type mismatch at offset {offset}: expected {expected}, got {actual}")]
+    TypeMismatch {
+        /// Offending instruction offset
+        offset: usize,
+        /// Expected abstract type
+        expected: String,
+        /// Actual abstract type
+        actual: String,
+    },
+
+    /// Load from a local that no path has stored (B5)
+    #[error("Load of uninitialized local {index} at offset {offset}")]
+    UninitializedLocal {
+        /// Local slot index
+        index: usize,
+        /// Offending instruction offset
+        offset: usize,
+    },
+
     /// Module validation error
     #[error("Module validation error: {0}")]
     ModuleValidation(String),
@@ -87,22 +118,13 @@ fn verify_function(function: &Function, module: &Module) -> Result<(), VerifyErr
         return Ok(());
     }
 
-    // Parse all instructions and collect jump targets
+    // B4/B5: CFG-based verification covers jump-target validity, stack
+    // depths at joins, local initialization, and — for functions carrying
+    // typed signatures (v9+) — operand types against the descriptor
+    // contract. Replaces the former linear depth walk.
+    super::verify_cfg::verify_function_cfg(function, module)?;
+
     let instructions = parse_instructions(&function.code)?;
-    let jump_targets = collect_jump_targets(&instructions)?;
-
-    // Verify all jump targets are valid instruction boundaries
-    for &target in &jump_targets {
-        if !is_valid_instruction_boundary(target, &instructions) {
-            return Err(VerifyError::InvalidJumpTarget {
-                target,
-                offset: target,
-            });
-        }
-    }
-
-    // Verify stack depth consistency
-    verify_stack_depth(&instructions, &jump_targets)?;
 
     // Verify constant pool references
     verify_constant_refs(&instructions, module)?;
@@ -122,14 +144,14 @@ fn verify_function(function: &Function, module: &Module) -> Result<(), VerifyErr
 
 /// Parsed instruction
 #[derive(Debug, Clone)]
-struct Instruction {
-    offset: usize,
-    opcode: Opcode,
-    operands: Vec<u8>,
+pub(crate) struct Instruction {
+    pub(crate) offset: usize,
+    pub(crate) opcode: Opcode,
+    pub(crate) operands: Vec<u8>,
 }
 
 /// Parse all instructions from bytecode
-fn parse_instructions(code: &[u8]) -> Result<Vec<Instruction>, VerifyError> {
+pub(crate) fn parse_instructions(code: &[u8]) -> Result<Vec<Instruction>, VerifyError> {
     let mut instructions = Vec::new();
     let mut reader = BytecodeReader::new(code);
 
@@ -411,6 +433,10 @@ fn verify_stack_depth(
 }
 
 /// Get the stack effect of an opcode (pops, pushes)
+pub(crate) fn stack_effect(opcode: Opcode) -> (i32, i32) {
+    get_stack_effect(opcode)
+}
+
 fn get_stack_effect(opcode: Opcode) -> (i32, i32) {
     match opcode {
         Opcode::Nop => (0, 0),

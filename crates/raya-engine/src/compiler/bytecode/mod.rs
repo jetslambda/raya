@@ -9,6 +9,7 @@ pub mod module;
 pub mod opcode;
 pub mod types;
 pub mod verify;
+pub mod verify_cfg;
 
 pub use constants::ConstantPool;
 pub use encoder::{BytecodeReader, BytecodeWriter, DecodeError};
