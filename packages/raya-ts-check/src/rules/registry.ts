@@ -8,6 +8,8 @@ import { ambiguousNumber } from "./ambiguous-number.js";
 import { dynamicPropertyAccess } from "./dynamic-property-access.js";
 import { prototypeMutation } from "./prototype-mutation.js";
 import { evalAndFunctionConstructor } from "./eval-and-function-constructor.js";
+import { unsupportedNodeApi } from "./unsupported-node-api.js";
+import { nativeAddon } from "./native-addon.js";
 
 /** All registered rules, in stable diagnostic-code order. */
 export const rules: readonly ReadinessRule[] = [
@@ -22,4 +24,8 @@ export const rules: readonly ReadinessRule[] = [
   dynamicPropertyAccess,
   prototypeMutation,
   evalAndFunctionConstructor,
+
+  // compatibility inventory (C5)
+  unsupportedNodeApi,
+  nativeAddon,
 ];
