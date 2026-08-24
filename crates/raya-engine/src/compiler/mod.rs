@@ -344,7 +344,7 @@ impl<'a> Compiler<'a> {
             self.compile_to_optimized_ir_with_metadata(module)?;
 
         // Generate bytecode from IR
-        let mut bytecode_module = codegen::generate(&ir_module, need_sourcemap)?;
+        let mut bytecode_module = codegen::generate_with_types(&ir_module, need_sourcemap, Some(&self.type_ctx))?;
         if let Some(module_identity) = &self.module_identity {
             bytecode_module.metadata.name = module_identity.clone();
         }
@@ -456,7 +456,7 @@ impl<'a> Compiler<'a> {
         writeln!(debug, "{}", ir_module.pretty_print()).unwrap();
 
         // Step 4: Generate bytecode
-        let mut bytecode_module = codegen::generate(&ir_module, self.emit_sourcemap)?;
+        let mut bytecode_module = codegen::generate_with_types(&ir_module, self.emit_sourcemap, Some(&self.type_ctx))?;
         if let Some(module_identity) = &self.module_identity {
             bytecode_module.metadata.name = module_identity.clone();
         }

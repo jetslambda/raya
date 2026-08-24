@@ -12,18 +12,36 @@ use crate::compiler::ir::{
     BasicBlock, BasicBlockId, BinaryOp, IrConstant, IrFunction, IrInstr, IrModule, IrValue,
     Register, StringCompareMode, Terminator, UnaryOp,
 };
+use crate::compiler::bytecode::types::{
+    runtime_type_of_lenient, FunctionSignature, TypeTables, UNTYPED_SIGNATURE_ID,
+};
 use crate::compiler::module_builder::{FunctionBuilder, ModuleBuilder};
 use crate::parser::token::Span;
+use crate::parser::types::context::TypeContext;
 use rustc_hash::FxHashMap;
 
+/// Descriptor id for the boxed dynamic value, used when a slot's type is
+/// unknown (see `types::prim::ANY_VALUE`).
+fn prim_any_value_id() -> u32 {
+    crate::compiler::bytecode::types::RuntimeTypeDescriptor::AnyValue
+        .primitive_id()
+        .expect("AnyValue is a primitive descriptor")
+        .0
+}
+
 /// Code generator that transforms IR to bytecode
-pub struct IrCodeGenerator {
+pub struct IrCodeGenerator<'a> {
     /// Module builder for constructing the output
     module_builder: ModuleBuilder,
     /// Current function being compiled
     _current_func: Option<FunctionContext>,
     /// Whether to emit source map data (bytecode offset → source location)
     emit_sourcemap: bool,
+    /// Type context for converting checker types into runtime descriptors.
+    /// When absent, functions are emitted without typed signatures.
+    type_ctx: Option<&'a TypeContext>,
+    /// Interned descriptor/signature tables accumulated during generation.
+    tables: TypeTables,
 }
 
 /// Context for compiling a single function
@@ -44,6 +62,10 @@ struct FunctionContext {
     line_entries: Vec<LineEntry>,
     /// Last recorded line to avoid duplicate entries for the same line
     last_line: u32,
+    /// Checker type per local slot, indexed by slot number. Params seed
+    /// their entries; allocation records the rest. Converted to descriptor
+    /// ids when the function is finalized.
+    slot_tys: Vec<Option<crate::parser::TypeId>>,
 }
 
 impl FunctionContext {
@@ -57,7 +79,16 @@ impl FunctionContext {
             pending_try_jumps: Vec::new(),
             line_entries: Vec::new(),
             last_line: 0,
+            slot_tys: Vec::new(),
         }
+    }
+
+    /// Record the checker type of a local slot.
+    fn record_slot_ty(&mut self, slot: u16, ty: crate::parser::TypeId) {
+        if slot as usize >= self.slot_tys.len() {
+            self.slot_tys.resize(slot as usize + 1, None);
+        }
+        self.slot_tys[slot as usize] = Some(ty);
     }
 
     /// Record a line entry mapping current bytecode offset to source location.
@@ -85,6 +116,7 @@ impl FunctionContext {
             let slot = self.next_slot;
             self.next_slot += 1;
             self.register_slots.insert(id, slot);
+            self.record_slot_ty(slot, reg.ty);
             slot
         }
     }
@@ -193,16 +225,21 @@ impl FunctionContext {
         }
     }
 
-    /// Build the final function
-    fn build(mut self) -> Function {
+    /// Build the final function, recording typed signature data when present.
+    fn build(mut self, signature: Option<(u32, Vec<u32>)>) -> Function {
         self.patch_jumps();
         // Update local count
         self.builder.set_local_count(self.next_slot);
+        if let Some((signature_id, mut local_types)) = signature {
+            // Slots allocated without a known type fall back to boxed values.
+            local_types.resize(self.next_slot as usize, prim_any_value_id());
+            self.builder.set_signature(signature_id, local_types);
+        }
         self.builder.build()
     }
 }
 
-impl IrCodeGenerator {
+impl<'a> IrCodeGenerator<'a> {
     /// Create a new code generator
     ///
     /// Reflection metadata is always emitted to support runtime introspection.
@@ -211,7 +248,14 @@ impl IrCodeGenerator {
             module_builder: ModuleBuilder::new(module_name.to_string()),
             _current_func: None,
             emit_sourcemap: false,
+            type_ctx: None,
+            tables: TypeTables::new(),
         }
+    }
+
+    /// Provide the type context used to derive typed signatures.
+    pub fn set_type_ctx(&mut self, type_ctx: &'a TypeContext) {
+        self.type_ctx = Some(type_ctx);
     }
 
     /// Enable/disable source map generation
@@ -290,6 +334,10 @@ impl IrCodeGenerator {
             bytecode_module.flags |= flags::HAS_DEBUG_INFO;
             bytecode_module.debug_info = Some(debug_info);
         }
+
+        // Install interned type tables (B2). Empty when no type context was
+        // provided; the verifier decides later whether that is acceptable.
+        self.tables.install_into(&mut bytecode_module);
 
         // Compute JIT hints at compile time (pre-score functions for JIT candidacy)
         #[cfg(feature = "jit")]
@@ -379,6 +427,7 @@ impl IrCodeGenerator {
         // Pre-allocate slots for parameters
         for (i, param) in func.params.iter().enumerate() {
             ctx.register_slots.insert(param.id.as_u32(), i as u16);
+            ctx.record_slot_ty(i as u16, param.ty);
         }
 
         // Scan IR to find all StoreLocal/LoadLocal with explicit indices and
@@ -423,7 +472,33 @@ impl IrCodeGenerator {
             None
         };
 
-        Ok((ctx.build(), debug_info))
+        // Typed signature data (B2): convert checker types through the
+        // runtime descriptor contract when a type context is available.
+        let signature = self.type_ctx.map(|type_ctx| {
+            let params: Vec<_> = func
+                .params
+                .iter()
+                .map(|r| runtime_type_of_lenient(type_ctx, r.ty))
+                .collect();
+            let return_type = runtime_type_of_lenient(type_ctx, func.return_ty);
+            let sig = FunctionSignature {
+                params,
+                return_type,
+                rest_element: None,
+                flags: Default::default(),
+            };
+            let signature_id = self.tables.intern_signature(sig);
+            let local_types: Vec<u32> = ctx
+                .slot_tys
+                .iter()
+                .map(|slot| {
+                    slot.map(|ty| self.tables.intern_descriptor(runtime_type_of_lenient(type_ctx, ty)))
+                        .unwrap_or_else(prim_any_value_id)
+                })
+                .collect();
+            (signature_id, local_types)
+        });
+        Ok((ctx.build(signature), debug_info))
     }
 
     /// Generate bytecode for a basic block

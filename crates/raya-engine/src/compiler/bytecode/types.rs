@@ -82,7 +82,28 @@ pub enum RuntimeTypeDescriptor {
     },
 }
 
+/// Base id for descriptors stored in a module's `runtime_types` table:
+/// ids below this are implicit primitives.
+pub const COMPLEX_BASE: u32 = 8;
+
 impl RuntimeTypeDescriptor {
+    /// Id if this is an implicitly-encoded primitive; complex descriptors
+    /// must go through a module's interned table.
+    pub fn primitive_id(&self) -> Option<RuntimeTypeId> {
+        match self {
+            RuntimeTypeDescriptor::I32 => Some(prim::I32),
+            RuntimeTypeDescriptor::F64 => Some(prim::F64),
+            RuntimeTypeDescriptor::Bool => Some(prim::BOOL),
+            RuntimeTypeDescriptor::String => Some(prim::STRING),
+            RuntimeTypeDescriptor::Null => Some(prim::NULL),
+            RuntimeTypeDescriptor::Void => Some(prim::VOID),
+            RuntimeTypeDescriptor::AnyValue => Some(prim::ANY_VALUE),
+            RuntimeTypeDescriptor::Ref => Some(prim::REF),
+            _ => None,
+        }
+    }
+
+    /// Panics for complex descriptors; see [`primitive_id`].
     pub fn to_id(&self) -> RuntimeTypeId {
         match self {
             RuntimeTypeDescriptor::I32 => prim::I32,
@@ -324,6 +345,62 @@ fn convert(
             Type::Never => return Err(err("never", "uninhabited type in value position")),
         })
     }
+
+/// Convert like [`runtime_type_of`], but map unsupported types to the boxed
+/// dynamic form instead of failing. Used where the compiler cannot yet prove
+/// strict representability (Js/NodeCompat mode); the typed verifier (B5) is
+/// the enforcement point for strict contexts.
+pub fn runtime_type_of_lenient(type_ctx: &TypeContext, ty: TypeId) -> RuntimeTypeDescriptor {
+    runtime_type_of(type_ctx, ty).unwrap_or(RuntimeTypeDescriptor::AnyValue)
+}
+
+/// Module-level interners for descriptors and signatures (task B2).
+///
+/// Primitive descriptors use their implicit ids and are never stored;
+/// complex descriptors get `COMPLEX_BASE + index`; signatures get
+/// `index + 1` so that id 0 stays reserved for UNTYPED_SIGNATURE_ID.
+#[derive(Debug, Default)]
+pub struct TypeTables {
+    runtime_types: Vec<RuntimeTypeDescriptor>,
+    runtime_index: rustc_hash::FxHashMap<RuntimeTypeDescriptor, u32>,
+    function_signatures: Vec<FunctionSignature>,
+    signature_index: rustc_hash::FxHashMap<FunctionSignature, u32>,
+}
+
+impl TypeTables {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn intern_descriptor(&mut self, d: RuntimeTypeDescriptor) -> u32 {
+        if let Some(id) = d.primitive_id() {
+            return id.0;
+        }
+        if let Some(&id) = self.runtime_index.get(&d) {
+            return id;
+        }
+        let id = COMPLEX_BASE + self.runtime_types.len() as u32;
+        self.runtime_types.push(d.clone());
+        self.runtime_index.insert(d, id);
+        id
+    }
+
+    pub fn intern_signature(&mut self, sig: FunctionSignature) -> u32 {
+        if let Some(&id) = self.signature_index.get(&sig) {
+            return id;
+        }
+        let id = self.function_signatures.len() as u32 + 1; // 0 reserved
+        self.function_signatures.push(sig.clone());
+        self.signature_index.insert(sig, id);
+        id
+    }
+
+    /// Move the accumulated tables into a module.
+    pub fn install_into(&mut self, module: &mut crate::compiler::bytecode::Module) {
+        module.runtime_types = std::mem::take(&mut self.runtime_types);
+        module.function_signatures = std::mem::take(&mut self.function_signatures);
+    }
+}
 
 /// Canonical function signature recorded in bytecode (task R3).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
