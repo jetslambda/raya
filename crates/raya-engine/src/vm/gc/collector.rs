@@ -83,6 +83,10 @@ pub struct GcStats {
 
     /// Live bytes after last collection
     pub live_bytes: usize,
+
+    /// Collections deferred because a root provider could not enumerate
+    /// safely (task stacks locked by running workers)
+    pub deferred_collections: usize,
 }
 
 impl Default for GcStats {
@@ -101,6 +105,7 @@ impl Default for GcStats {
             last_freed_bytes: 0,
             live_objects: 0,
             live_bytes: 0,
+            deferred_collections: 0,
         }
     }
 }
@@ -161,6 +166,11 @@ pub struct GarbageCollector {
     /// GC threshold (bytes)
     threshold: usize,
 
+    /// Allocated-bytes watermark above which a deferred collect retries (G5).
+    /// Prevents re-attempting a full mark on every allocation while task
+    /// stacks are locked; the watermark doubles after each deferral.
+    deferred_backoff_bytes: usize,
+
     /// Statistics
     stats: GcStats,
 }
@@ -172,6 +182,7 @@ impl GarbageCollector {
             heap: Heap::new(context_id, type_registry),
             roots: RootSet::new(),
             threshold: crate::vm::defaults::DEFAULT_GC_THRESHOLD,
+            deferred_backoff_bytes: 0,
             stats: GcStats::default(),
         }
     }
@@ -193,8 +204,10 @@ impl GarbageCollector {
 
     /// Allocate a value
     pub fn allocate<T: 'static>(&mut self, value: T) -> GcPtr<T> {
-        // Check if we should collect
-        if self.should_collect() && !has_external_roots_provider(self.heap.context_id()) {
+        // Check if we should collect. With a scheduler attached, collect()
+        // defers itself when root enumeration is unsafe; the backoff in
+        // should_collect prevents per-allocation retry storms (G5).
+        if self.should_collect() {
             self.collect();
         }
 
@@ -206,8 +219,8 @@ impl GarbageCollector {
     where
         T: 'static + Default + Clone,
     {
-        // Check if we should collect
-        if self.should_collect() && !has_external_roots_provider(self.heap.context_id()) {
+        // See allocate(): provider-aware deferral happens inside collect().
+        if self.should_collect() {
             self.collect();
         }
 
@@ -226,7 +239,8 @@ impl GarbageCollector {
 
     /// Check if we should collect
     fn should_collect(&self) -> bool {
-        self.heap.allocated_bytes() > self.threshold
+        let allocated = self.heap.allocated_bytes();
+        allocated > self.threshold && allocated > self.deferred_backoff_bytes
     }
 
     fn external_root_snapshot(&self) -> ExternalRootSnapshot {
@@ -244,8 +258,14 @@ impl GarbageCollector {
     pub fn collect(&mut self) {
         let snapshot = self.external_root_snapshot();
         if !snapshot.complete {
+            // Task stacks are locked by running workers; retry once the
+            // heap has grown meaningfully past this point (G5 backoff).
+            self.stats.deferred_collections += 1;
+            self.deferred_backoff_bytes =
+                (self.heap.allocated_bytes() * 2).max(self.deferred_backoff_bytes);
             return;
         }
+        self.deferred_backoff_bytes = 0;
         let start = Instant::now();
 
         // Mark phase
@@ -702,5 +722,89 @@ mod g3_graph_tests {
 
         gc.collect();
         assert_eq!(live_count(&gc), 0, "unrooted payloads must be swept");
+    }
+}
+
+#[cfg(test)]
+mod g5_tests {
+    //! Automatic collection under external root providers (task G5).
+    //!
+    //! Before G5, registering any root provider (i.e., running under the
+    //! task scheduler) disabled threshold-triggered collection entirely.
+    //! Now collection runs whenever the provider can enumerate safely and
+    //! defers with exponential backoff when it cannot.
+
+    use super::*;
+
+    #[test]
+    fn complete_provider_allows_automatic_collection() {
+        let mut gc = GarbageCollector::default();
+        let ctx = gc.context_id();
+        gc.set_threshold(1024);
+
+        crate::vm::gc::register_external_roots_provider(
+            ctx,
+            Arc::new(|| ExternalRootSnapshot {
+                roots: Vec::new(),
+                complete: true,
+            }),
+        );
+
+        // Allocate well past the threshold.
+        for i in 0..200 {
+            gc.allocate(RayaStringLike::new(format!("string-{i}-padding")));
+        }
+
+        assert!(
+            gc.stats.collections >= 1,
+            "complete provider must not suppress automatic collection"
+        );
+
+        crate::vm::gc::unregister_external_roots_provider(ctx);
+    }
+
+    #[test]
+    fn incomplete_provider_defers_with_backoff_and_counts() {
+        let mut gc = GarbageCollector::default();
+        let ctx = gc.context_id();
+        gc.set_threshold(1024);
+
+        crate::vm::gc::register_external_roots_provider(
+            ctx,
+            Arc::new(|| ExternalRootSnapshot {
+                roots: Vec::new(),
+                complete: false,
+            }),
+        );
+
+        for i in 0..100 {
+            gc.allocate(RayaStringLike::new(format!("s-{i}")));
+        }
+        let after_first_wave = gc.stats.deferred_collections;
+        assert!(
+            after_first_wave >= 1,
+            "incomplete snapshot must be counted as a deferral"
+        );
+
+        // Backoff: allocations below the watermark must not re-attempt.
+        for i in 0..10 {
+            gc.allocate(RayaStringLike::new(format!("t-{i}")));
+        }
+        assert_eq!(
+            gc.stats.deferred_collections, after_first_wave,
+            "backoff must suppress immediate retries"
+        );
+
+        crate::vm::gc::unregister_external_roots_provider(ctx);
+    }
+
+    // Minimal string-like payload so tests control heap growth directly.
+    struct RayaStringLike {
+        data: String,
+    }
+    impl RayaStringLike {
+        fn new(data: String) -> Self {
+            Self { data }
+        }
     }
 }
