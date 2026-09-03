@@ -152,3 +152,52 @@ pub struct RuntimeHelperTable {
     /// String length: (string_val, shared_state) -> len or i32::MIN fallback sentinel
     pub string_len: unsafe extern "C" fn(u64, *mut ()) -> i32,
 }
+
+/// Validate the boxed arguments at a JIT entry boundary against a verified
+/// signature. This is deliberately kept in the trampoline module so every
+/// caller uses the same NaN-boxing rules as the native ABI.
+pub fn boxed_arguments_match(
+    args: &[u64],
+    params: &[crate::compiler::bytecode::RuntimeTypeDescriptor],
+) -> bool {
+    use crate::vm::Value;
+    args.iter().zip(params).all(|(raw, expected)| {
+        let value = unsafe { Value::from_raw(*raw) };
+        match expected {
+            crate::compiler::bytecode::RuntimeTypeDescriptor::I32 => value.is_i32(),
+            crate::compiler::bytecode::RuntimeTypeDescriptor::F64 => value.is_f64(),
+            crate::compiler::bytecode::RuntimeTypeDescriptor::Bool => value.is_bool(),
+            crate::compiler::bytecode::RuntimeTypeDescriptor::Null => value.is_null(),
+            crate::compiler::bytecode::RuntimeTypeDescriptor::String
+            | crate::compiler::bytecode::RuntimeTypeDescriptor::Ref
+            | crate::compiler::bytecode::RuntimeTypeDescriptor::Object { .. }
+            | crate::compiler::bytecode::RuntimeTypeDescriptor::Array { .. }
+            | crate::compiler::bytecode::RuntimeTypeDescriptor::Tuple { .. }
+            | crate::compiler::bytecode::RuntimeTypeDescriptor::Function { .. }
+            | crate::compiler::bytecode::RuntimeTypeDescriptor::Task { .. } => value.is_ptr(),
+            crate::compiler::bytecode::RuntimeTypeDescriptor::AnyValue => true,
+            crate::compiler::bytecode::RuntimeTypeDescriptor::Void => false,
+        }
+    }) && args.len() == params.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::boxed_arguments_match;
+    use crate::compiler::bytecode::RuntimeTypeDescriptor as T;
+    use crate::vm::Value;
+
+    #[test]
+    fn boxed_entry_guard_accepts_exact_primitive_tags() {
+        let args = [Value::i32(7).raw(), Value::bool(true).raw(), Value::f64(2.5).raw()];
+        assert!(boxed_arguments_match(&args, &[T::I32, T::Bool, T::F64]));
+        assert!(!boxed_arguments_match(&args, &[T::F64, T::Bool, T::F64]));
+    }
+
+    #[test]
+    fn boxed_entry_guard_rejects_wrong_arity_and_pointer_types() {
+        let args = [Value::i32(7).raw()];
+        assert!(!boxed_arguments_match(&args, &[T::I32, T::I32]));
+        assert!(!boxed_arguments_match(&args, &[T::Ref]));
+    }
+}
