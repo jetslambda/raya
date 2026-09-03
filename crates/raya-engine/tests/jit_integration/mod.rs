@@ -2873,13 +2873,8 @@ fn lift_negation() {
 
 #[test]
 fn lift_all_int_arithmetic_ops() {
-    // Test Isub, Imul, Idiv, Imod all lift correctly
-    for (op, expected) in [
-        (Opcode::Isub, "isub"),
-        (Opcode::Imul, "imul"),
-        (Opcode::Idiv, "idiv"),
-        (Opcode::Imod, "imod"),
-    ] {
+    // Only operations with exact native semantics are lifted.
+    for (op, expected) in [(Opcode::Isub, "isub"), (Opcode::Imul, "imul")] {
         let mut code = Vec::new();
         emit_i32(&mut code, 10);
         emit_i32(&mut code, 3);
@@ -2895,6 +2890,19 @@ fn lift_all_int_arithmetic_ops() {
             "IR should contain {expected} for {:?}, got:\n{display}",
             op
         );
+    }
+}
+
+#[test]
+fn lift_integer_division_and_remainder_are_rejected_until_exact() {
+    for op in [Opcode::Idiv, Opcode::Imod] {
+        let mut code = Vec::new();
+        emit_i32(&mut code, 10);
+        emit_i32(&mut code, 3);
+        emit(&mut code, op);
+        emit(&mut code, Opcode::Return);
+        let module = make_module(code, 0, 0);
+        assert!(lift_function(&module.functions[0], &module, 0).is_err());
     }
 }
 
