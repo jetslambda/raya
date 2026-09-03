@@ -349,6 +349,10 @@ pub fn lift_function_with_signature(
                     jit_func
                         .block_mut(jit_block_id)
                         .instrs
+                        .push(JitInstr::GcSafepoint { bytecode_offset });
+                    jit_func
+                        .block_mut(jit_block_id)
+                        .instrs
                         .push(JitInstr::CheckPreemption { bytecode_offset });
                 }
                 JitTerminator::Jump(cfg_to_jit[target])
@@ -367,6 +371,10 @@ pub fn lift_function_with_signature(
                         .and_then(|idx| instrs.get(*idx))
                         .map(|i| i.offset as u32)
                         .unwrap_or(0);
+                    jit_func
+                        .block_mut(jit_block_id)
+                        .instrs
+                        .push(JitInstr::GcSafepoint { bytecode_offset });
                     jit_func
                         .block_mut(jit_block_id)
                         .instrs
@@ -2229,6 +2237,10 @@ mod tests {
                 .any(|i| matches!(i, JitInstr::CheckPreemption { .. }))
         });
         assert!(has_preemption, "expected CheckPreemption at back-edge");
+        let has_gc_safepoint = jit_func.blocks.iter().any(|b| {
+            b.instrs.iter().any(|i| matches!(i, JitInstr::GcSafepoint { .. }))
+        });
+        assert!(has_gc_safepoint, "expected GcSafepoint at back-edge");
 
         // Should have a backward Jump terminator (back-edge to header)
         let has_back_edge = jit_func
