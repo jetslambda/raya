@@ -719,7 +719,7 @@ impl<'a> LoweringContext<'a> {
                 let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
                 let fn_ptr = builder
                     .ins()
-                    .load(types::I64, MemFlags::trusted(), ctx, 160); // 24 + 136
+                    .load(types::I64, MemFlags::trusted(), ctx, crate::jit::runtime::trampoline::HELPER_STRING_LEN_OFFSET); // 24 + 136
                 let sig = self.string_len_sig(builder);
                 let string_val = self.boxed_reg_value(builder, *string);
                 let call = builder
@@ -779,7 +779,7 @@ impl<'a> LoweringContext<'a> {
                 let module_ptr = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 16);
                 let fn_ptr = builder
                     .ins()
-                    .load(types::I64, MemFlags::trusted(), ctx, 112); // 24 + 88
+                    .load(types::I64, MemFlags::trusted(), ctx, crate::jit::runtime::trampoline::HELPER_OBJECT_GET_FIELD_OFFSET); // 24 + 88
                 let sig = self.object_get_field_sig(builder);
                 let object_val = self.use_reg(builder, *object);
                 let slot = builder.ins().iconst(types::I32, *offset as i64);
@@ -830,7 +830,7 @@ impl<'a> LoweringContext<'a> {
                 let module_ptr = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 16);
                 let fn_ptr = builder
                     .ins()
-                    .load(types::I64, MemFlags::trusted(), ctx, 144); // 24 + 120
+                    .load(types::I64, MemFlags::trusted(), ctx, crate::jit::runtime::trampoline::HELPER_OBJECT_GET_SHAPE_FIELD_OFFSET); // 24 + 120
                 let sig = self.object_get_shape_field_sig(builder);
                 let object_val = self.boxed_reg_value(builder, *object);
                 let shape_val = builder.ins().iconst(types::I64, *shape_id as i64);
@@ -940,7 +940,7 @@ impl<'a> LoweringContext<'a> {
                 let module_ptr = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 16);
                 let fn_ptr = builder
                     .ins()
-                    .load(types::I64, MemFlags::trusted(), ctx, 136); // 24 + 112
+                    .load(types::I64, MemFlags::trusted(), ctx, crate::jit::runtime::trampoline::HELPER_OBJECT_NOMINAL_OFFSET); // 24 + 112
                 let sig = self.object_is_nominal_sig(builder);
                 let object_val = self.boxed_reg_value(builder, *object);
                 let nominal_type_id_val = builder.ins().iconst(types::I32, *nominal_type_id as i64);
@@ -984,7 +984,7 @@ impl<'a> LoweringContext<'a> {
                 let module_ptr = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 16);
                 let fn_ptr = builder
                     .ins()
-                    .load(types::I64, MemFlags::trusted(), ctx, 136); // 24 + 112
+                    .load(types::I64, MemFlags::trusted(), ctx, crate::jit::runtime::trampoline::HELPER_OBJECT_NOMINAL_OFFSET); // 24 + 112
                 let sig = self.object_is_nominal_sig(builder);
                 let object_val = self.boxed_reg_value(builder, *object);
                 let nominal_type_id_val = builder.ins().iconst(types::I32, *nominal_type_id as i64);
@@ -1029,7 +1029,7 @@ impl<'a> LoweringContext<'a> {
                 let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
                 let fn_ptr = builder
                     .ins()
-                    .load(types::I64, MemFlags::trusted(), ctx, 128); // 24 + 104
+                    .load(types::I64, MemFlags::trusted(), ctx, crate::jit::runtime::trampoline::HELPER_OBJECT_SHAPE_OFFSET); // 24 + 104
                 let sig = self.object_implements_shape_sig(builder);
                 let object_val = self.boxed_reg_value(builder, *object);
                 let shape_id_val = builder.ins().iconst(types::I64, *shape_id as i64);
@@ -1072,7 +1072,7 @@ impl<'a> LoweringContext<'a> {
                 let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
                 let fn_ptr = builder
                     .ins()
-                    .load(types::I64, MemFlags::trusted(), ctx, 128); // 24 + 104
+                    .load(types::I64, MemFlags::trusted(), ctx, crate::jit::runtime::trampoline::HELPER_OBJECT_SHAPE_OFFSET); // 24 + 104
                 let sig = self.object_implements_shape_sig(builder);
                 let object_val = self.boxed_reg_value(builder, *object);
                 let shape_id_val = builder.ins().iconst(types::I64, *shape_id as i64);
@@ -1118,7 +1118,7 @@ impl<'a> LoweringContext<'a> {
                 let module_ptr = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 16);
                 let fn_ptr = builder
                     .ins()
-                    .load(types::I64, MemFlags::trusted(), ctx, 152); // 24 + 128
+                    .load(types::I64, MemFlags::trusted(), ctx, crate::jit::runtime::trampoline::HELPER_OBJECT_SET_SHAPE_FIELD_OFFSET); // 24 + 128
                 let sig = self.object_set_shape_field_sig(builder);
                 let object_val = self.boxed_reg_value(builder, *object);
                 let shape_val = builder.ins().iconst(types::I64, *shape_id as i64);
@@ -1751,7 +1751,7 @@ impl<'a> LoweringContext<'a> {
 
                 builder.switch_to_block(do_poll);
                 let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
-                let fn_ptr = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 48); // 24 + 24
+                let fn_ptr = builder.ins().load(types::I64, MemFlags::trusted(), ctx, crate::jit::runtime::trampoline::HELPER_SAFEPOINT_POLL_OFFSET); // 24 + 24
                 let sig = self.safepoint_sig(builder);
                 builder.ins().call_indirect(sig, fn_ptr, &[shared_state]);
                 builder.ins().jump(skip, &[]);
@@ -1774,7 +1774,7 @@ impl<'a> LoweringContext<'a> {
 
                 builder.switch_to_block(do_check);
                 let current_task = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 8);
-                let fn_ptr = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 56); // 24 + 32
+                let fn_ptr = builder.ins().load(types::I64, MemFlags::trusted(), ctx, crate::jit::runtime::trampoline::HELPER_CHECK_PREEMPTION_OFFSET); // 24 + 32
                 let sig = self.check_preemption_sig(builder);
                 let call = builder.ins().call_indirect(sig, fn_ptr, &[current_task]);
                 let should_preempt = builder.inst_results(call)[0];
@@ -1814,7 +1814,7 @@ impl<'a> LoweringContext<'a> {
                     builder.switch_to_block(do_dispatch);
 
                     let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
-                    let fn_ptr = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 64); // 24 + 40
+                    let fn_ptr = builder.ins().load(types::I64, MemFlags::trusted(), ctx, crate::jit::runtime::trampoline::HELPER_NATIVE_CALL_OFFSET); // 24 + 40
                     let sig = self.native_call_dispatch_sig(builder);
                     let native_id_val = builder.ins().iconst(types::I16, *native_id as i64);
                     let null_args_ptr = builder.ins().iconst(types::I64, 0);
@@ -1915,7 +1915,7 @@ impl<'a> LoweringContext<'a> {
                     }
 
                     let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
-                    let fn_ptr = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 64); // 24 + 40
+                    let fn_ptr = builder.ins().load(types::I64, MemFlags::trusted(), ctx, crate::jit::runtime::trampoline::HELPER_NATIVE_CALL_OFFSET); // 24 + 40
                     let sig = self.native_call_dispatch_sig(builder);
                     let native_id_val = builder.ins().iconst(types::I16, *native_id as i64);
                     let arg_count_i8 = builder.ins().iconst(types::I8, arg_count as i64);

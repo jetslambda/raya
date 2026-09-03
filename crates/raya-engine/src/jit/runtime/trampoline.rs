@@ -105,6 +105,49 @@ pub struct RuntimeContext {
     pub helpers: RuntimeHelperTable,
 }
 
+/// ABI layout constants consumed by Cranelift lowering. Keep these derived from
+/// the Rust structs; never duplicate field offsets in native code.
+pub const RUNTIME_CONTEXT_ABI_VERSION: u16 = 1;
+pub const RUNTIME_CONTEXT_HELPERS_OFFSET: i32 =
+    std::mem::offset_of!(RuntimeContext, helpers) as i32;
+pub const HELPER_SAFEPOINT_POLL_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET
+        + std::mem::offset_of!(RuntimeHelperTable, safepoint_poll) as i32;
+pub const HELPER_CHECK_PREEMPTION_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET
+        + std::mem::offset_of!(RuntimeHelperTable, check_preemption) as i32;
+pub const HELPER_NATIVE_CALL_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET
+        + std::mem::offset_of!(RuntimeHelperTable, native_call_dispatch) as i32;
+pub const HELPER_INTERPRETER_CALL_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET
+        + std::mem::offset_of!(RuntimeHelperTable, interpreter_call) as i32;
+pub const HELPER_THROW_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, throw_exception) as i32;
+pub const HELPER_DEOPT_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, deoptimize) as i32;
+pub const HELPER_STRING_CONCAT_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, string_concat) as i32;
+pub const HELPER_GENERIC_EQUALS_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, generic_equals) as i32;
+pub const HELPER_OBJECT_GET_FIELD_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, object_get_field) as i32;
+pub const HELPER_OBJECT_SET_FIELD_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, object_set_field) as i32;
+pub const HELPER_OBJECT_SHAPE_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, object_implements_shape) as i32;
+pub const HELPER_OBJECT_NOMINAL_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, object_is_nominal) as i32;
+pub const HELPER_OBJECT_GET_SHAPE_FIELD_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, object_get_shape_field) as i32;
+pub const HELPER_OBJECT_SET_SHAPE_FIELD_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, object_set_shape_field) as i32;
+pub const HELPER_STRING_LEN_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, string_len) as i32;
+
+const _: () = assert!(std::mem::align_of::<RuntimeContext>() >= 8);
+const _: () = assert!(std::mem::size_of::<RuntimeContext>() >= std::mem::size_of::<RuntimeHelperTable>());
+
 /// C-ABI function pointer table for runtime helpers
 ///
 /// JIT code calls these through the RuntimeContext to interact with the VM.

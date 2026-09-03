@@ -1394,6 +1394,10 @@ impl<'a> Interpreter<'a> {
                         let jit_entry_guard_ok = module.functions.get(func_id).map_or(false, |f| {
                             if f.signature_id == 0 {
                                 true
+                            } else if f.abi_version
+                                != crate::jit::runtime::trampoline::RUNTIME_CONTEXT_ABI_VERSION
+                            {
+                                false
                             } else if let Some(sig) = module
                                 .function_signatures
                                 .get((f.signature_id - 1) as usize)
