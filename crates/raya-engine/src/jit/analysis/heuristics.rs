@@ -516,7 +516,8 @@ mod tests {
         // Additional arithmetic to push score above min_score (10.0)
         emit_local(&mut math_code, Opcode::LoadLocal, 1);
         emit_i32(&mut math_code, 3);
-        emit(&mut math_code, Opcode::Imod);
+        // Keep the candidate within the exact native arithmetic subset.
+        emit(&mut math_code, Opcode::Iadd);
         emit(&mut math_code, Opcode::Pop);
         emit_local(&mut math_code, Opcode::LoadLocal, 0);
         emit_i32(&mut math_code, 100);
