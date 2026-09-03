@@ -1115,6 +1115,11 @@ pub struct JitFunction {
     pub next_reg: u32,
     /// Type of each register (filled during lifting)
     pub reg_types: FxHashMap<Reg, JitType>,
+    /// Verified signature metadata consumed by the JIT pipeline.
+    pub signature_id: u32,
+    pub abi_version: u16,
+    pub param_types: Vec<JitType>,
+    pub return_type: JitType,
 }
 
 impl JitFunction {
@@ -1129,6 +1134,10 @@ impl JitFunction {
             entry: JitBlockId(0),
             next_reg: 0,
             reg_types: FxHashMap::default(),
+            signature_id: 0,
+            abi_version: 0,
+            param_types: Vec::new(),
+            return_type: JitType::Value,
         }
     }
 

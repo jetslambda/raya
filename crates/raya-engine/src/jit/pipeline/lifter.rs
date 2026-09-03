@@ -5,7 +5,7 @@
 //! virtual register, and at merge points (multiple predecessors)
 //! Phi nodes are inserted when registers differ.
 
-use crate::compiler::bytecode::{Function, Module, Opcode};
+use crate::compiler::bytecode::{Function, Module, Opcode, RuntimeTypeDescriptor};
 use crate::jit::analysis::cfg::{build_cfg, BlockId, BranchKind, CfgTerminator, ControlFlowGraph};
 use crate::jit::analysis::decoder::{decode_function, DecodedInstr, Operands};
 use crate::jit::ir::instr::*;
@@ -175,11 +175,49 @@ fn merge_stacks(
     StackState::from_regs(merged)
 }
 
+fn descriptor_for_id(module: &Module, id: u32) -> Option<RuntimeTypeDescriptor> {
+    if id < crate::compiler::bytecode::types::COMPLEX_BASE {
+        return Some(match id {
+            0 => RuntimeTypeDescriptor::I32, 1 => RuntimeTypeDescriptor::F64,
+            2 => RuntimeTypeDescriptor::Bool, 3 => RuntimeTypeDescriptor::String,
+            4 => RuntimeTypeDescriptor::Null, 5 => RuntimeTypeDescriptor::Void,
+            6 => RuntimeTypeDescriptor::AnyValue, 7 => RuntimeTypeDescriptor::Ref,
+            _ => return None,
+        });
+    }
+    module.runtime_types.get((id - crate::compiler::bytecode::types::COMPLEX_BASE) as usize).cloned()
+}
+
+fn jit_type_for_descriptor(desc: &RuntimeTypeDescriptor) -> JitType {
+    match desc {
+        RuntimeTypeDescriptor::I32 => JitType::I32,
+        RuntimeTypeDescriptor::F64 => JitType::F64,
+        RuntimeTypeDescriptor::Bool => JitType::Bool,
+        RuntimeTypeDescriptor::String => JitType::Ptr,
+        RuntimeTypeDescriptor::Void => JitType::Void,
+        RuntimeTypeDescriptor::Object { .. } | RuntimeTypeDescriptor::Array { .. }
+        | RuntimeTypeDescriptor::Tuple { .. } | RuntimeTypeDescriptor::Function { .. }
+        | RuntimeTypeDescriptor::Task { .. } | RuntimeTypeDescriptor::Ref => JitType::Ptr,
+        RuntimeTypeDescriptor::Null | RuntimeTypeDescriptor::AnyValue => JitType::Value,
+    }
+}
+
 /// Lift a bytecode function into JIT IR
 pub fn lift_function(
     func: &Function,
-    _module: &Module,
+    module: &Module,
     func_index: u32,
+) -> Result<JitFunction, LiftError> {
+    lift_function_with_signature(func, module, func_index, None)
+}
+
+/// Lift using the verifier-produced signature and local type table.
+/// Untyped/legacy functions retain the historical opcode-inference behavior.
+pub fn lift_function_with_signature(
+    func: &Function,
+    module: &Module,
+    func_index: u32,
+    signature: Option<&crate::compiler::bytecode::FunctionSignature>,
 ) -> Result<JitFunction, LiftError> {
     let instrs = decode_function(&func.code)?;
 
@@ -207,6 +245,21 @@ pub fn lift_function(
     let local_count = func.local_count;
 
     let mut jit_func = JitFunction::new(func_index, name, param_count, local_count);
+
+    if let Some(sig) = signature {
+        jit_func.signature_id = func.signature_id;
+        jit_func.abi_version = func.abi_version;
+        jit_func.param_types = sig.params.iter().map(jit_type_for_descriptor).collect();
+        jit_func.return_type = jit_type_for_descriptor(&sig.return_type);
+    }
+
+    let local_type = |index: usize| -> JitType {
+        func.local_types
+            .get(index)
+            .and_then(|id| descriptor_for_id(module, *id))
+            .map(|desc| jit_type_for_descriptor(&desc))
+            .unwrap_or(JitType::Value)
+    };
 
     // Create JIT blocks corresponding to CFG blocks
     let mut cfg_to_jit: FxHashMap<BlockId, JitBlockId> = FxHashMap::default();
@@ -277,7 +330,7 @@ pub fn lift_function(
         // Lift each instruction in this block
         for &instr_idx in &cfg_block.instrs {
             let instr = &instrs[instr_idx];
-            lift_instruction(instr, &mut jit_func, jit_block_id, &mut stack, &cfg_to_jit)?;
+            lift_instruction(instr, &mut jit_func, jit_block_id, &mut stack, &cfg_to_jit, &local_type)?;
         }
 
         // Set terminator based on CFG terminator
@@ -420,6 +473,7 @@ fn lift_instruction(
     block: JitBlockId,
     stack: &mut StackState,
     _cfg_to_jit: &FxHashMap<BlockId, JitBlockId>,
+    local_type: &dyn Fn(usize) -> JitType,
 ) -> Result<(), LiftError> {
     match instr.opcode {
         // ===== Stack Manipulation =====
@@ -508,7 +562,7 @@ fn lift_instruction(
         // ===== Local Variables =====
         Opcode::LoadLocal => {
             if let Operands::U16(index) = instr.operands {
-                let dest = func.alloc_reg(JitType::Value);
+                let dest = func.alloc_reg(local_type(index as usize));
                 func.block_mut(block)
                     .instrs
                     .push(JitInstr::LoadLocal { dest, index });
@@ -516,14 +570,14 @@ fn lift_instruction(
             }
         }
         Opcode::LoadLocal0 => {
-            let dest = func.alloc_reg(JitType::Value);
+            let dest = func.alloc_reg(local_type(0));
             func.block_mut(block)
                 .instrs
                 .push(JitInstr::LoadLocal { dest, index: 0 });
             stack.push(dest);
         }
         Opcode::LoadLocal1 => {
-            let dest = func.alloc_reg(JitType::Value);
+            let dest = func.alloc_reg(local_type(1));
             func.block_mut(block)
                 .instrs
                 .push(JitInstr::LoadLocal { dest, index: 1 });

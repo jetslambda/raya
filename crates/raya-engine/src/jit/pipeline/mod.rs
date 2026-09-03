@@ -34,6 +34,16 @@ pub struct JitPipeline<B: CodegenBackend> {
     optimizer: JitOptimizer,
 }
 
+fn verified_signature<'a>(
+    func: &Function,
+    module: &'a Module,
+) -> Option<&'a crate::compiler::bytecode::FunctionSignature> {
+    if func.signature_id == 0 || func.abi_version == 0 {
+        return None;
+    }
+    module.function_signatures.get((func.signature_id - 1) as usize)
+}
+
 impl<B: CodegenBackend> JitPipeline<B> {
     /// Create a new pipeline with the default optimizer
     pub fn new(backend: B) -> Self {
@@ -56,7 +66,8 @@ impl<B: CodegenBackend> JitPipeline<B> {
         func_index: u32,
     ) -> Result<(JitFunction, CompiledCode), JitError> {
         // Step 1-3: Decode, build CFG, lift to SSA
-        let mut jit_func = lifter::lift_function(func, module, func_index)?;
+        let signature = verified_signature(func, module);
+        let mut jit_func = lifter::lift_function_with_signature(func, module, func_index, signature)?;
 
         // Step 4: Optimize
         self.optimizer.optimize(&mut jit_func);
@@ -78,7 +89,8 @@ impl<B: CodegenBackend> JitPipeline<B> {
         module: &Module,
         func_index: u32,
     ) -> Result<JitFunction, JitError> {
-        let mut jit_func = lifter::lift_function(func, module, func_index)?;
+        let signature = verified_signature(func, module);
+        let mut jit_func = lifter::lift_function_with_signature(func, module, func_index, signature)?;
         self.optimizer.optimize(&mut jit_func);
         Ok(jit_func)
     }
@@ -175,6 +187,31 @@ mod tests {
     fn emit_load_local(code: &mut Vec<u8>, idx: u16) {
         code.push(Opcode::LoadLocal as u8);
         code.extend_from_slice(&idx.to_le_bytes());
+    }
+
+    #[test]
+    fn test_pipeline_consumes_verified_signature_types() {
+        let mut code = Vec::new();
+        code.push(Opcode::LoadLocal as u8);
+        code.extend_from_slice(&0u16.to_le_bytes());
+        code.push(Opcode::Return as u8);
+        let mut module = make_module_with_func(code, 1, 1);
+        module.functions[0].signature_id = 1;
+        module.functions[0].abi_version = 1;
+        module.functions[0].local_types = vec![0];
+        module.function_signatures.push(crate::compiler::bytecode::FunctionSignature {
+            params: vec![crate::compiler::bytecode::RuntimeTypeDescriptor::I32],
+            return_type: crate::compiler::bytecode::RuntimeTypeDescriptor::I32,
+            rest_element: None,
+            flags: crate::compiler::bytecode::FunctionFlags::default(),
+        });
+        let pipeline = JitPipeline::new(StubBackend);
+        let (jit_func, _) = pipeline.compile_function(&module.functions[0], &module, 0).unwrap();
+        assert_eq!(jit_func.signature_id, 1);
+        assert_eq!(jit_func.abi_version, 1);
+        assert_eq!(jit_func.param_types, vec![crate::jit::ir::types::JitType::I32]);
+        assert_eq!(jit_func.return_type, crate::jit::ir::types::JitType::I32);
+        assert!(jit_func.reg_types.values().any(|ty| *ty == crate::jit::ir::types::JitType::I32));
     }
 
     #[test]
