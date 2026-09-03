@@ -2536,6 +2536,10 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
         entry: JitBlockId(0),
         next_reg: 1,
         reg_types: FxHashMap::from_iter([(Reg(0), JitType::Value)]),
+        signature_id: 0,
+        abi_version: 0,
+        param_types: vec![],
+        return_type: JitType::Value,
     };
 
     let mut ctx = RuntimeContext {
