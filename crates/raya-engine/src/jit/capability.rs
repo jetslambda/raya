@@ -70,8 +70,6 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         Opcode::Iadd
         | Opcode::Isub
         | Opcode::Imul
-        | Opcode::Idiv
-        | Opcode::Imod
         | Opcode::Ineg
         | Opcode::Ishl
         | Opcode::Ishr
@@ -178,10 +176,13 @@ pub fn opcode_supported_for_jit(opcode: Opcode) -> bool {
 /// - `GetArgCount`/`LoadArgLocal`: no-op / constant zero (S2)
 /// - `Try`/`Rethrow`/`Throw`: placeholder handler installation; throw and
 ///   deopt helpers panic instead of propagating
+///   integer division/remainder currently lack catchable zero-divisor paths
 pub fn produces_incorrect_native_results(opcode: Opcode) -> bool {
     matches!(
         opcode,
         Opcode::Ipow
+            | Opcode::Idiv
+            | Opcode::Imod
             | Opcode::Fpow
             | Opcode::Fmod
             | Opcode::Eq
@@ -203,13 +204,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn division_and_remainder_are_rejected_until_error_paths_are_exact() {
+        assert_eq!(jit_support(Opcode::Idiv), JitSupport::Rejected);
+        assert_eq!(jit_support(Opcode::Imod), JitSupport::Rejected);
+        assert!(produces_incorrect_native_results(Opcode::Idiv));
+        assert!(produces_incorrect_native_results(Opcode::Imod));
+    }
+
+    #[test]
     fn arithmetic_core_is_native_exact() {
         for op in [
             Opcode::Iadd,
             Opcode::Isub,
             Opcode::Imul,
-            Opcode::Idiv,
-            Opcode::Imod,
             Opcode::Ineg,
             Opcode::Fadd,
             Opcode::Fsub,
