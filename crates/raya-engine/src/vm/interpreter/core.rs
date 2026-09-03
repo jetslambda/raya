@@ -1388,6 +1388,32 @@ impl<'a> Interpreter<'a> {
                     // Only for non-closure, non-constructor calls (pure function calls)
                     #[cfg(feature = "jit")]
                     if !is_closure && jit_can_use_fast_path {
+                        // Do not enter native code unless the boxed arguments satisfy the
+                        // verifier-produced signature. Untyped legacy functions retain the
+                        // existing behavior; a malformed typed reference fails closed.
+                        let jit_entry_guard_ok = module.functions.get(func_id).map_or(false, |f| {
+                            if f.signature_id == 0 {
+                                true
+                            } else if let Some(sig) = module
+                                .function_signatures
+                                .get((f.signature_id - 1) as usize)
+                            {
+                                let args: Vec<u64> = (0..arg_count)
+                                    .map(|i| {
+                                        stack_guard
+                                            .peek_at(stack_guard.depth() - arg_count + i)
+                                            .unwrap_or_default()
+                                            .raw()
+                                    })
+                                    .collect();
+                                crate::jit::runtime::trampoline::boxed_arguments_match(
+                                    &args, &sig.params,
+                                )
+                            } else {
+                                false
+                            }
+                        });
+                        if jit_entry_guard_ok {
                         if let (Some(cache), Some(mid)) = (&self.code_cache, jit_module_id) {
                             if let Some(jit_fn) = cache.get(mid, func_id as u32) {
                                 if let Some(ref telemetry) = self.jit_telemetry {
@@ -1589,6 +1615,7 @@ impl<'a> Interpreter<'a> {
                                     .cache_misses
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
+                        }
                         }
                     }
 
