@@ -1572,8 +1572,47 @@ unsafe extern "C" fn helper_object_set_shape_field(
     }
 }
 
+/// Raya's exact i32 division semantics. The VM raises a catchable error for a
+/// zero divisor and wraps the otherwise overflowing MIN/-1 case.
+pub fn exact_i32_div(left: i32, right: i32) -> Result<i32, &'static str> {
+    if right == 0 {
+        Err("division by zero")
+    } else {
+        Ok(left.wrapping_div(right))
+    }
+}
+
+/// Raya's exact i32 remainder semantics.
+pub fn exact_i32_rem(left: i32, right: i32) -> Result<i32, &'static str> {
+    if right == 0 {
+        Err("division by zero")
+    } else {
+        Ok(left.wrapping_rem(right))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{exact_i32_div, exact_i32_rem};
+
+    #[test]
+    fn exact_integer_division_matches_raya_edges() {
+        let cases = [(7, 2, 3), (-7, 2, -3), (i32::MIN, -1, i32::MIN)];
+        for (left, right, expected) in cases {
+            assert_eq!(exact_i32_div(left, right), Ok(expected));
+        }
+        assert_eq!(exact_i32_div(1, 0), Err("division by zero"));
+    }
+
+    #[test]
+    fn exact_integer_remainder_matches_raya_edges() {
+        let cases = [(7, 2, 1), (-7, 2, -1), (i32::MIN, -1, 0)];
+        for (left, right, expected) in cases {
+            assert_eq!(exact_i32_rem(left, right), Ok(expected));
+        }
+        assert_eq!(exact_i32_rem(1, 0), Err("division by zero"));
+    }
+
     use super::*;
     use crate::compiler::bytecode::ClassDef;
     use crossbeam::channel::unbounded;
