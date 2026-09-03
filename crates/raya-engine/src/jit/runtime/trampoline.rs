@@ -244,3 +244,26 @@ mod tests {
         assert!(!boxed_arguments_match(&args, &[T::Ref]));
     }
 }
+
+#[cfg(test)]
+mod abi_layout_tests {
+    use super::*;
+
+    #[test]
+    fn helper_offsets_match_c_layout() {
+        assert_eq!(RUNTIME_CONTEXT_HELPERS_OFFSET as usize, std::mem::offset_of!(RuntimeContext, helpers));
+        assert_eq!(HELPER_SAFEPOINT_POLL_OFFSET as usize,
+            std::mem::offset_of!(RuntimeContext, helpers) + std::mem::offset_of!(RuntimeHelperTable, safepoint_poll));
+        assert_eq!(HELPER_CHECK_PREEMPTION_OFFSET as usize,
+            std::mem::offset_of!(RuntimeContext, helpers) + std::mem::offset_of!(RuntimeHelperTable, check_preemption));
+        assert_eq!(HELPER_NATIVE_CALL_OFFSET as usize,
+            std::mem::offset_of!(RuntimeContext, helpers) + std::mem::offset_of!(RuntimeHelperTable, native_call_dispatch));
+    }
+
+    #[test]
+    fn runtime_abi_is_pointer_aligned_and_versioned() {
+        assert_eq!(std::mem::align_of::<RuntimeContext>(), std::mem::align_of::<*const ()>());
+        assert_eq!(std::mem::align_of::<RuntimeHelperTable>(), std::mem::align_of::<*const ()>());
+        assert_eq!(RUNTIME_CONTEXT_ABI_VERSION, 1);
+    }
+}
