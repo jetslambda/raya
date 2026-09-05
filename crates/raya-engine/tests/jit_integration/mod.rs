@@ -1331,10 +1331,15 @@ fn jit_new_type_lifts_to_new_object() {
     let func = &module.functions[0];
     let jit_func = lift_function(func, &module, 0).expect("Lift failed");
 
-    assert!(matches!(
-        jit_func.blocks[0].instrs.first(),
-        Some(JitInstr::NewObject { .. })
-    ));
+    // NewType now lifts to GcSafepoint then NewObject due to J4 GC polling
+    assert!(jit_func.blocks[0].instrs.iter().any(|i| matches!(i, JitInstr::GcSafepoint { .. })));
+    assert!(jit_func.blocks[0].instrs.iter().any(|i| matches!(i, JitInstr::NewObject { .. })));
+    // Ensure NewObject is after GcSafepoint (order may vary)
+    let gc_index = jit_func.blocks[0].instrs.iter().position(|i| matches!(i, JitInstr::GcSafepoint { .. }));
+    let new_obj_index = jit_func.blocks[0].instrs.iter().position(|i| matches!(i, JitInstr::NewObject { .. }));
+    if let (Some(gc), Some(new_obj)) = (gc_index, new_obj_index) {
+        assert!(gc < new_obj, "GcSafepoint should precede NewObject");
+    }
 }
 
 #[test]
