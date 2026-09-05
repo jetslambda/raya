@@ -1025,6 +1025,9 @@ fn lift_instruction(
         Opcode::NewType => {
             if let Operands::U16(nominal_type_id) = instr.operands {
                 let dest = func.alloc_reg(JitType::Ptr);
+                func.block_mut(block)
+                    .instrs
+                    .push(JitInstr::GcSafepoint { bytecode_offset: instr.offset as u32 });
                 func.block_mut(block).instrs.push(JitInstr::NewObject {
                     dest,
                     nominal_type_id: nominal_type_id as u32,
@@ -1169,6 +1172,9 @@ fn lift_instruction(
         Opcode::NewArray => {
             if let Operands::U32(type_index) = instr.operands {
                 let dest = func.alloc_reg(JitType::Ptr);
+                func.block_mut(block)
+                    .instrs
+                    .push(JitInstr::GcSafepoint { bytecode_offset: instr.offset as u32 });
                 func.block_mut(block)
                     .instrs
                     .push(JitInstr::NewArray { dest, type_index });
@@ -1467,6 +1473,9 @@ fn lift_instruction(
                 }
                 args.reverse();
                 let dest = func.alloc_reg(JitType::Value);
+                func.block_mut(block)
+                    .instrs
+                    .push(JitInstr::GcSafepoint { bytecode_offset: instr.offset as u32 });
                 func.block_mut(block).instrs.push(JitInstr::CallNative {
                     dest: Some(dest),
                     native_id,
