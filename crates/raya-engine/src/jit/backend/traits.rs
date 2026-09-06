@@ -3,7 +3,7 @@
 //! Defines the `CodegenBackend` trait that pluggable backends (Cranelift, LLVM, etc.)
 //! implement, along with types for compiled code, relocations, and stack maps.
 
-use crate::jit::ir::instr::JitFunction;
+use crate::jit::ir::instr::{DeoptState, JitFunction, JitTerminator};
 
 /// Target architecture
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,15 +98,31 @@ pub struct StackMapEntry {
     pub live_pointers: Vec<PointerLocation>,
 }
 
-/// Information needed to resume the interpreter after deoptimization
-#[derive(Debug, Clone)]
+/// Information needed to resume the interpreter after deoptimization.
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeoptInfo {
-    /// Code offset where deopt can occur
-    pub code_offset: usize,
-    /// Bytecode offset to resume at
-    pub bytecode_offset: usize,
-    /// Map from machine locations to local variable indices
-    pub register_map: Vec<(PointerLocation, u16)>,
+    /// Native code offset, populated once a backend can map guards to instructions.
+    pub native_code_offset: Option<usize>,
+    /// Complete backend-independent reconstruction state.
+    pub state: DeoptState,
+}
+
+/// Collect logical deoptimization records from JIT IR.
+///
+/// D1 records complete reconstruction state. Mapping each guard to a native
+/// instruction offset is intentionally deferred until D2 wires executable
+/// continuation.
+pub fn collect_deopt_info(func: &JitFunction) -> Vec<DeoptInfo> {
+    func.blocks
+        .iter()
+        .filter_map(|block| match &block.terminator {
+            JitTerminator::Deoptimize { state, .. } => Some(DeoptInfo {
+                native_code_offset: None,
+                state: state.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Context information about the module being compiled

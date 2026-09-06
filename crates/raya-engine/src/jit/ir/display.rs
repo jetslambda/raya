@@ -679,7 +679,7 @@ impl fmt::Display for JitTerminator {
             JitTerminator::Throw(reg) => write!(f, "throw {}", reg),
             JitTerminator::Unreachable => write!(f, "unreachable"),
             JitTerminator::Deoptimize { reason, state } => {
-                write!(f, "deoptimize {:?} @{}", reason, state.bytecode_offset)
+                write!(f, "deoptimize {:?} @{}", reason, state.resume_bytecode_pc)
             }
             JitTerminator::None => write!(f, "<no terminator>"),
         }

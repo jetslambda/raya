@@ -5,6 +5,9 @@ pub mod display;
 pub mod instr;
 pub mod types;
 
-pub use instr::{DeoptReason, DeoptState, LocalSlot};
+pub use instr::{
+    DeoptReason, DeoptState, DeoptValue, ExceptionHandlerState, GuardId, LocalSlot,
+    Rematerialization,
+};
 pub use instr::{JitBlock, JitBlockId, JitFunction, JitInstr, JitTerminator, Reg};
 pub use types::JitType;

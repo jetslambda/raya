@@ -16,7 +16,7 @@ impl CodegenBackend for StubBackend {
 
     fn compile_function(
         &self,
-        _func: &JitFunction,
+        func: &JitFunction,
         _ctx: &ModuleContext<'_>,
     ) -> Result<CompiledCode, CodegenError> {
         // Emit a single-byte trap instruction as placeholder
@@ -29,7 +29,7 @@ impl CodegenBackend for StubBackend {
             code: vec![trap_byte],
             entry_offset: 0,
             stack_maps: vec![],
-            deopt_info: vec![],
+            deopt_info: collect_deopt_info(func),
             relocations: vec![],
         })
     }

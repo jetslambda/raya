@@ -28,11 +28,39 @@ impl std::fmt::Display for JitBlockId {
 }
 
 /// Mapping from a JIT register to a local variable slot (for deoptimization)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalSlot(pub u16);
 
+/// Stable identifier for a guard that may trigger deoptimization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GuardId(pub u32);
+
+/// A value that can be reconstructed without reading machine state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Rematerialization {
+    I32(i32),
+    F64Bits(u64),
+    Bool(bool),
+    Null,
+}
+
+/// Logical source of a value needed by the interpreter after deoptimization.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DeoptValue {
+    Register(Reg),
+    Rematerialize(Rematerialization),
+}
+
+/// Active exception handler state at a deoptimization point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExceptionHandlerState {
+    pub catch_bytecode_offset: Option<usize>,
+    pub finally_bytecode_offset: Option<usize>,
+    pub stack_depth: usize,
+}
+
 /// Why we need to deoptimize back to the interpreter
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeoptReason {
     /// Unsupported opcode encountered during lifting
     UnsupportedOpcode(u8),
@@ -42,13 +70,21 @@ pub enum DeoptReason {
     ConcurrencyOp,
 }
 
-/// State needed to resume interpretation after deoptimization
-#[derive(Debug, Clone)]
+/// Complete logical state needed to resume interpretation after deoptimization.
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeoptState {
-    /// Bytecode offset to resume at
-    pub bytecode_offset: usize,
-    /// Map JIT registers back to local variable slots
-    pub register_map: Vec<(Reg, LocalSlot)>,
+    /// Guard that triggered this exit.
+    pub guard_id: GuardId,
+    /// Exact bytecode program counter at which interpretation resumes.
+    pub resume_bytecode_pc: usize,
+    /// Interpreter local slots and their logical sources.
+    pub locals: Vec<(LocalSlot, DeoptValue)>,
+    /// Operand stack in bottom-to-top order.
+    pub operand_stack: Vec<DeoptValue>,
+    /// Values that can be reconstructed without reading machine state.
+    pub rematerializations: Vec<(Reg, Rematerialization)>,
+    /// Active exception handlers, outermost first.
+    pub exception_handlers: Vec<ExceptionHandlerState>,
 }
 
 /// A JIT IR instruction

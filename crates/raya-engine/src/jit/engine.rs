@@ -15,7 +15,7 @@ use crate::compiler::bytecode::Module;
 use crate::compiler::Opcode;
 use crate::jit::analysis::heuristics::HeuristicsAnalyzer;
 use crate::jit::backend::cranelift::lowering::{jit_entry_signature, LoweringContext};
-use crate::jit::backend::traits::{CodegenError, ExecutableCode};
+use crate::jit::backend::traits::{collect_deopt_info, CodegenError, ExecutableCode};
 use crate::jit::backend::CraneliftBackend;
 use crate::jit::ir::instr::JitFunction;
 use crate::jit::pipeline::prewarm::PrewarmConfig;
@@ -251,7 +251,7 @@ impl JitEngine {
             code_size,
             entry_offset: 0,
             stack_maps: vec![],
-            deopt_info: vec![],
+            deopt_info: collect_deopt_info(jit_func),
         };
 
         let layout_dependencies = self.collect_layout_dependencies(module, func_idx);
