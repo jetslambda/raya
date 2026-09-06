@@ -28,7 +28,7 @@ pub struct FunctionSignatureId(pub u32);
 /// Reserved signature id meaning "no signature recorded".
 pub const UNTYPED_SIGNATURE_ID: u32 = 0;
 /// ABI version of the function calling convention recorded at compile time.
-pub const CURRENT_ABI_VERSION: u16 = 1;
+pub const CURRENT_ABI_VERSION: u16 = 2;
 
 /// Well-known primitive descriptor ids. These double as compact encodings:
 /// descriptors below `FIRST_COMPLEX` encode as a single tag byte.

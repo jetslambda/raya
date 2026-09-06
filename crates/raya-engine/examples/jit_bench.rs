@@ -456,7 +456,7 @@ fn jit_compile(module: &Module, func_idx: usize) -> Result<CompiledFunction, Str
     {
         let builder =
             cranelift_frontend::FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
-        LoweringContext::lower(&jit_func, module, builder)
+        LoweringContext::lower(&jit_func, module, None, builder)
             .map_err(|e| format!("Lower: {}", e))?;
     }
 
@@ -909,7 +909,7 @@ fn main() {
             let mut fbc = FunctionBuilderContext::new();
             {
                 let builder = cranelift_frontend::FunctionBuilder::new(&mut ctx.func, &mut fbc);
-                LoweringContext::lower(&jit_func, &module, builder).unwrap();
+                LoweringContext::lower(&jit_func, &module, None, builder).unwrap();
             }
 
             jit_module.define_function(func_id, &mut ctx).unwrap();

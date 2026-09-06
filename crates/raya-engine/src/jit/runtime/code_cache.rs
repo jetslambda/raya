@@ -8,13 +8,39 @@ use crate::jit::runtime::trampoline::JitEntryFn;
 use crate::vm::object::LayoutId;
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Composite key for the code cache: (module_id, func_index)
 ///
 /// module_id disambiguates functions across different modules that may share
 /// the same function index. Assigned by the cache via an atomic counter.
 type CacheKey = (u64, u32);
+
+/// Dependency generations captured before a function is lowered.
+#[derive(Clone, Default)]
+pub struct LayoutGenerationSnapshot {
+    generations: FxHashMap<LayoutDependency, (Arc<AtomicU64>, u64)>,
+}
+
+impl LayoutGenerationSnapshot {
+    /// Return the captured generation for one dependency.
+    pub fn generation(&self, dependency: LayoutDependency) -> Option<u64> {
+        self.generations
+            .get(&dependency)
+            .map(|(_, generation)| *generation)
+    }
+
+    fn dependencies(&self) -> impl Iterator<Item = LayoutDependency> + '_ {
+        self.generations.keys().copied()
+    }
+
+    fn is_current(&self) -> bool {
+        self.generations.values().all(|(counter, generation)| {
+            counter.load(Ordering::Acquire) == *generation
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum LayoutDependency {
@@ -32,6 +58,8 @@ pub struct CacheEntry {
     pub module_checksum: [u8; 32],
     /// Layout dependencies for generated-code invalidation.
     pub layout_dependencies: FxHashSet<LayoutDependency>,
+    /// Dependency generations embedded in this compiled function.
+    pub layout_generations: LayoutGenerationSnapshot,
 }
 
 /// Thread-safe cache of JIT-compiled function code
@@ -51,6 +79,13 @@ pub struct CodeCache {
     /// Layout dependency → cached functions that should be invalidated when that
     /// layout changes.
     layout_dependents: RwLock<FxHashMap<LayoutDependency, FxHashSet<CacheKey>>>,
+    /// Lock-free generation used by current conservative object dependencies.
+    any_layout_generation: Arc<AtomicU64>,
+    /// Monotonic assumption generation for specific layout dependencies.
+    layout_generations: RwLock<FxHashMap<LayoutDependency, Arc<AtomicU64>>>,
+    /// Serializes publication with generation changes. Native generation checks
+    /// remain lock-free through the counters stored in snapshots.
+    layout_publication: RwLock<()>,
 }
 
 impl CodeCache {
@@ -64,6 +99,9 @@ impl CodeCache {
             module_ids: RwLock::new(FxHashMap::default()),
             module_checksums: RwLock::new(FxHashMap::default()),
             layout_dependents: RwLock::new(FxHashMap::default()),
+            any_layout_generation: Arc::new(AtomicU64::new(0)),
+            layout_generations: RwLock::new(FxHashMap::default()),
+            layout_publication: RwLock::new(()),
         }
     }
 
@@ -118,6 +156,20 @@ impl CodeCache {
     where
         I: IntoIterator<Item = LayoutDependency>,
     {
+        let layout_generations = self.snapshot_layout_generations(dependencies);
+        self.insert_with_layout_generations(module_id, func_index, code, layout_generations)
+    }
+
+    /// Insert code only if the dependency generations captured before lowering
+    /// are still current. This prevents publishing code compiled across an
+    /// invalidation.
+    pub fn insert_with_layout_generations(
+        &self,
+        module_id: u64,
+        func_index: u32,
+        code: ExecutableCode,
+        layout_generations: LayoutGenerationSnapshot,
+    ) -> bool {
         let key = (module_id, func_index);
         let code_size = code.code_size;
         let current = self.total_code_size.load(Ordering::Relaxed);
@@ -130,8 +182,14 @@ impl CodeCache {
             .get(&module_id)
             .copied()
             .unwrap_or([0; 32]);
-        let layout_dependencies: FxHashSet<_> = dependencies.into_iter().collect();
+        let layout_dependencies: FxHashSet<_> = layout_generations.dependencies().collect();
 
+        // Invalidation takes the write side, increments generations, and marks
+        // existing dependents before another publication can complete.
+        let _publication = self.layout_publication.read();
+        if !layout_generations.is_current() {
+            return false;
+        }
         let mut entries = self.entries.write();
         // Remove old entry size if replacing
         if let Some(old) = entries.remove(&key) {
@@ -156,6 +214,7 @@ impl CodeCache {
                 invalidated: AtomicBool::new(false),
                 module_checksum,
                 layout_dependencies: layout_dependencies.clone(),
+                layout_generations,
             },
         );
         if !layout_dependencies.is_empty() {
@@ -172,13 +231,21 @@ impl CodeCache {
     /// Returns None if the function isn't compiled or has been invalidated.
     pub fn get(&self, module_id: u64, func_index: u32) -> Option<JitEntryFn> {
         let key = (module_id, func_index);
-        let entries = self.entries.read();
-        let entry = entries.get(&key)?;
-        if entry.invalidated.load(Ordering::Acquire) {
+        let (code_ptr, entry_offset, invalidated, generations) = {
+            let entries = self.entries.read();
+            let entry = entries.get(&key)?;
+            (
+                entry.code.code_ptr,
+                entry.code.entry_offset,
+                entry.invalidated.load(Ordering::Acquire),
+                entry.layout_generations.clone(),
+            )
+        };
+        if invalidated || !self.layout_generations_match(&generations) {
             return None;
         }
         // Safety: entry_offset is within code bounds (verified at finalize time)
-        let fn_ptr = unsafe { entry.code.code_ptr.add(entry.code.entry_offset) };
+        let fn_ptr = unsafe { code_ptr.add(entry_offset) };
         Some(unsafe { std::mem::transmute::<*const u8, JitEntryFn>(fn_ptr) })
     }
 
@@ -191,11 +258,68 @@ impl CodeCache {
         }
     }
 
+    /// Capture the current generation for each dependency.
+    pub fn snapshot_layout_generations<I>(&self, dependencies: I) -> LayoutGenerationSnapshot
+    where
+        I: IntoIterator<Item = LayoutDependency>,
+    {
+        let dependencies: FxHashSet<_> = dependencies.into_iter().collect();
+        let generations = dependencies
+            .into_iter()
+            .map(|dependency| {
+                let counter = self.layout_generation_counter(dependency);
+                let generation = counter.load(Ordering::Acquire);
+                (dependency, (counter, generation))
+            })
+            .collect();
+        LayoutGenerationSnapshot { generations }
+    }
+
+    fn layout_generation_counter(&self, dependency: LayoutDependency) -> Arc<AtomicU64> {
+        match dependency {
+            LayoutDependency::AnyLayout => self.any_layout_generation.clone(),
+            LayoutDependency::Layout(_) => self
+                .layout_generations
+                .write()
+                .entry(dependency)
+                .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+                .clone(),
+        }
+    }
+
+    /// Return the current generation for one dependency.
+    pub fn layout_generation(&self, dependency: LayoutDependency) -> u64 {
+        self.layout_generation_counter(dependency)
+            .load(Ordering::Acquire)
+    }
+
+    /// Check a generation embedded in native code at an assumption site.
+    pub fn layout_generation_matches(
+        &self,
+        dependency: LayoutDependency,
+        expected: u64,
+    ) -> bool {
+        self.layout_generation(dependency) == expected
+    }
+
+    fn layout_generations_match(&self, expected: &LayoutGenerationSnapshot) -> bool {
+        expected.is_current()
+    }
+
     /// Invalidate every compiled function that depends on the given layout.
     ///
     /// Returns `(module_checksum, func_index)` pairs so external profiling state
     /// can reset its `jit_available` flags too.
     pub fn invalidate_layout(&self, layout_id: LayoutId) -> Vec<([u8; 32], u32)> {
+        let _publication = self.layout_publication.write();
+        for dependency in [
+            LayoutDependency::AnyLayout,
+            LayoutDependency::Layout(layout_id),
+        ] {
+            self.layout_generation_counter(dependency)
+                .fetch_add(1, Ordering::AcqRel);
+        }
+
         let mut affected_keys: FxHashSet<CacheKey> = FxHashSet::default();
         {
             let dependents = self.layout_dependents.read();
@@ -221,10 +345,16 @@ impl CodeCache {
     /// Check if a function has been compiled and is valid
     pub fn contains(&self, module_id: u64, func_index: u32) -> bool {
         let key = (module_id, func_index);
-        let entries = self.entries.read();
-        entries
-            .get(&key)
-            .map(|e| !e.invalidated.load(Ordering::Acquire))
+        let entry_state = self.entries.read().get(&key).map(|entry| {
+            (
+                entry.invalidated.load(Ordering::Acquire),
+                entry.layout_generations.clone(),
+            )
+        });
+        entry_state
+            .map(|(invalidated, generations)| {
+                !invalidated && self.layout_generations_match(&generations)
+            })
             .unwrap_or(false)
     }
 
@@ -350,6 +480,72 @@ mod tests {
         let affected = cache.invalidate_layout(42);
         assert_eq!(affected, vec![(checksum, 3)]);
         assert!(!cache.contains(mid, 3));
+    }
+
+    #[test]
+    fn layout_invalidation_advances_only_matching_generations() {
+        let cache = CodeCache::new(1024);
+        let any = cache.layout_generation(LayoutDependency::AnyLayout);
+        let matching = cache.layout_generation(LayoutDependency::Layout(42));
+        let other = cache.layout_generation(LayoutDependency::Layout(7));
+
+        cache.invalidate_layout(42);
+
+        assert_eq!(cache.layout_generation(LayoutDependency::AnyLayout), any + 1);
+        assert_eq!(
+            cache.layout_generation(LayoutDependency::Layout(42)),
+            matching + 1
+        );
+        assert_eq!(cache.layout_generation(LayoutDependency::Layout(7)), other);
+    }
+
+    #[test]
+    fn stale_compilation_snapshot_is_not_inserted() {
+        let cache = CodeCache::new(1024);
+        let mid = cache.register_module([3; 32]);
+        let snapshot = cache.snapshot_layout_generations([LayoutDependency::AnyLayout]);
+
+        cache.invalidate_layout(42);
+
+        assert!(!cache.insert_with_layout_generations(
+            mid,
+            0,
+            make_dummy_code(64),
+            snapshot,
+        ));
+        assert_eq!(cache.entry_count(), 0);
+    }
+
+    #[test]
+    fn invalidating_one_layout_preserves_other_specific_dependencies() {
+        let cache = CodeCache::new(1024);
+        let first = cache.register_module([4; 32]);
+        let second = cache.register_module([5; 32]);
+        let any = cache.register_module([6; 32]);
+        assert!(cache.insert_with_dependencies(
+            first,
+            0,
+            make_dummy_code(64),
+            [LayoutDependency::Layout(42)],
+        ));
+        assert!(cache.insert_with_dependencies(
+            second,
+            0,
+            make_dummy_code(64),
+            [LayoutDependency::Layout(7)],
+        ));
+        assert!(cache.insert_with_dependencies(
+            any,
+            0,
+            make_dummy_code(64),
+            [LayoutDependency::AnyLayout],
+        ));
+
+        cache.invalidate_layout(42);
+
+        assert!(!cache.contains(first, 0));
+        assert!(cache.contains(second, 0));
+        assert!(!cache.contains(any, 0));
     }
 
     #[test]

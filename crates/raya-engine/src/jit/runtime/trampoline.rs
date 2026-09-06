@@ -107,7 +107,7 @@ pub struct RuntimeContext {
 
 /// ABI layout constants consumed by Cranelift lowering. Keep these derived from
 /// the Rust structs; never duplicate field offsets in native code.
-pub const RUNTIME_CONTEXT_ABI_VERSION: u16 = 1;
+pub const RUNTIME_CONTEXT_ABI_VERSION: u16 = 2;
 pub const RUNTIME_CONTEXT_HELPERS_OFFSET: i32 =
     std::mem::offset_of!(RuntimeContext, helpers) as i32;
 pub const HELPER_SAFEPOINT_POLL_OFFSET: i32 =
@@ -178,8 +178,9 @@ pub struct RuntimeHelperTable {
     pub string_concat: unsafe extern "C" fn(u64, u64, *mut ()) -> u64,
     /// Generic equality: (left_val, right_val, shared_state) -> bool
     pub generic_equals: unsafe extern "C" fn(u64, u64, *mut ()) -> bool,
-    /// Structural/nominal field load: (obj_val, expected_slot, func_id, module_ptr, shared_state) -> result_val
-    pub object_get_field: unsafe extern "C" fn(u64, u32, u32, *const (), *mut ()) -> u64,
+    /// Structural/nominal field load with an AnyLayout generation guard.
+    pub object_get_field:
+        unsafe extern "C" fn(u64, u32, u64, u32, *const (), *mut ()) -> u64,
     /// Structural/nominal field store: (obj_val, expected_slot, value, func_id, module_ptr, shared_state) -> success
     pub object_set_field: unsafe extern "C" fn(u64, u32, u64, u32, *const (), *mut ()) -> bool,
     /// Structural shape check: (obj_val, shape_id, shared_state) -> implements
@@ -264,6 +265,10 @@ mod abi_layout_tests {
     fn runtime_abi_is_pointer_aligned_and_versioned() {
         assert_eq!(std::mem::align_of::<RuntimeContext>(), std::mem::align_of::<*const ()>());
         assert_eq!(std::mem::align_of::<RuntimeHelperTable>(), std::mem::align_of::<*const ()>());
-        assert_eq!(RUNTIME_CONTEXT_ABI_VERSION, 1);
+        assert_eq!(RUNTIME_CONTEXT_ABI_VERSION, 2);
+        assert_eq!(
+            RUNTIME_CONTEXT_ABI_VERSION,
+            crate::compiler::bytecode::CURRENT_ABI_VERSION
+        );
     }
 }

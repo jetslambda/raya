@@ -90,7 +90,8 @@ mod tests {
     #[test]
     fn b2_typed_signatures_persist_into_bytecode() {
         use crate::compiler::bytecode::types::{
-            runtime_type_of_lenient, RuntimeTypeDescriptor, UNTYPED_SIGNATURE_ID,
+            runtime_type_of_lenient, RuntimeTypeDescriptor, CURRENT_ABI_VERSION,
+            UNTYPED_SIGNATURE_ID,
         };
         use crate::parser::types::context::TypeContext;
 
@@ -114,7 +115,7 @@ mod tests {
 
         let f = &bytecode.functions[0];
         assert_ne!(f.signature_id, UNTYPED_SIGNATURE_ID, "signature recorded");
-        assert_eq!(f.abi_version, 1);
+        assert_eq!(f.abi_version, CURRENT_ABI_VERSION);
 
         let sig = &bytecode.function_signatures[f.signature_id as usize - 1];
         let i32_desc = runtime_type_of_lenient(&type_ctx, int_ty);

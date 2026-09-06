@@ -80,7 +80,7 @@ impl CodegenBackend for CraneliftBackend {
             );
 
             // lower() takes ownership of builder (finalize() consumes it)
-            LoweringContext::lower(func, ctx.module, builder)
+            LoweringContext::lower(func, ctx.module, None, builder)
                 .map_err(|e| CodegenError::BackendError(format!("Lowering failed: {}", e)))?;
         }
 

@@ -20,7 +20,9 @@ use crate::jit::backend::CraneliftBackend;
 use crate::jit::ir::instr::JitFunction;
 use crate::jit::pipeline::prewarm::PrewarmConfig;
 use crate::jit::pipeline::JitPipeline;
-use crate::jit::runtime::code_cache::{CodeCache, LayoutDependency};
+use crate::jit::runtime::code_cache::{
+    CodeCache, LayoutDependency, LayoutGenerationSnapshot,
+};
 
 /// Default code cache size: 64 MB
 const DEFAULT_CODE_CACHE_SIZE: usize = 64 * 1024 * 1024;
@@ -187,6 +189,13 @@ impl JitEngine {
         func_idx: usize,
         module_id: u64,
     ) -> Result<(), String> {
+        // Capture assumptions before lowering so generated guards and the cache
+        // entry use the same generations.
+        let layout_dependencies = self.collect_layout_dependencies(module, func_idx);
+        let layout_generations = self
+            .code_cache
+            .snapshot_layout_generations(layout_dependencies);
+
         // Step 1: Lift bytecode → optimized JIT IR
         let jit_func = self
             .pipeline
@@ -194,7 +203,13 @@ impl JitEngine {
             .map_err(|e| format!("Lift/optimize failed: {}", e))?;
 
         // Step 2: Lower JIT IR → Cranelift IR → executable code via JITModule
-        self.compile_jit_function(&jit_func, func_idx, module, module_id)
+        self.compile_jit_function(
+            &jit_func,
+            func_idx,
+            module,
+            module_id,
+            layout_generations,
+        )
     }
 
     /// Lower a JitFunction through the JITModule to produce executable code.
@@ -204,6 +219,7 @@ impl JitEngine {
         func_idx: usize,
         module: &Module,
         module_id: u64,
+        layout_generations: LayoutGenerationSnapshot,
     ) -> Result<(), String> {
         let call_conv = self.jit_module.isa().default_call_conv();
         let sig = jit_entry_signature(call_conv);
@@ -224,7 +240,9 @@ impl JitEngine {
             let mut func_builder_ctx = cranelift_frontend::FunctionBuilderContext::new();
             let builder =
                 cranelift_frontend::FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
-            LoweringContext::lower(jit_func, module, builder)
+            let any_layout_generation =
+                layout_generations.generation(LayoutDependency::AnyLayout);
+            LoweringContext::lower(jit_func, module, any_layout_generation, builder)
                 .map_err(|e| format!("Lowering failed: {}", e))?;
         }
 
@@ -254,13 +272,14 @@ impl JitEngine {
             deopt_info: collect_deopt_info(jit_func),
         };
 
-        let layout_dependencies = self.collect_layout_dependencies(module, func_idx);
-        self.code_cache.insert_with_dependencies(
+        if !self.code_cache.insert_with_layout_generations(
             module_id,
             func_idx as u32,
             executable,
-            layout_dependencies,
-        );
+            layout_generations,
+        ) {
+            return Err("layout generation changed during JIT compilation".to_string());
+        }
         Ok(())
     }
 
@@ -354,7 +373,13 @@ impl JitEngine {
                         .contains(req.module_id, req.func_index as u32)
                     {
                         if let Some(fp) = req.module_profile.get(req.func_index) {
-                            fp.finish_compile()
+                            fp.finish_compile();
+                            if !engine
+                                .code_cache
+                                .contains(req.module_id, req.func_index as u32)
+                            {
+                                fp.invalidate_compiled_code();
+                            }
                         }
                         continue;
                     }
@@ -371,6 +396,14 @@ impl JitEngine {
                             // Mark profile so workers see jit_available and stop requesting
                             if let Some(fp) = req.module_profile.get(req.func_index) {
                                 fp.finish_compile();
+                                // If invalidation raced cache publication, it either
+                                // clears this flag afterward or this recheck does.
+                                if !engine
+                                    .code_cache
+                                    .contains(req.module_id, req.func_index as u32)
+                                {
+                                    fp.invalidate_compiled_code();
+                                }
                             }
                         }
                         Err(err) => {

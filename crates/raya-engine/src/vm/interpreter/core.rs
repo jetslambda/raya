@@ -1452,6 +1452,7 @@ impl<'a> Interpreter<'a> {
                                         self.gc,
                                         self.classes,
                                         self.layouts,
+                                        cache.as_ref(),
                                         self.mutex_registry,
                                         self.semaphore_registry,
                                         self.globals_by_index,

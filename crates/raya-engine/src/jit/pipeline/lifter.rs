@@ -1038,12 +1038,15 @@ fn lift_instruction(
         }
         Opcode::LoadFieldExact => {
             if let Operands::U16(offset) = instr.operands {
+                let pre_stack = stack.clone_state();
                 let object = stack.pop(instr.offset)?;
                 let dest = func.alloc_reg(JitType::Value);
                 func.block_mut(block).instrs.push(JitInstr::LoadFieldExact {
                     dest,
                     object,
                     offset,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
                 });
                 stack.push(dest);
             }
@@ -1097,12 +1100,15 @@ fn lift_instruction(
         }
         Opcode::OptionalFieldExact => {
             if let Operands::U16(offset) = instr.operands {
+                let pre_stack = stack.clone_state();
                 let object = stack.pop(instr.offset)?;
                 let dest = func.alloc_reg(JitType::Value);
                 func.block_mut(block).instrs.push(JitInstr::OptionalFieldExact {
                     dest,
                     object,
                     offset,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
                 });
                 stack.push(dest);
             }
@@ -2160,6 +2166,44 @@ mod tests {
             .instrs
             .iter()
             .any(|i| matches!(i, JitInstr::LoadLocal { index: 0, .. })));
+    }
+
+    #[test]
+    fn exact_field_loads_preserve_resume_stack_and_pc() {
+        for opcode in [Opcode::LoadFieldExact, Opcode::OptionalFieldExact] {
+            let mut code = Vec::new();
+            emit_load_local(&mut code, 0);
+            code.push(opcode as u8);
+            code.extend_from_slice(&2u16.to_le_bytes());
+            emit(&mut code, Opcode::Return);
+
+            let func = make_function(code, 1, 1);
+            let module = make_module();
+            let jit_func = lift_function(&func, &module, 0).unwrap();
+            let entry = jit_func.block(jit_func.entry);
+            let (object, stack, bytecode_offset) = entry
+                .instrs
+                .iter()
+                .find_map(|instr| match instr {
+                    JitInstr::LoadFieldExact {
+                        object,
+                        stack,
+                        bytecode_offset,
+                        ..
+                    }
+                    | JitInstr::OptionalFieldExact {
+                        object,
+                        stack,
+                        bytecode_offset,
+                        ..
+                    } => Some((*object, stack, *bytecode_offset)),
+                    _ => None,
+                })
+                .expect("exact field load");
+
+            assert_eq!(stack, &[object], "opcode {opcode:?}");
+            assert_eq!(bytecode_offset, 3, "opcode {opcode:?}");
+        }
     }
 
     #[test]

@@ -859,7 +859,7 @@ impl LiftedFunction {
                     src: value.0,
                 });
             }
-            JitInstr::LoadFieldExact { dest, object, offset } => out.push(SmInstr::CallHelper {
+            JitInstr::LoadFieldExact { dest, object, offset, .. } => out.push(SmInstr::CallHelper {
                 dest: Some(dest.0),
                 helper: HelperCall::ObjectGetField,
                 args: vec![object.0, *offset as u32],

@@ -427,6 +427,8 @@ pub enum JitInstr {
         dest: Reg,
         object: Reg,
         offset: u16,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     LoadFieldShape {
         dest: Reg,
@@ -809,6 +811,8 @@ pub enum JitInstr {
         dest: Reg,
         object: Reg,
         offset: u16,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
 
     // ===== ConstStr (string from constant pool by u16 index) =====

@@ -17,8 +17,8 @@ use crate::compiler::Opcode;
 use crate::jit::ir::instr::{JitBlockId, JitFunction, JitInstr, JitTerminator, Reg};
 use crate::jit::runtime::helpers::{
     JIT_INTERPRETER_EXCEPTION_SENTINEL, JIT_INTERPRETER_FALLBACK_SENTINEL,
-    JIT_NATIVE_SUSPEND_SENTINEL, JIT_SHAPE_FIELD_FALLBACK_SENTINEL,
-    JIT_STRING_LEN_FALLBACK_SENTINEL,
+    JIT_LAYOUT_GUARD_FALLBACK_SENTINEL, JIT_NATIVE_SUSPEND_SENTINEL,
+    JIT_SHAPE_FIELD_FALLBACK_SENTINEL, JIT_STRING_LEN_FALLBACK_SENTINEL,
 };
 use crate::jit::runtime::trampoline::{JitExitKind, JitSuspendReason, JIT_EXIT_MAX_NATIVE_ARGS};
 
@@ -32,6 +32,8 @@ pub struct LoweringContext<'a> {
     func: &'a JitFunction,
     /// The bytecode module providing constant-pool data.
     module: &'a crate::compiler::bytecode::Module,
+    /// AnyLayout generation captured before this function was lowered.
+    any_layout_generation: Option<u64>,
     /// Cranelift function parameters (args_ptr, arg_count, locals_ptr, local_count, ctx_ptr)
     params: FunctionParams,
     /// Phi resolution: for each block, a list of (phi_dest_reg, source_reg) to def_var before terminator
@@ -121,6 +123,7 @@ impl<'a> LoweringContext<'a> {
     pub fn lower(
         func: &'a JitFunction,
         module: &'a crate::compiler::bytecode::Module,
+        any_layout_generation: Option<u64>,
         mut builder: FunctionBuilder<'_>,
     ) -> Result<(), LowerError> {
         // Create Cranelift blocks for each JIT block
@@ -161,6 +164,7 @@ impl<'a> LoweringContext<'a> {
             block_map,
             func,
             module,
+            any_layout_generation,
             params,
             phi_copies,
             sig_safepoint_poll: None,
@@ -756,16 +760,29 @@ impl<'a> LoweringContext<'a> {
                 dest,
                 object,
                 offset,
+                stack,
+                bytecode_offset,
             }
             | JitInstr::OptionalFieldExact {
                 dest,
                 object,
                 offset,
+                stack,
+                bytecode_offset,
             } => {
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "exact field fallback stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
                 let ctx = self.params.ctx_ptr;
                 let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
                 let call_block = builder.create_block();
                 let null_block = builder.create_block();
+                let valid_block = builder.create_block();
+                let fallback_block = builder.create_block();
                 let done = builder.create_block();
                 builder.append_block_param(done, types::I64);
                 builder
@@ -777,28 +794,49 @@ impl<'a> LoweringContext<'a> {
                 builder.switch_to_block(call_block);
                 let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
                 let module_ptr = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 16);
-                let fn_ptr = builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), ctx, crate::jit::runtime::trampoline::HELPER_OBJECT_GET_FIELD_OFFSET); // 24 + 88
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_OBJECT_GET_FIELD_OFFSET,
+                );
                 let sig = self.object_get_field_sig(builder);
                 let object_val = self.use_reg(builder, *object);
                 let slot = builder.ins().iconst(types::I32, *offset as i64);
+                let generation = builder
+                    .ins()
+                    .iconst(types::I64, self.any_layout_generation.unwrap_or(0) as i64);
                 let func_id = builder
                     .ins()
                     .iconst(types::I32, self.func.func_index as i64);
                 let call = builder.ins().call_indirect(
                     sig,
                     fn_ptr,
-                    &[object_val, slot, func_id, module_ptr, shared_state],
+                    &[object_val, slot, generation, func_id, module_ptr, shared_state],
                 );
                 let result = builder.inst_results(call)[0];
-                let result_arg = [ir::BlockArg::Value(result)];
-                builder.ins().jump(done, &result_arg);
+                let fallback = builder
+                    .ins()
+                    .iconst(types::I64, JIT_LAYOUT_GUARD_FALLBACK_SENTINEL as i64);
+                let is_fallback =
+                    builder
+                        .ins()
+                        .icmp(condcodes::IntCC::Equal, result, fallback);
+                builder
+                    .ins()
+                    .brif(is_fallback, fallback_block, &[], valid_block, &[]);
+                builder.seal_block(fallback_block);
+                builder.seal_block(valid_block);
+
+                builder.switch_to_block(valid_block);
+                builder.ins().jump(done, &[ir::BlockArg::Value(result)]);
+
+                builder.switch_to_block(fallback_block);
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
 
                 builder.switch_to_block(null_block);
                 let null = abi::emit_null(builder);
-                let null_arg = [ir::BlockArg::Value(null)];
-                builder.ins().jump(done, &null_arg);
+                builder.ins().jump(done, &[ir::BlockArg::Value(null)]);
 
                 builder.seal_block(done);
                 builder.switch_to_block(done);
@@ -2192,6 +2230,7 @@ impl<'a> LoweringContext<'a> {
         let mut sig = ir::Signature::new(builder.func.signature.call_conv);
         sig.params.push(AbiParam::new(types::I64)); // object value
         sig.params.push(AbiParam::new(types::I32)); // expected slot
+        sig.params.push(AbiParam::new(types::I64)); // AnyLayout generation
         sig.params.push(AbiParam::new(types::I32)); // function id
         sig.params.push(AbiParam::new(types::I64)); // module ptr
         sig.params.push(AbiParam::new(types::I64)); // shared_state ptr

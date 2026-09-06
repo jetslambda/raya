@@ -1237,6 +1237,52 @@ mod tests {
         StructuralSlotBinding,
     };
 
+    #[cfg(feature = "jit")]
+    #[test]
+    fn layout_invalidation_clears_compiled_profile() {
+        let safepoint = std::sync::Arc::new(super::SafepointCoordinator::new(1));
+        let tasks = std::sync::Arc::new(parking_lot::RwLock::new(
+            rustc_hash::FxHashMap::default(),
+        ));
+        let injector = std::sync::Arc::new(crossbeam_deque::Injector::new());
+        let shared = super::SharedVmState::new(safepoint, tasks, injector);
+        let cache = std::sync::Arc::new(
+            crate::jit::runtime::code_cache::CodeCache::new(1024),
+        );
+        let checksum = [9; 32];
+        let module_id = cache.register_module(checksum);
+        let code_byte = Box::new(0u8);
+        let executable = crate::jit::backend::traits::ExecutableCode {
+            code_ptr: (&*code_byte) as *const u8,
+            code_size: 1,
+            entry_offset: 0,
+            stack_maps: Vec::new(),
+            deopt_info: Vec::new(),
+        };
+        assert!(cache.insert_with_dependencies(
+            module_id,
+            0,
+            executable,
+            [crate::jit::runtime::code_cache::LayoutDependency::AnyLayout],
+        ));
+
+        let profile = std::sync::Arc::new(
+            crate::jit::profiling::counters::ModuleProfile::new(1),
+        );
+        profile.get(0).expect("function profile").finish_compile();
+        assert!(profile.get(0).expect("function profile").is_jit_available());
+        shared
+            .module_profiles
+            .write()
+            .insert(checksum, profile.clone());
+        *shared.code_cache.lock() = Some(cache);
+
+        shared.invalidate_jit_for_layout(42);
+
+        assert!(!profile.get(0).expect("function profile").is_jit_available());
+        drop(code_byte);
+    }
+
     #[test]
     fn type_handle_registry_dedupes_equivalent_entries() {
         let mut registry = RuntimeTypeHandleRegistry::new();

@@ -38,6 +38,9 @@ pub const JIT_NATIVE_SUSPEND_SENTINEL: u64 = 0xFFFF_DEAD_0000_0001;
 pub const JIT_INTERPRETER_FALLBACK_SENTINEL: u64 = 0xFFFF_DEAD_0000_0002;
 pub const JIT_INTERPRETER_EXCEPTION_SENTINEL: u64 = 0xFFFF_DEAD_0000_0003;
 pub const JIT_SHAPE_FIELD_FALLBACK_SENTINEL: u64 = 0xFFFF_DEAD_0000_0004;
+// Uses the null tag with a non-zero payload. Raya constructors never produce
+// this invalid NaN-boxed encoding, so it cannot alias a valid Value.
+pub const JIT_LAYOUT_GUARD_FALLBACK_SENTINEL: u64 = 0xFFFE_DEAD_0000_0005;
 pub const JIT_STRING_LEN_FALLBACK_SENTINEL: i32 = i32::MIN;
 const JIT_SHAPE_ADAPTER_PIC_CAPACITY: usize = 4;
 
@@ -59,6 +62,7 @@ pub struct JitRuntimeBridgeContext {
     pub gc: *const parking_lot::Mutex<GarbageCollector>,
     pub classes: *const parking_lot::RwLock<ClassRegistry>,
     pub layouts: *const parking_lot::RwLock<RuntimeLayoutRegistry>,
+    pub code_cache: *const crate::jit::runtime::code_cache::CodeCache,
     pub mutex_registry: *const MutexRegistry,
     pub semaphore_registry: *const SemaphoreRegistry,
     pub globals_by_index: *const parking_lot::RwLock<Vec<Value>>,
@@ -100,6 +104,7 @@ pub fn build_runtime_bridge_context(
     gc: &parking_lot::Mutex<GarbageCollector>,
     classes: &parking_lot::RwLock<ClassRegistry>,
     layouts: &parking_lot::RwLock<RuntimeLayoutRegistry>,
+    code_cache: &crate::jit::runtime::code_cache::CodeCache,
     mutex_registry: &MutexRegistry,
     semaphore_registry: &SemaphoreRegistry,
     globals_by_index: &parking_lot::RwLock<Vec<Value>>,
@@ -134,6 +139,7 @@ pub fn build_runtime_bridge_context(
         gc: gc as *const _,
         classes: classes as *const _,
         layouts: layouts as *const _,
+        code_cache: code_cache as *const _,
         mutex_registry: mutex_registry as *const _,
         semaphore_registry: semaphore_registry as *const _,
         globals_by_index: globals_by_index as *const _,
@@ -1322,6 +1328,7 @@ unsafe extern "C" fn helper_generic_equals(
 unsafe extern "C" fn helper_object_get_field(
     object_raw: u64,
     expected_slot: u32,
+    expected_layout_generation: u64,
     func_id: u32,
     module_ptr: *const (),
     shared_state: *mut (),
@@ -1330,8 +1337,15 @@ unsafe extern "C" fn helper_object_get_field(
         return Value::null().raw();
     }
     let bridge = &*(shared_state.cast::<JitRuntimeBridgeContext>());
-    if bridge.classes.is_null() || bridge.gc.is_null() {
+    if bridge.classes.is_null() || bridge.gc.is_null() || bridge.code_cache.is_null() {
         return Value::null().raw();
+    }
+    let code_cache = &*bridge.code_cache;
+    if !code_cache.layout_generation_matches(
+        crate::jit::runtime::code_cache::LayoutDependency::AnyLayout,
+        expected_layout_generation,
+    ) {
+        return JIT_LAYOUT_GUARD_FALLBACK_SENTINEL;
     }
 
     let object_val = Value::from_raw(object_raw);
@@ -1622,6 +1636,110 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn layout_guard_sentinel_is_not_a_valid_value_encoding() {
+        // 0xFFFE is the null tag; a non-zero payload is reserved and cannot be
+        // emitted by any safe Value constructor.
+        assert_eq!(JIT_LAYOUT_GUARD_FALLBACK_SENTINEL >> 48, 0xFFFE);
+        assert_ne!(
+            JIT_LAYOUT_GUARD_FALLBACK_SENTINEL & 0x0000_FFFF_FFFF_FFFF,
+            0
+        );
+        assert_ne!(JIT_LAYOUT_GUARD_FALLBACK_SENTINEL, Value::null().raw());
+        assert_ne!(
+            JIT_LAYOUT_GUARD_FALLBACK_SENTINEL,
+            Value::u64(0xDEAD_0000_0005).raw()
+        );
+    }
+
+    #[test]
+    fn exact_field_helper_rejects_stale_layout_generation() {
+        let safepoint = Arc::new(SafepointCoordinator::new(1));
+        let tasks = Arc::new(RwLock::new(FxHashMap::default()));
+        let injector = Arc::new(Injector::new());
+        let shared = Arc::new(crate::vm::interpreter::SharedVmState::new(
+            safepoint.clone(),
+            tasks,
+            injector,
+        ));
+        let module = Arc::new(Module::new("jit-layout-guard-test".to_string()));
+        let task = Arc::new(Task::new(0, module.clone(), None));
+        let code_cache = crate::jit::runtime::code_cache::CodeCache::new(1024);
+        let expected_generation = code_cache.layout_generation(
+            crate::jit::runtime::code_cache::LayoutDependency::AnyLayout,
+        );
+        let object_value = {
+            let mut object = Object::new_structural(42, 1);
+            object.fields[0] = Value::i32(73);
+            let mut gc = shared.gc.lock();
+            let object_ptr = gc.allocate(object);
+            unsafe {
+                Value::from_ptr(
+                    NonNull::new(object_ptr.as_ptr() as *mut Object).expect("allocated object"),
+                )
+            }
+        };
+        let bridge = build_runtime_bridge_context(
+            safepoint.as_ref(),
+            &task,
+            &shared.gc,
+            &shared.classes,
+            &shared.layouts,
+            &code_cache,
+            &shared.mutex_registry,
+            &shared.semaphore_registry,
+            &shared.globals_by_index,
+            &shared.builtin_global_slots,
+            &shared.constant_string_cache,
+            &shared.ephemeral_gc_roots,
+            &shared.pinned_handles,
+            &shared.tasks,
+            &shared.injector,
+            &shared.module_layouts,
+            &shared.metadata,
+            &shared.class_metadata,
+            &shared.native_handler,
+            &shared.resolved_natives,
+            &shared.structural_shape_names,
+            &shared.structural_layout_shapes,
+            &shared.structural_shape_adapters,
+            &shared.aot_profile,
+            &shared.type_handles,
+            &shared.prop_keys,
+            &shared.stack_pool,
+            shared.max_preemptions,
+            0,
+            None,
+        );
+        let bridge_ptr = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+        let module_ptr = Arc::as_ptr(&module).cast::<()>();
+
+        let current = unsafe {
+            helper_object_get_field(
+                object_value.raw(),
+                0,
+                expected_generation,
+                0,
+                module_ptr,
+                bridge_ptr,
+            )
+        };
+        assert_eq!(current, Value::i32(73).raw());
+
+        code_cache.invalidate_layout(42);
+        let stale = unsafe {
+            helper_object_get_field(
+                object_value.raw(),
+                0,
+                expected_generation,
+                0,
+                module_ptr,
+                bridge_ptr,
+            )
+        };
+        assert_eq!(stale, JIT_LAYOUT_GUARD_FALLBACK_SENTINEL);
+    }
+
+    #[test]
     fn jit_helper_native_dispatch_returns_resolved_value() {
         let safepoint = Arc::new(SafepointCoordinator::new(1));
         let tasks = Arc::new(RwLock::new(FxHashMap::default()));
@@ -1641,12 +1759,14 @@ mod tests {
 
         let module = Arc::new(Module::new("jit-test".to_string()));
         let task = Arc::new(Task::new(0, module, None));
+        let code_cache = crate::jit::runtime::code_cache::CodeCache::new(1024);
         let bridge = build_runtime_bridge_context(
             safepoint.as_ref(),
             &task,
             &shared.gc,
             &shared.classes,
             &shared.layouts,
+            &code_cache,
             &shared.mutex_registry,
             &shared.semaphore_registry,
             &shared.globals_by_index,
@@ -1708,12 +1828,14 @@ mod tests {
 
         let module = Arc::new(Module::new("jit-test".to_string()));
         let task = Arc::new(Task::new(0, module, None));
+        let code_cache = crate::jit::runtime::code_cache::CodeCache::new(1024);
         let bridge = build_runtime_bridge_context(
             safepoint.as_ref(),
             &task,
             &shared.gc,
             &shared.classes,
             &shared.layouts,
+            &code_cache,
             &shared.mutex_registry,
             &shared.semaphore_registry,
             &shared.globals_by_index,
@@ -1801,12 +1923,14 @@ mod tests {
             .expect("module-local nominal type id");
 
         let task = Arc::new(Task::new(0, target_module.clone(), None));
+        let code_cache = crate::jit::runtime::code_cache::CodeCache::new(1024);
         let bridge = build_runtime_bridge_context(
             safepoint.as_ref(),
             &task,
             &shared.gc,
             &shared.classes,
             &shared.layouts,
+            &code_cache,
             &shared.mutex_registry,
             &shared.semaphore_registry,
             &shared.globals_by_index,

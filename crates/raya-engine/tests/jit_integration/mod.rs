@@ -52,6 +52,7 @@ const NULL_VALUE: u64 = NAN_BOX_BASE | TAG_NULL;
 unsafe extern "C" fn stub_object_get_field(
     _object_raw: u64,
     _expected_slot: u32,
+    _layout_generation: u64,
     _func_id: u32,
     _module_ptr: *const (),
     _shared_state: *mut (),
@@ -280,7 +281,23 @@ fn new_shared_vm_state() -> (
         tasks,
         injector,
     ));
+    *shared.code_cache.lock() = Some(std::sync::Arc::new(
+        raya_engine::jit::runtime::code_cache::CodeCache::new(1024 * 1024),
+    ));
     (safepoint, shared)
+}
+
+fn test_code_cache(
+    shared: &raya_engine::vm::interpreter::SharedVmState,
+) -> std::sync::Arc<raya_engine::jit::runtime::code_cache::CodeCache> {
+    let mut cache = shared.code_cache.lock();
+    cache
+        .get_or_insert_with(|| {
+            std::sync::Arc::new(
+                raya_engine::jit::runtime::code_cache::CodeCache::new(1024 * 1024),
+            )
+        })
+        .clone()
 }
 
 fn build_bridge_and_ctx<'a>(
@@ -293,12 +310,14 @@ fn build_bridge_and_ctx<'a>(
     raya_engine::jit::runtime::helpers::JitRuntimeBridgeContext,
 ) {
     let resolved_natives = parking_lot::RwLock::new(shared.resolved_natives.read().clone());
+    let code_cache = test_code_cache(shared.as_ref());
     let bridge = raya_engine::jit::runtime::helpers::build_runtime_bridge_context(
         safepoint.as_ref(),
         task,
         &shared.gc,
         &shared.classes,
         &shared.layouts,
+        code_cache.as_ref(),
         &shared.mutex_registry,
         &shared.semaphore_registry,
         &shared.globals_by_index,
@@ -445,7 +464,7 @@ fn jit_compile_and_call_with_locals_exit_and_ctx_and_module(
     {
         let builder =
             cranelift_frontend::FunctionBuilder::new(&mut codegen_ctx.func, &mut func_builder_ctx);
-        LoweringContext::lower(func, module, builder).expect("Lowering failed");
+        LoweringContext::lower(func, module, None, builder).expect("Lowering failed");
     }
 
     // Define and finalize
@@ -1383,12 +1402,14 @@ fn jit_new_type_uses_alloc_object_helper() {
 
     let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
     let resolved_natives = parking_lot::RwLock::new(shared.resolved_natives.read().clone());
+    let code_cache = test_code_cache(&shared);
     let bridge = raya_engine::jit::runtime::helpers::build_runtime_bridge_context(
         safepoint.as_ref(),
         &task,
         &shared.gc,
         &shared.classes,
         &shared.layouts,
+        code_cache.as_ref(),
         &shared.mutex_registry,
         &shared.semaphore_registry,
         &shared.globals_by_index,
@@ -1484,12 +1505,14 @@ fn jit_implements_shape_uses_runtime_helper() {
 
     let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
     let resolved_natives = parking_lot::RwLock::new(shared.resolved_natives.read().clone());
+    let code_cache = test_code_cache(&shared);
     let bridge = raya_engine::jit::runtime::helpers::build_runtime_bridge_context(
         safepoint.as_ref(),
         &task,
         &shared.gc,
         &shared.classes,
         &shared.layouts,
+        code_cache.as_ref(),
         &shared.mutex_registry,
         &shared.semaphore_registry,
         &shared.globals_by_index,
@@ -1582,12 +1605,14 @@ fn jit_cast_shape_uses_runtime_helper_fastpath() {
 
     let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
     let resolved_natives = parking_lot::RwLock::new(shared.resolved_natives.read().clone());
+    let code_cache = test_code_cache(&shared);
     let bridge = raya_engine::jit::runtime::helpers::build_runtime_bridge_context(
         safepoint.as_ref(),
         &task,
         &shared.gc,
         &shared.classes,
         &shared.layouts,
+        code_cache.as_ref(),
         &shared.mutex_registry,
         &shared.semaphore_registry,
         &shared.globals_by_index,
@@ -1674,12 +1699,14 @@ fn jit_cast_shape_failure_exits_with_interpreter_boundary() {
 
     let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
     let resolved_natives = parking_lot::RwLock::new(shared.resolved_natives.read().clone());
+    let code_cache = test_code_cache(&shared);
     let bridge = raya_engine::jit::runtime::helpers::build_runtime_bridge_context(
         safepoint.as_ref(),
         &task,
         &shared.gc,
         &shared.classes,
         &shared.layouts,
+        code_cache.as_ref(),
         &shared.mutex_registry,
         &shared.semaphore_registry,
         &shared.globals_by_index,
@@ -1767,12 +1794,14 @@ fn jit_is_nominal_uses_runtime_helper() {
 
     let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
     let resolved_natives = parking_lot::RwLock::new(shared.resolved_natives.read().clone());
+    let code_cache = test_code_cache(&shared);
     let bridge = raya_engine::jit::runtime::helpers::build_runtime_bridge_context(
         safepoint.as_ref(),
         &task,
         &shared.gc,
         &shared.classes,
         &shared.layouts,
+        code_cache.as_ref(),
         &shared.mutex_registry,
         &shared.semaphore_registry,
         &shared.globals_by_index,
@@ -1885,12 +1914,14 @@ fn jit_cast_nominal_failure_exits_with_interpreter_boundary() {
 
     let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, target_module.clone(), None));
     let resolved_natives = parking_lot::RwLock::new(shared.resolved_natives.read().clone());
+    let code_cache = test_code_cache(&shared);
     let bridge = raya_engine::jit::runtime::helpers::build_runtime_bridge_context(
         safepoint.as_ref(),
         &task,
         &shared.gc,
         &shared.classes,
         &shared.layouts,
+        code_cache.as_ref(),
         &shared.mutex_registry,
         &shared.semaphore_registry,
         &shared.globals_by_index,

@@ -221,6 +221,7 @@ impl fmt::Display for JitInstr {
                 dest,
                 object,
                 offset,
+                ..
             } => write!(f, "{} = load.field {}.{}", dest, object, offset),
             JitInstr::LoadFieldShape {
                 dest,
@@ -281,6 +282,7 @@ impl fmt::Display for JitInstr {
                 dest,
                 object,
                 offset,
+                ..
             } => write!(f, "{} = optional.field {}.{}", dest, object, offset),
 
             // Array

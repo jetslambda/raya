@@ -298,6 +298,15 @@ fn replace_reg_uses(instr: &mut JitInstr, subs: &rustc_hash::FxHashMap<Reg, Reg>
             }
         }
 
+        JitInstr::LoadFieldExact { object, stack, .. }
+        | JitInstr::LoadFieldShape { object, stack, .. }
+        | JitInstr::OptionalFieldExact { object, stack, .. } => {
+            sub(object, subs);
+            for reg in stack.iter_mut() {
+                sub(reg, subs);
+            }
+        }
+
         JitInstr::InterpreterBoundary { stack, .. } => {
             for reg in stack.iter_mut() {
                 sub(reg, subs);
@@ -583,10 +592,14 @@ fn collect_used_regs(instr: &JitInstr, used: &mut FxHashSet<Reg>) {
             used.insert(*value);
         }
 
-        JitInstr::LoadFieldExact { object, .. }
-        | JitInstr::LoadFieldShape { object, .. }
-        | JitInstr::OptionalFieldExact { object, .. }
-        | JitInstr::ArrayLen { array: object, .. }
+        JitInstr::LoadFieldExact { object, stack, .. }
+        | JitInstr::LoadFieldShape { object, stack, .. }
+        | JitInstr::OptionalFieldExact { object, stack, .. } => {
+            used.insert(*object);
+            used.extend(stack.iter().copied());
+        }
+
+        JitInstr::ArrayLen { array: object, .. }
         | JitInstr::ArrayPop { array: object, .. }
         | JitInstr::LoadRefCell { cell: object, .. }
         | JitInstr::Typeof {
