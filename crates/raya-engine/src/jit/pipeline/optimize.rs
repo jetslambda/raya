@@ -190,10 +190,15 @@ impl OptPass for CopyPropagation {
             })
             .collect();
 
-        // Replace all uses of copied registers
+        // Replace all uses of copied registers, including deopt metadata.
         for block in &mut func.blocks {
             for instr in &mut block.instrs {
                 replace_reg_uses(instr, &resolved);
+            }
+            if let crate::jit::ir::instr::JitTerminator::Deoptimize { state, .. } =
+                &mut block.terminator
+            {
+                replace_deopt_state_regs(state, &resolved);
             }
         }
     }
@@ -302,6 +307,25 @@ fn replace_reg_uses(instr: &mut JitInstr, subs: &rustc_hash::FxHashMap<Reg, Reg>
         // For remaining complex instructions, we skip replacement for simplicity.
         // A production optimizer would handle all instruction variants.
         _ => {}
+    }
+}
+
+fn replace_deopt_state_regs(
+    state: &mut crate::jit::ir::DeoptState,
+    subs: &rustc_hash::FxHashMap<Reg, Reg>,
+) {
+    let replace = |value: &mut crate::jit::ir::DeoptValue| {
+        if let crate::jit::ir::DeoptValue::Register(reg) = value {
+            if let Some(new_reg) = subs.get(reg) {
+                *reg = *new_reg;
+            }
+        }
+    };
+    for (_, value) in &mut state.locals {
+        replace(value);
+    }
+    for value in &mut state.operand_stack {
+        replace(value);
     }
 }
 
@@ -673,6 +697,18 @@ fn collect_terminator_regs(term: &crate::jit::ir::instr::JitTerminator, used: &m
         crate::jit::ir::instr::JitTerminator::Throw(reg) => {
             used.insert(*reg);
         }
+        crate::jit::ir::instr::JitTerminator::Deoptimize { state, .. } => {
+            for (_, value) in &state.locals {
+                if let crate::jit::ir::DeoptValue::Register(reg) = value {
+                    used.insert(*reg);
+                }
+            }
+            for value in &state.operand_stack {
+                if let crate::jit::ir::DeoptValue::Register(reg) = value {
+                    used.insert(*reg);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -799,6 +835,49 @@ mod tests {
         let instrs = &func.block(JitBlockId(0)).instrs;
         assert_eq!(instrs.len(), 1);
         assert!(matches!(instrs[0], JitInstr::ConstI32 { value: 42, .. }));
+    }
+
+    #[test]
+    fn deopt_state_registers_survive_copy_propagation_and_dce() {
+        let mut func = make_func();
+        let source = func.alloc_reg(JitType::I32);
+        let copy = func.alloc_reg(JitType::I32);
+        func.block_mut(JitBlockId(0)).instrs = vec![
+            JitInstr::ConstI32 {
+                dest: source,
+                value: 17,
+            },
+            JitInstr::Move {
+                dest: copy,
+                src: source,
+            },
+        ];
+        func.block_mut(JitBlockId(0)).terminator = JitTerminator::Deoptimize {
+            reason: DeoptReason::TypeGuardFailed,
+            state: DeoptState {
+                guard_id: GuardId(1),
+                resume_bytecode_pc: 9,
+                locals: vec![(LocalSlot(0), DeoptValue::Register(copy))],
+                operand_stack: vec![DeoptValue::Register(copy)],
+                rematerializations: vec![],
+                exception_handlers: vec![],
+            },
+        };
+
+        CopyPropagation.run(&mut func);
+        DeadCodeElimination.run(&mut func);
+
+        let block = func.block(JitBlockId(0));
+        assert!(block
+            .instrs
+            .iter()
+            .any(|instr| matches!(instr, JitInstr::ConstI32 { dest, .. } if *dest == source)));
+        if let JitTerminator::Deoptimize { state, .. } = &block.terminator {
+            assert_eq!(state.locals[0].1, DeoptValue::Register(source));
+            assert_eq!(state.operand_stack[0], DeoptValue::Register(source));
+        } else {
+            panic!("expected deopt terminator");
+        }
     }
 
     #[test]

@@ -193,3 +193,40 @@ pub trait CodegenBackend: Send + Sync {
     /// Return target architecture information
     fn target_info(&self) -> TargetInfo;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::collect_deopt_info;
+    use crate::jit::ir::{
+        DeoptReason, DeoptState, DeoptValue, ExceptionHandlerState, GuardId, JitFunction,
+        JitTerminator, JitType, LocalSlot, Reg, Rematerialization,
+    };
+
+    #[test]
+    fn collects_complete_logical_deopt_state() {
+        let mut func = JitFunction::new(0, "deopt".to_string(), 1, 1);
+        let block = func.add_block();
+        let state = DeoptState {
+            guard_id: GuardId(7),
+            resume_bytecode_pc: 42,
+            locals: vec![(LocalSlot(0), DeoptValue::Register(Reg(0)))],
+            operand_stack: vec![DeoptValue::Rematerialize(Rematerialization::I32(9))],
+            rematerializations: vec![(Reg(1), Rematerialization::Bool(true))],
+            exception_handlers: vec![ExceptionHandlerState {
+                catch_bytecode_offset: Some(80),
+                finally_bytecode_offset: None,
+                stack_depth: 1,
+            }],
+        };
+        func.reg_types.insert(Reg(0), JitType::Value);
+        func.block_mut(block).terminator = JitTerminator::Deoptimize {
+            reason: DeoptReason::TypeGuardFailed,
+            state: state.clone(),
+        };
+
+        let records = collect_deopt_info(&func);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].native_code_offset, None);
+        assert_eq!(records[0].state, state);
+    }
+}
