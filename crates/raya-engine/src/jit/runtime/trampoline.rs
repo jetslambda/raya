@@ -107,7 +107,9 @@ pub struct RuntimeContext {
 
 /// ABI layout constants consumed by Cranelift lowering. Keep these derived from
 /// the Rust structs; never duplicate field offsets in native code.
-pub const RUNTIME_CONTEXT_ABI_VERSION: u16 = 2;
+pub const RUNTIME_CONTEXT_ABI_VERSION: u16 = 3;
+pub const RUNTIME_CONTEXT_MODULE_OFFSET: i32 =
+    std::mem::offset_of!(RuntimeContext, module) as i32;
 pub const RUNTIME_CONTEXT_HELPERS_OFFSET: i32 =
     std::mem::offset_of!(RuntimeContext, helpers) as i32;
 pub const HELPER_SAFEPOINT_POLL_OFFSET: i32 =
@@ -144,6 +146,12 @@ pub const HELPER_OBJECT_SET_SHAPE_FIELD_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, object_set_shape_field) as i32;
 pub const HELPER_STRING_LEN_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, string_len) as i32;
+pub const HELPER_STRING_COMPARE_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, string_compare) as i32;
+pub const HELPER_VALUE_TO_STRING_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, value_to_string) as i32;
+pub const HELPER_CONST_STRING_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, const_string) as i32;
 
 const _: () = assert!(std::mem::align_of::<RuntimeContext>() >= 8);
 const _: () = assert!(std::mem::size_of::<RuntimeContext>() >= std::mem::size_of::<RuntimeHelperTable>());
@@ -195,6 +203,12 @@ pub struct RuntimeHelperTable {
         unsafe extern "C" fn(u64, u64, u32, u64, u32, *const (), *mut ()) -> i8,
     /// String length: (string_val, shared_state) -> len or i32::MIN fallback sentinel
     pub string_len: unsafe extern "C" fn(u64, *mut ()) -> i32,
+    /// String comparison: (left_val, right_val, shared_state) -> -1/0/1, or 2 for non-strings
+    pub string_compare: unsafe extern "C" fn(u64, u64, *mut ()) -> i8,
+    /// Value conversion: (value, shared_state) -> string value or fallback sentinel
+    pub value_to_string: unsafe extern "C" fn(u64, *mut ()) -> u64,
+    /// Interned constant string: (pool_index, module, shared_state) -> raw string pointer
+    pub const_string: unsafe extern "C" fn(u32, *const (), *mut ()) -> *mut (),
 }
 
 /// Validate the boxed arguments at a JIT entry boundary against a verified
@@ -265,7 +279,7 @@ mod abi_layout_tests {
     fn runtime_abi_is_pointer_aligned_and_versioned() {
         assert_eq!(std::mem::align_of::<RuntimeContext>(), std::mem::align_of::<*const ()>());
         assert_eq!(std::mem::align_of::<RuntimeHelperTable>(), std::mem::align_of::<*const ()>());
-        assert_eq!(RUNTIME_CONTEXT_ABI_VERSION, 2);
+        assert_eq!(RUNTIME_CONTEXT_ABI_VERSION, 3);
         assert_eq!(
             RUNTIME_CONTEXT_ABI_VERSION,
             crate::compiler::bytecode::CURRENT_ABI_VERSION

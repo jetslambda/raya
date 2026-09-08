@@ -116,6 +116,26 @@ unsafe extern "C" fn stub_string_len(_string_raw: u64, _shared_state: *mut ()) -
     i32::MIN
 }
 
+unsafe extern "C" fn stub_string_compare(
+    _left_raw: u64,
+    _right_raw: u64,
+    _shared_state: *mut (),
+) -> i8 {
+    2
+}
+
+unsafe extern "C" fn stub_value_to_string(_value_raw: u64, _shared_state: *mut ()) -> u64 {
+    NULL_VALUE
+}
+
+unsafe extern "C" fn stub_const_string(
+    _pool_index: u32,
+    _module_ptr: *const (),
+    _shared_state: *mut (),
+) -> *mut () {
+    std::ptr::null_mut()
+}
+
 // ============================================================================
 // NaN-boxing decode helpers
 // ============================================================================
@@ -347,6 +367,61 @@ fn build_bridge_and_ctx<'a>(
     (resolved_natives, bridge)
 }
 
+fn execute_module_natively(
+    module: std::sync::Arc<Module>,
+    gc_threshold: Option<usize>,
+) -> (
+    raya_engine::vm::value::Value,
+    raya_engine::jit::runtime::trampoline::JitExitInfo,
+    std::sync::Arc<raya_engine::vm::interpreter::SharedVmState>,
+) {
+    let (safepoint, shared) = new_shared_vm_state();
+    if let Some(threshold) = gc_threshold {
+        shared.gc.lock().set_threshold(threshold);
+    }
+    let gc_context_id = shared.gc.lock().context_id();
+    let weak_shared = std::sync::Arc::downgrade(&shared);
+    raya_engine::vm::gc::register_external_roots_provider(
+        gc_context_id,
+        std::sync::Arc::new(move || {
+            weak_shared
+                .upgrade()
+                .map(|state| state.collect_gc_roots())
+                .unwrap_or_default()
+        }),
+    );
+    shared
+        .register_module(module.clone())
+        .expect("register native test module");
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(
+        0,
+        module.clone(),
+        None,
+    ));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx =
+        raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("lift native test module");
+    let (raw, exit) = jit_compile_and_call_with_locals_exit_and_ctx_and_module(
+        &jit_func,
+        &module,
+        &mut [],
+        &mut ctx as *mut _,
+    );
+    raya_engine::vm::gc::unregister_external_roots_provider(gc_context_id);
+    (
+        unsafe { raya_engine::vm::value::Value::from_raw(raw) },
+        exit,
+        shared,
+    )
+}
+
+fn string_contents(value: raya_engine::vm::value::Value) -> String {
+    let ptr = unsafe { value.as_ptr::<raya_engine::vm::object::RayaString>() }
+        .expect("expected string pointer");
+    unsafe { &*ptr.as_ptr() }.data.clone()
+}
+
 fn emit(code: &mut Vec<u8>, op: Opcode) {
     code.push(op as u8);
 }
@@ -359,6 +434,11 @@ fn emit_i32(code: &mut Vec<u8>, val: i32) {
 fn emit_f64(code: &mut Vec<u8>, val: f64) {
     code.push(Opcode::ConstF64 as u8);
     code.extend_from_slice(&val.to_le_bytes());
+}
+
+fn emit_const_str(code: &mut Vec<u8>, index: u32) {
+    code.push(Opcode::ConstStr as u8);
+    code.extend_from_slice(&index.to_le_bytes());
 }
 
 fn emit_store_local(code: &mut Vec<u8>, idx: u16) {
@@ -2088,6 +2168,9 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             object_get_shape_field: stub_object_get_shape_field,
             object_set_shape_field: stub_object_set_shape_field,
             string_len: stub_string_len,
+            string_compare: stub_string_compare,
+            value_to_string: stub_value_to_string,
+            const_string: stub_const_string,
         },
     };
 
@@ -2209,6 +2292,9 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             object_get_shape_field: stub_object_get_shape_field,
             object_set_shape_field: stub_object_set_shape_field,
             string_len: stub_string_len,
+            string_compare: stub_string_compare,
+            value_to_string: stub_value_to_string,
+            const_string: stub_const_string,
         },
     };
 
@@ -2338,6 +2424,9 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             object_get_shape_field: stub_object_get_shape_field,
             object_set_shape_field: stub_object_set_shape_field,
             string_len: stub_string_len,
+            string_compare: stub_string_compare,
+            value_to_string: stub_value_to_string,
+            const_string: stub_const_string,
         },
     };
 
@@ -2462,6 +2551,9 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             object_get_shape_field: stub_object_get_shape_field,
             object_set_shape_field: stub_object_set_shape_field,
             string_len: stub_string_len,
+            string_compare: stub_string_compare,
+            value_to_string: stub_value_to_string,
+            const_string: stub_const_string,
         },
     };
 
@@ -2601,6 +2693,9 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             object_get_shape_field: stub_object_get_shape_field,
             object_set_shape_field: stub_object_set_shape_field,
             string_len: stub_string_len,
+            string_compare: stub_string_compare,
+            value_to_string: stub_value_to_string,
+            const_string: stub_const_string,
         },
     };
 
@@ -3686,6 +3781,492 @@ fn pipeline_bytecode_to_native_branch_loop_i32_compiler_semantics() {
 
     assert_eq!(jit_val, 64);
     assert_eq!(jit_val, interp_val);
+}
+
+#[test]
+fn jit_allocating_string_helpers_preserve_exact_fallback_state() {
+    let mut concat_code = Vec::new();
+    emit(&mut concat_code, Opcode::ConstNull);
+    emit(&mut concat_code, Opcode::ConstTrue);
+    emit(&mut concat_code, Opcode::Sconcat);
+    emit(&mut concat_code, Opcode::Return);
+    let concat_module = make_module(concat_code, 0, 0);
+    let concat_jit = lift_function(&concat_module.functions[0], &concat_module, 0)
+        .expect("lift concat fallback");
+    let (_raw, exit) = jit_compile_and_call_with_locals_and_exit(&concat_jit, &mut []);
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Suspended as u32
+    );
+    assert_eq!(
+        exit.suspend_reason,
+        raya_engine::jit::runtime::trampoline::JitSuspendReason::InterpreterBoundary as u32
+    );
+    assert_eq!(exit.bytecode_offset, 2);
+    assert_eq!(exit.native_arg_count, 2);
+    assert_eq!(exit.native_args[0], NULL_VALUE);
+    assert_eq!(
+        exit.native_args[1],
+        raya_engine::vm::value::Value::bool(true).raw()
+    );
+
+    let mut conversion_code = Vec::new();
+    emit_i32(&mut conversion_code, 9);
+    emit(&mut conversion_code, Opcode::ToString);
+    emit(&mut conversion_code, Opcode::Return);
+    let conversion_module = make_module(conversion_code, 0, 0);
+    let conversion_jit = lift_function(&conversion_module.functions[0], &conversion_module, 0)
+        .expect("lift conversion fallback");
+    let (_raw, exit) = jit_compile_and_call_with_locals_and_exit(&conversion_jit, &mut []);
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Suspended as u32
+    );
+    assert_eq!(
+        exit.suspend_reason,
+        raya_engine::jit::runtime::trampoline::JitSuspendReason::InterpreterBoundary as u32
+    );
+    assert_eq!(exit.bytecode_offset, 5);
+    assert_eq!(exit.native_arg_count, 1);
+    assert_eq!(decode_i32(exit.native_args[0]), 9);
+}
+
+#[test]
+fn jit_string_comparisons_match_interpreter() {
+    for (opcode, left, right, expected) in [
+        (Opcode::Seq, "", "", true),
+        (Opcode::Seq, "same", "same", true),
+        (Opcode::Sne, "same", "different", true),
+        (Opcode::Slt, "a", "b", true),
+        (Opcode::Sle, "é", "é", true),
+        (Opcode::Sgt, "z", "prefix", true),
+        (Opcode::Sge, "same", "same", true),
+        (Opcode::Seq, "nul\0inside", "nul\0inside", true),
+        (Opcode::Slt, "é", "z", false),
+    ] {
+        let mut module = make_vm_module(Vec::new(), 0, 0);
+        let left_index = module.constants.add_string(left.to_string());
+        let right_index = module.constants.add_string(right.to_string());
+        let mut code = Vec::new();
+        emit_const_str(&mut code, left_index);
+        emit_const_str(&mut code, right_index);
+        emit(&mut code, opcode);
+        emit(&mut code, Opcode::Return);
+        module.functions[0].code = code;
+        let module = finalize_module(module);
+
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm
+            .execute(module.as_ref())
+            .expect("interpreter string comparison")
+            .as_bool()
+            .expect("interpreter bool result");
+        let (native, exit, _shared) = execute_module_natively(module, None);
+        assert_eq!(
+            exit.kind,
+            raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+            "{opcode:?} did not complete natively"
+        );
+        assert_eq!(native.as_bool(), Some(interpreted), "{opcode:?}");
+        assert_eq!(interpreted, expected, "{opcode:?}");
+    }
+}
+
+#[test]
+fn jit_string_length_and_conversion_match_interpreter() {
+    let mut length_module = make_vm_module(Vec::new(), 0, 0);
+    let text = length_module.constants.add_string("héllo".to_string());
+    let mut code = Vec::new();
+    emit_const_str(&mut code, text);
+    emit(&mut code, Opcode::Slen);
+    emit(&mut code, Opcode::Return);
+    length_module.functions[0].code = code;
+    let length_module = finalize_module(length_module);
+    let mut vm = Vm::with_worker_count(1);
+    let interpreted = vm.execute(length_module.as_ref()).expect("interpreter Slen");
+    let (native, exit, _shared) = execute_module_natively(length_module, None);
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32
+    );
+    assert_eq!(native.as_i32(), interpreted.as_i32());
+    assert_eq!(native.as_i32(), Some("héllo".len() as i32));
+
+    let primitive_cases: Vec<(Vec<u8>, &str)> = vec![
+        (vec![Opcode::ConstNull as u8], "null"),
+        (vec![Opcode::ConstTrue as u8], "true"),
+        ({
+            let mut code = Vec::new();
+            emit_i32(&mut code, -7);
+            code
+        }, "-7"),
+        ({
+            let mut code = Vec::new();
+            emit_f64(&mut code, 2.5);
+            code
+        }, "2.5"),
+    ];
+    for (mut code, expected) in primitive_cases {
+        emit(&mut code, Opcode::ToString);
+        emit(&mut code, Opcode::Return);
+        let module = finalize_module(make_vm_module(code, 0, 0));
+        let interpreted = {
+            let mut vm = Vm::with_worker_count(1);
+            string_contents(vm.execute(module.as_ref()).expect("interpreter ToString"))
+        };
+        let (native, exit, _shared) = execute_module_natively(module, None);
+        assert_eq!(
+            exit.kind,
+            raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32
+        );
+        assert_eq!(string_contents(native), interpreted);
+        assert_eq!(interpreted, expected);
+    }
+
+    let mut string_module = make_vm_module(Vec::new(), 0, 0);
+    let value = string_module.constants.add_string("hé".to_string());
+    let mut code = Vec::new();
+    emit_const_str(&mut code, value);
+    emit(&mut code, Opcode::ToString);
+    emit(&mut code, Opcode::Return);
+    string_module.functions[0].code = code;
+    let string_module = finalize_module(string_module);
+    let interpreted = {
+        let mut vm = Vm::with_worker_count(1);
+        string_contents(vm.execute(string_module.as_ref()).expect("string ToString"))
+    };
+    let (native, exit, _shared) = execute_module_natively(string_module, Some(1));
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32
+    );
+    assert_eq!(string_contents(native), interpreted);
+    assert_eq!(interpreted, "hé");
+
+    let mut object_module = make_vm_module(Vec::new(), 0, 0);
+    object_module.classes.push(ClassDef {
+        name: "ObjectForString".to_string(),
+        field_count: 0,
+        parent_id: None,
+        methods: Vec::new(),
+    });
+    let mut code = Vec::new();
+    code.push(Opcode::NewType as u8);
+    code.extend_from_slice(&0u16.to_le_bytes());
+    emit(&mut code, Opcode::ToString);
+    emit(&mut code, Opcode::Return);
+    object_module.functions[0].code = code;
+    let object_module = finalize_module(object_module);
+    let interpreted = {
+        let mut vm = Vm::with_worker_count(1);
+        string_contents(vm.execute(object_module.as_ref()).expect("object ToString"))
+    };
+    let (native, exit, _shared) = execute_module_natively(object_module, None);
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32
+    );
+    assert_eq!(string_contents(native), interpreted);
+    assert_eq!(interpreted, "[object]");
+}
+
+#[test]
+fn jit_generic_equality_matches_interpreter() {
+    let cases: Vec<(Opcode, Vec<u8>, bool)> = vec![
+        (
+            Opcode::Eq,
+            vec![Opcode::ConstNull as u8, Opcode::ConstNull as u8],
+            true,
+        ),
+        (
+            Opcode::Ne,
+            vec![Opcode::ConstTrue as u8, Opcode::ConstFalse as u8],
+            true,
+        ),
+        (
+            Opcode::Eq,
+            {
+                let mut code = Vec::new();
+                emit_i32(&mut code, 7);
+                emit_i32(&mut code, 7);
+                code
+            },
+            true,
+        ),
+        (
+            Opcode::Eq,
+            {
+                let mut code = Vec::new();
+                emit_f64(&mut code, 2.5);
+                emit_f64(&mut code, 2.5);
+                code
+            },
+            true,
+        ),
+        (
+            Opcode::Eq,
+            {
+                let mut code = Vec::new();
+                emit_i32(&mut code, 7);
+                emit_f64(&mut code, 7.0);
+                code
+            },
+            true,
+        ),
+        (
+            Opcode::StrictEq,
+            {
+                let mut code = Vec::new();
+                emit_i32(&mut code, 7);
+                emit_f64(&mut code, 7.0);
+                code
+            },
+            true,
+        ),
+        (
+            Opcode::Ne,
+            {
+                let mut code = Vec::new();
+                emit_f64(&mut code, f64::NAN);
+                emit_f64(&mut code, f64::NAN);
+                code
+            },
+            true,
+        ),
+        (
+            Opcode::StrictNe,
+            {
+                let mut code = Vec::new();
+                emit_f64(&mut code, f64::NAN);
+                emit_f64(&mut code, f64::NAN);
+                code
+            },
+            true,
+        ),
+        (
+            Opcode::Eq,
+            {
+                let mut code = Vec::new();
+                emit_f64(&mut code, 0.0);
+                emit_f64(&mut code, -0.0);
+                code
+            },
+            true,
+        ),
+    ];
+
+    for (opcode, mut operands, expected) in cases {
+        operands.push(opcode as u8);
+        operands.push(Opcode::Return as u8);
+        let module = finalize_module(make_vm_module(operands, 0, 0));
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm
+            .execute(module.as_ref())
+            .expect("interpreter generic equality")
+            .as_bool()
+            .expect("interpreter bool result");
+        let (native, exit, _shared) = execute_module_natively(module, None);
+        assert_eq!(
+            exit.kind,
+            raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+            "{opcode:?} did not complete natively"
+        );
+        assert_eq!(native.as_bool(), Some(interpreted), "{opcode:?}");
+        assert_eq!(interpreted, expected, "{opcode:?}");
+    }
+
+    let mut module = make_vm_module(Vec::new(), 0, 0);
+    let first = module.constants.add_string("content".to_string());
+    let second = module.constants.add_string("content".to_string());
+    let mut code = Vec::new();
+    emit_const_str(&mut code, first);
+    emit_const_str(&mut code, second);
+    emit(&mut code, Opcode::Eq);
+    emit(&mut code, Opcode::Return);
+    module.functions[0].code = code;
+    let module = finalize_module(module);
+    let mut vm = Vm::with_worker_count(1);
+    let interpreted = vm.execute(module.as_ref()).expect("string equality");
+    let (native, exit, _shared) = execute_module_natively(module, None);
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32
+    );
+    assert_eq!(native.as_bool(), interpreted.as_bool());
+    assert_eq!(native.as_bool(), Some(true));
+
+    for (same_object, expected) in [(true, true), (false, false)] {
+        let mut module = make_vm_module(Vec::new(), 0, 0);
+        module.classes.push(ClassDef {
+            name: "EqualityObject".to_string(),
+            field_count: 0,
+            parent_id: None,
+            methods: Vec::new(),
+        });
+        let mut code = Vec::new();
+        code.push(Opcode::NewType as u8);
+        code.extend_from_slice(&0u16.to_le_bytes());
+        if same_object {
+            emit(&mut code, Opcode::Dup);
+        } else {
+            code.push(Opcode::NewType as u8);
+            code.extend_from_slice(&0u16.to_le_bytes());
+        }
+        emit(&mut code, Opcode::Eq);
+        emit(&mut code, Opcode::Return);
+        module.functions[0].code = code;
+        let module = finalize_module(module);
+        let interpreted = {
+            let mut vm = Vm::with_worker_count(1);
+            vm.execute(module.as_ref())
+                .expect("interpreter object equality")
+                .as_bool()
+                .expect("object equality bool")
+        };
+        let (native, exit, _shared) = execute_module_natively(module, None);
+        assert_eq!(
+            exit.kind,
+            raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32
+        );
+        assert_eq!(native.as_bool(), Some(interpreted));
+        assert_eq!(interpreted, expected);
+    }
+}
+
+#[test]
+fn jit_string_allocation_matches_interpreter_and_survives_gc() {
+    let mut concat_module = make_vm_module(Vec::new(), 0, 0);
+    let hello = concat_module.constants.add_string("hello ".to_string());
+    let world = concat_module.constants.add_string("世界".to_string());
+    let mut concat_code = Vec::new();
+    emit_const_str(&mut concat_code, hello);
+    emit_const_str(&mut concat_code, world);
+    emit(&mut concat_code, Opcode::Sconcat);
+    emit(&mut concat_code, Opcode::Return);
+    concat_module.functions[0].code = concat_code;
+    let concat_module = finalize_module(concat_module);
+    let interpreted_text = {
+        let mut vm = Vm::with_worker_count(1);
+        let value = vm
+            .execute(concat_module.as_ref())
+            .expect("interpreter concat");
+        string_contents(value)
+    };
+    let (native, exit, _shared) = execute_module_natively(concat_module, None);
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32
+    );
+    assert_eq!(string_contents(native), interpreted_text);
+    assert_eq!(interpreted_text, "hello 世界");
+
+    let primitive_concat_cases: Vec<(Vec<u8>, &str)> = vec![
+        (vec![Opcode::ConstNull as u8], "null!"),
+        (vec![Opcode::ConstTrue as u8], "true!"),
+        ({
+            let mut code = Vec::new();
+            emit_i32(&mut code, -7);
+            code
+        }, "-7!"),
+        ({
+            let mut code = Vec::new();
+            emit_f64(&mut code, 2.5);
+            code
+        }, "2.5!"),
+    ];
+    for (mut code, expected) in primitive_concat_cases {
+        let mut module = make_vm_module(Vec::new(), 0, 0);
+        let suffix = module.constants.add_string("!".to_string());
+        emit_const_str(&mut code, suffix);
+        emit(&mut code, Opcode::Sconcat);
+        emit(&mut code, Opcode::Return);
+        module.functions[0].code = code;
+        let module = finalize_module(module);
+        let interpreted = {
+            let mut vm = Vm::with_worker_count(1);
+            string_contents(vm.execute(module.as_ref()).expect("interpreter concat conversion"))
+        };
+        let (native, exit, _shared) = execute_module_natively(module, None);
+        assert_eq!(
+            exit.kind,
+            raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32
+        );
+        assert_eq!(string_contents(native), interpreted);
+        assert_eq!(interpreted, expected);
+    }
+
+    let mut object_concat_module = make_vm_module(Vec::new(), 0, 0);
+    object_concat_module.classes.push(ClassDef {
+        name: "ConcatObject".to_string(),
+        field_count: 0,
+        parent_id: None,
+        methods: Vec::new(),
+    });
+    let suffix = object_concat_module.constants.add_string("!".to_string());
+    let mut object_concat_code = vec![Opcode::NewType as u8];
+    object_concat_code.extend_from_slice(&0u16.to_le_bytes());
+    emit_const_str(&mut object_concat_code, suffix);
+    emit(&mut object_concat_code, Opcode::Sconcat);
+    emit(&mut object_concat_code, Opcode::Return);
+    object_concat_module.functions[0].code = object_concat_code;
+    let object_concat_module = finalize_module(object_concat_module);
+    let interpreted = {
+        let mut vm = Vm::with_worker_count(1);
+        string_contents(
+            vm.execute(object_concat_module.as_ref())
+                .expect("interpreter object concat"),
+        )
+    };
+    let (native, exit, _shared) = execute_module_natively(object_concat_module, None);
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32
+    );
+    assert_eq!(string_contents(native), interpreted);
+    assert_eq!(interpreted, "[object]!");
+
+    let mut conversion_code = Vec::new();
+    emit_i32(&mut conversion_code, 42);
+    emit(&mut conversion_code, Opcode::ToString);
+    emit(&mut conversion_code, Opcode::Return);
+    let conversion_module = finalize_module(make_vm_module(conversion_code, 0, 0));
+    let interpreted_text = {
+        let mut vm = Vm::with_worker_count(1);
+        string_contents(
+            vm.execute(conversion_module.as_ref())
+                .expect("interpreter conversion"),
+        )
+    };
+    let (native, exit, _shared) = execute_module_natively(conversion_module, None);
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32
+    );
+    assert_eq!(string_contents(native), interpreted_text);
+    assert_eq!(interpreted_text, "42");
+
+    let mut stress_module = make_vm_module(Vec::new(), 0, 0);
+    let empty = stress_module.constants.add_string(String::new());
+    let fragment = stress_module.constants.add_string("é".to_string());
+    let mut stress_code = Vec::new();
+    emit_const_str(&mut stress_code, empty);
+    for _ in 0..64 {
+        emit_const_str(&mut stress_code, fragment);
+        emit(&mut stress_code, Opcode::Sconcat);
+    }
+    emit(&mut stress_code, Opcode::Return);
+    stress_module.functions[0].code = stress_code;
+    let stress_module = finalize_module(stress_module);
+    let (native, exit, shared) = execute_module_natively(stress_module, Some(1));
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32
+    );
+    assert_eq!(string_contents(native), "é".repeat(64));
+    assert!(
+        shared.gc.lock().stats().collections > 0,
+        "GC stress test did not trigger a collection"
+    );
 }
 
 #[test]

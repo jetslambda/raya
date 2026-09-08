@@ -24,6 +24,9 @@ use crate::vm::scheduler::{Task, TaskId};
 use crate::vm::stack::Stack;
 use crate::vm::sync::{MutexRegistry, SemaphoreRegistry};
 use crate::vm::value::Value;
+use crate::vm::value_semantics::{
+    compare_strings, raya_string_ptr_checked, value_to_string, values_equal,
+};
 use crate::vm::VmError;
 use crossbeam_deque::Injector;
 use raya_sdk::NativeCallResult;
@@ -198,6 +201,9 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         object_get_shape_field: helper_object_get_shape_field,
         object_set_shape_field: helper_object_set_shape_field,
         string_len: helper_string_len,
+        string_compare: helper_string_compare,
+        value_to_string: helper_value_to_string,
+        const_string: helper_const_string,
     }
 }
 
@@ -1033,6 +1039,51 @@ unsafe extern "C" fn helper_alloc_string(
     string_ptr.as_ptr().cast::<()>()
 }
 
+unsafe extern "C" fn helper_const_string(
+    pool_index: u32,
+    module_ptr: *const (),
+    shared_state: *mut (),
+) -> *mut () {
+    if shared_state.is_null() || module_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let bridge = &*shared_state.cast::<JitRuntimeBridgeContext>();
+    if bridge.gc.is_null()
+        || bridge.constant_string_cache.is_null()
+        || bridge.ephemeral_gc_roots.is_null()
+    {
+        return std::ptr::null_mut();
+    }
+    let module = &*module_ptr.cast::<Module>();
+    let key = (module.checksum, pool_index as usize);
+    if let Some(value) = (&*bridge.constant_string_cache).read().get(&key).copied() {
+        return value
+            .as_ptr::<u8>()
+            .map_or(std::ptr::null_mut(), |ptr| ptr.as_ptr().cast::<()>());
+    }
+    let Some(text) = module.constants.get_string(pool_index).map(str::to_owned) else {
+        return std::ptr::null_mut();
+    };
+
+    let allocated = {
+        let mut gc = (&*bridge.gc).lock();
+        let string = gc.allocate(RayaString::new(text));
+        let value = Value::from_ptr(
+            NonNull::new(string.as_ptr()).expect("GC returned a null string pointer"),
+        );
+        (&*bridge.ephemeral_gc_roots).write().push(value);
+        value
+    };
+    let published = {
+        let mut cache = (&*bridge.constant_string_cache).write();
+        *cache.entry(key).or_insert(allocated)
+    };
+    jit_release_ephemeral_roots(bridge, &[allocated]);
+    published
+        .as_ptr::<u8>()
+        .map_or(std::ptr::null_mut(), |ptr| ptr.as_ptr().cast::<()>())
+}
+
 unsafe extern "C" fn helper_safepoint_poll(shared_state: *const ()) {
     if shared_state.is_null() {
         return;
@@ -1298,19 +1349,64 @@ unsafe extern "C" fn helper_deoptimize(_bytecode_offset: u32, _shared_state: *mu
     panic!("helper_deoptimize is not wired yet")
 }
 
-unsafe extern "C" fn helper_string_concat(_left: u64, _right: u64, _shared_state: *mut ()) -> u64 {
-    Value::null().raw()
+fn jit_add_ephemeral_roots(bridge: &JitRuntimeBridgeContext, values: &[Value]) -> bool {
+    if bridge.ephemeral_gc_roots.is_null() {
+        return false;
+    }
+    let mut roots = unsafe { &*bridge.ephemeral_gc_roots }.write();
+    roots.extend(values.iter().copied().filter(Value::is_heap_allocated));
+    true
+}
+
+fn jit_release_ephemeral_roots(bridge: &JitRuntimeBridgeContext, values: &[Value]) {
+    if bridge.ephemeral_gc_roots.is_null() {
+        return;
+    }
+    let mut roots = unsafe { &*bridge.ephemeral_gc_roots }.write();
+    for value in values.iter().rev().filter(|value| value.is_heap_allocated()) {
+        if let Some(index) = roots.iter().rposition(|candidate| candidate == value) {
+            roots.swap_remove(index);
+        }
+    }
+}
+
+unsafe extern "C" fn helper_string_concat(
+    left_raw: u64,
+    right_raw: u64,
+    shared_state: *mut (),
+) -> u64 {
+    if shared_state.is_null() {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+    let bridge = &*shared_state.cast::<JitRuntimeBridgeContext>();
+    if bridge.gc.is_null() {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+
+    let values = [Value::from_raw(left_raw), Value::from_raw(right_raw)];
+    if !jit_add_ephemeral_roots(bridge, &values) {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+    let left = value_to_string(values[0]);
+    let right = value_to_string(values[1]);
+    let result = {
+        let mut gc = (&*bridge.gc).lock();
+        let string = gc.allocate(RayaString::new(format!("{}{}", left, right)));
+        Value::from_ptr(NonNull::new(string.as_ptr()).expect("GC returned a null string pointer"))
+    };
+    jit_release_ephemeral_roots(bridge, &values);
+    result.raw()
 }
 
 unsafe extern "C" fn helper_string_len(string_raw: u64, _shared_state: *mut ()) -> i32 {
     let value = Value::from_raw(string_raw);
-    let Some(string_ptr) = (unsafe { value.as_ptr::<RayaString>() }) else {
+    let Some(string_ptr) = raya_string_ptr_checked(value) else {
         if std::env::var("RAYA_JIT_DEBUG_CALLS").is_ok() {
             eprintln!("jit string_len fallback: raw=0x{string_raw:016x} value={value:?}");
         }
         return JIT_STRING_LEN_FALLBACK_SENTINEL;
     };
-    let string = unsafe { &*string_ptr.as_ptr() };
+    let string = &*string_ptr.as_ptr();
     if std::env::var("RAYA_JIT_DEBUG_CALLS").is_ok() {
         eprintln!("jit string_len: len={} value={value:?}", string.len());
     }
@@ -1318,11 +1414,47 @@ unsafe extern "C" fn helper_string_len(string_raw: u64, _shared_state: *mut ()) 
 }
 
 unsafe extern "C" fn helper_generic_equals(
-    _left: u64,
-    _right: u64,
+    left_raw: u64,
+    right_raw: u64,
     _shared_state: *mut (),
 ) -> bool {
-    false
+    values_equal(Value::from_raw(left_raw), Value::from_raw(right_raw))
+}
+
+unsafe extern "C" fn helper_string_compare(
+    left_raw: u64,
+    right_raw: u64,
+    _shared_state: *mut (),
+) -> i8 {
+    match compare_strings(Value::from_raw(left_raw), Value::from_raw(right_raw)) {
+        Some(std::cmp::Ordering::Less) => -1,
+        Some(std::cmp::Ordering::Equal) => 0,
+        Some(std::cmp::Ordering::Greater) => 1,
+        None => 2,
+    }
+}
+
+unsafe extern "C" fn helper_value_to_string(value_raw: u64, shared_state: *mut ()) -> u64 {
+    if shared_state.is_null() {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+    let bridge = &*shared_state.cast::<JitRuntimeBridgeContext>();
+    if bridge.gc.is_null() {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+
+    let value = Value::from_raw(value_raw);
+    if !jit_add_ephemeral_roots(bridge, &[value]) {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+    let text = value_to_string(value);
+    let result = {
+        let mut gc = (&*bridge.gc).lock();
+        let string = gc.allocate(RayaString::new(text));
+        Value::from_ptr(NonNull::new(string.as_ptr()).expect("GC returned a null string pointer"))
+    };
+    jit_release_ephemeral_roots(bridge, &[value]);
+    result.raw()
 }
 
 unsafe extern "C" fn helper_object_get_field(

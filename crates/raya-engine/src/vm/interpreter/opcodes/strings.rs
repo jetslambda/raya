@@ -6,7 +6,9 @@ use crate::vm::interpreter::Interpreter;
 use crate::vm::object::RayaString;
 use crate::vm::stack::Stack;
 use crate::vm::value::Value;
+use crate::vm::value_semantics::{compare_strings, raya_string_ptr_checked, value_to_string};
 use crate::vm::VmError;
+use std::cmp::Ordering;
 
 impl<'a> Interpreter<'a> {
     pub(in crate::vm::interpreter) fn exec_string_ops(
@@ -16,218 +18,95 @@ impl<'a> Interpreter<'a> {
     ) -> OpcodeResult {
         match opcode {
             Opcode::Sconcat => {
-                let b_val = match stack.pop() {
-                    Ok(v) => v,
-                    Err(e) => return OpcodeResult::Error(e),
+                let right = match stack.pop() {
+                    Ok(value) => value,
+                    Err(error) => return OpcodeResult::Error(error),
                 };
-                let a_val = match stack.pop() {
-                    Ok(v) => v,
-                    Err(e) => return OpcodeResult::Error(e),
-                };
-
-                // Helper function to convert a Value to its string representation
-                // Uses Display format (not Debug) for proper string representation
-                let value_to_string = |val: &Value| -> String {
-                    if val.is_null() {
-                        "null".to_string()
-                    } else if let Some(b) = val.as_bool() {
-                        if b {
-                            "true".to_string()
-                        } else {
-                            "false".to_string()
-                        }
-                    } else if let Some(i) = val.as_i32() {
-                        i.to_string()
-                    } else if let Some(f) = val.as_f64() {
-                        // Format float like JavaScript: no trailing zeros for whole numbers
-                        if f.fract() == 0.0 && f.abs() < 1e15 {
-                            (f as i64).to_string()
-                        } else {
-                            f.to_string()
-                        }
-                    } else if val.is_ptr() {
-                        // Check if it's already a string
-                        let ptr = unsafe { val.as_ptr::<RayaString>() };
-                        if let Some(str_ptr) = ptr {
-                            unsafe { &*str_ptr.as_ptr() }.data.clone()
-                        } else {
-                            "[object]".to_string()
-                        }
-                    } else {
-                        "undefined".to_string()
-                    }
+                let left = match stack.pop() {
+                    Ok(value) => value,
+                    Err(error) => return OpcodeResult::Error(error),
                 };
 
-                let a_str = if a_val.is_ptr() {
-                    let ptr = unsafe { a_val.as_ptr::<RayaString>() };
-                    if let Some(str_ptr) = ptr {
-                        unsafe { &*str_ptr.as_ptr() }.data.clone()
-                    } else {
-                        "[object]".to_string()
-                    }
-                } else {
-                    value_to_string(&a_val)
-                };
-
-                let b_str = if b_val.is_ptr() {
-                    let ptr = unsafe { b_val.as_ptr::<RayaString>() };
-                    if let Some(str_ptr) = ptr {
-                        unsafe { &*str_ptr.as_ptr() }.data.clone()
-                    } else {
-                        "[object]".to_string()
-                    }
-                } else {
-                    value_to_string(&b_val)
-                };
-
-                let result = RayaString::new(format!("{}{}", a_str, b_str));
+                let left = unsafe { value_to_string(left) };
+                let right = unsafe { value_to_string(right) };
+                let result = RayaString::new(format!("{}{}", left, right));
                 let gc_ptr = self.gc.lock().allocate(result);
                 let value =
                     unsafe { Value::from_ptr(std::ptr::NonNull::new(gc_ptr.as_ptr()).unwrap()) };
-                if let Err(e) = stack.push(value) {
-                    return OpcodeResult::Error(e);
+                if let Err(error) = stack.push(value) {
+                    return OpcodeResult::Error(error);
                 }
                 OpcodeResult::Continue
             }
 
             Opcode::Slen => {
-                let s_val = match stack.pop() {
-                    Ok(v) => v,
-                    Err(e) => return OpcodeResult::Error(e),
+                let value = match stack.pop() {
+                    Ok(value) => value,
+                    Err(error) => return OpcodeResult::Error(error),
                 };
-
-                if !s_val.is_ptr() {
+                let Some(string) = (unsafe { raya_string_ptr_checked(value) }) else {
                     return OpcodeResult::Error(VmError::TypeError("Expected string".to_string()));
-                }
-
-                let str_ptr = unsafe { s_val.as_ptr::<RayaString>() };
-                let s = unsafe { &*str_ptr.unwrap().as_ptr() };
-                if let Err(e) = stack.push(Value::i32(s.len() as i32)) {
-                    return OpcodeResult::Error(e);
+                };
+                let len = unsafe { &*string.as_ptr() }.len();
+                if let Err(error) = stack.push(Value::i32(len as i32)) {
+                    return OpcodeResult::Error(error);
                 }
                 OpcodeResult::Continue
             }
 
-            Opcode::Seq => {
-                let b_val = match stack.pop() {
-                    Ok(v) => v,
-                    Err(e) => return OpcodeResult::Error(e),
+            Opcode::Seq | Opcode::Sne => {
+                let right = match stack.pop() {
+                    Ok(value) => value,
+                    Err(error) => return OpcodeResult::Error(error),
                 };
-                let a_val = match stack.pop() {
-                    Ok(v) => v,
-                    Err(e) => return OpcodeResult::Error(e),
+                let left = match stack.pop() {
+                    Ok(value) => value,
+                    Err(error) => return OpcodeResult::Error(error),
                 };
-
-                let result = if a_val.is_ptr() && b_val.is_ptr() {
-                    let a_ptr = unsafe { a_val.as_ptr::<RayaString>() };
-                    let b_ptr = unsafe { b_val.as_ptr::<RayaString>() };
-                    let a = unsafe { &*a_ptr.unwrap().as_ptr() };
-                    let b = unsafe { &*b_ptr.unwrap().as_ptr() };
-                    a.data == b.data
-                } else {
-                    false
-                };
-                if let Err(e) = stack.push(Value::bool(result)) {
-                    return OpcodeResult::Error(e);
-                }
-                OpcodeResult::Continue
-            }
-
-            Opcode::Sne => {
-                let b_val = match stack.pop() {
-                    Ok(v) => v,
-                    Err(e) => return OpcodeResult::Error(e),
-                };
-                let a_val = match stack.pop() {
-                    Ok(v) => v,
-                    Err(e) => return OpcodeResult::Error(e),
-                };
-
-                let result = if a_val.is_ptr() && b_val.is_ptr() {
-                    let a_ptr = unsafe { a_val.as_ptr::<RayaString>() };
-                    let b_ptr = unsafe { b_val.as_ptr::<RayaString>() };
-                    let a = unsafe { &*a_ptr.unwrap().as_ptr() };
-                    let b = unsafe { &*b_ptr.unwrap().as_ptr() };
-                    a.data != b.data
-                } else {
-                    true
-                };
-                if let Err(e) = stack.push(Value::bool(result)) {
-                    return OpcodeResult::Error(e);
+                let equal = unsafe { compare_strings(left, right) }
+                    .is_some_and(|ordering| ordering == Ordering::Equal);
+                let result = if opcode == Opcode::Seq { equal } else { !equal };
+                if let Err(error) = stack.push(Value::bool(result)) {
+                    return OpcodeResult::Error(error);
                 }
                 OpcodeResult::Continue
             }
 
             Opcode::Slt | Opcode::Sle | Opcode::Sgt | Opcode::Sge => {
-                let b_val = match stack.pop() {
-                    Ok(v) => v,
-                    Err(e) => return OpcodeResult::Error(e),
+                let right = match stack.pop() {
+                    Ok(value) => value,
+                    Err(error) => return OpcodeResult::Error(error),
                 };
-                let a_val = match stack.pop() {
-                    Ok(v) => v,
-                    Err(e) => return OpcodeResult::Error(e),
+                let left = match stack.pop() {
+                    Ok(value) => value,
+                    Err(error) => return OpcodeResult::Error(error),
                 };
-
-                let result = if a_val.is_ptr() && b_val.is_ptr() {
-                    let a_ptr = unsafe { a_val.as_ptr::<RayaString>() };
-                    let b_ptr = unsafe { b_val.as_ptr::<RayaString>() };
-                    let a = unsafe { &*a_ptr.unwrap().as_ptr() };
-                    let b = unsafe { &*b_ptr.unwrap().as_ptr() };
+                let result = unsafe { compare_strings(left, right) }.is_some_and(|ordering| {
                     match opcode {
-                        Opcode::Slt => a.data < b.data,
-                        Opcode::Sle => a.data <= b.data,
-                        Opcode::Sgt => a.data > b.data,
-                        Opcode::Sge => a.data >= b.data,
+                        Opcode::Slt => ordering == Ordering::Less,
+                        Opcode::Sle => ordering != Ordering::Greater,
+                        Opcode::Sgt => ordering == Ordering::Greater,
+                        Opcode::Sge => ordering != Ordering::Less,
                         _ => unreachable!(),
                     }
-                } else {
-                    false
-                };
-                if let Err(e) = stack.push(Value::bool(result)) {
-                    return OpcodeResult::Error(e);
+                });
+                if let Err(error) = stack.push(Value::bool(result)) {
+                    return OpcodeResult::Error(error);
                 }
                 OpcodeResult::Continue
             }
 
             Opcode::ToString => {
-                let val = match stack.pop() {
-                    Ok(v) => v,
-                    Err(e) => return OpcodeResult::Error(e),
+                let value = match stack.pop() {
+                    Ok(value) => value,
+                    Err(error) => return OpcodeResult::Error(error),
                 };
-                // Convert value to string properly
-                let s = if val.is_null() {
-                    "null".to_string()
-                } else if let Some(b) = val.as_bool() {
-                    if b {
-                        "true".to_string()
-                    } else {
-                        "false".to_string()
-                    }
-                } else if let Some(i) = val.as_i32() {
-                    i.to_string()
-                } else if let Some(f) = val.as_f64() {
-                    // Format float like JavaScript: no trailing zeros, no scientific notation for small numbers
-                    if f.fract() == 0.0 && f.abs() < 1e15 {
-                        (f as i64).to_string()
-                    } else {
-                        f.to_string()
-                    }
-                } else if val.is_ptr() {
-                    // Check if it's already a string
-                    if let Some(ptr) = unsafe { val.as_ptr::<RayaString>() } {
-                        unsafe { &*ptr.as_ptr() }.data.clone()
-                    } else {
-                        "[object]".to_string()
-                    }
-                } else {
-                    "undefined".to_string()
-                };
-                let result = RayaString::new(s);
+                let result = RayaString::new(unsafe { value_to_string(value) });
                 let gc_ptr = self.gc.lock().allocate(result);
                 let value =
                     unsafe { Value::from_ptr(std::ptr::NonNull::new(gc_ptr.as_ptr()).unwrap()) };
-                if let Err(e) = stack.push(value) {
-                    return OpcodeResult::Error(e);
+                if let Err(error) = stack.push(value) {
+                    return OpcodeResult::Error(error);
                 }
                 OpcodeResult::Continue
             }

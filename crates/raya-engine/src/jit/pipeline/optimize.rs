@@ -255,8 +255,7 @@ fn replace_reg_uses(instr: &mut JitInstr, subs: &rustc_hash::FxHashMap<Reg, Reg>
         | JitInstr::StrictEq { left, right, .. }
         | JitInstr::StrictNe { left, right, .. }
         | JitInstr::And { left, right, .. }
-        | JitInstr::Or { left, right, .. }
-        | JitInstr::SConcat { left, right, .. } => {
+        | JitInstr::Or { left, right, .. } => {
             sub(left, subs);
             sub(right, subs);
         }
@@ -302,6 +301,30 @@ fn replace_reg_uses(instr: &mut JitInstr, subs: &rustc_hash::FxHashMap<Reg, Reg>
         | JitInstr::LoadFieldShape { object, stack, .. }
         | JitInstr::OptionalFieldExact { object, stack, .. } => {
             sub(object, subs);
+            for reg in stack.iter_mut() {
+                sub(reg, subs);
+            }
+        }
+
+        JitInstr::SConcat {
+            left, right, stack, ..
+        } => {
+            sub(left, subs);
+            sub(right, subs);
+            for reg in stack.iter_mut() {
+                sub(reg, subs);
+            }
+        }
+
+        JitInstr::SLen { string, stack, .. } => {
+            sub(string, subs);
+            for reg in stack.iter_mut() {
+                sub(reg, subs);
+            }
+        }
+
+        JitInstr::ToString { value, stack, .. } => {
+            sub(value, subs);
             for reg in stack.iter_mut() {
                 sub(reg, subs);
             }
@@ -546,10 +569,17 @@ fn collect_used_regs(instr: &JitInstr, used: &mut FxHashSet<Reg>) {
         | JitInstr::StrictEq { left, right, .. }
         | JitInstr::StrictNe { left, right, .. }
         | JitInstr::And { left, right, .. }
-        | JitInstr::Or { left, right, .. }
-        | JitInstr::SConcat { left, right, .. } => {
+        | JitInstr::Or { left, right, .. } => {
             used.insert(*left);
             used.insert(*right);
+        }
+
+        JitInstr::SConcat {
+            left, right, stack, ..
+        } => {
+            used.insert(*left);
+            used.insert(*right);
+            used.extend(stack.iter().copied());
         }
 
         JitInstr::INeg { operand, .. }
@@ -605,9 +635,18 @@ fn collect_used_regs(instr: &JitInstr, used: &mut FxHashSet<Reg>) {
         | JitInstr::Typeof {
             operand: object, ..
         }
-        | JitInstr::ToString { value: object, .. }
-        | JitInstr::SLen { string: object, .. } => {
+        => {
             used.insert(*object);
+        }
+
+        JitInstr::ToString {
+            value: object, stack, ..
+        }
+        | JitInstr::SLen {
+            string: object, stack, ..
+        } => {
+            used.insert(*object);
+            used.extend(stack.iter().copied());
         }
 
         JitInstr::LoadElem { array, index, .. } => {

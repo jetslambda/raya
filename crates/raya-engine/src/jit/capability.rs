@@ -113,12 +113,20 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         | Opcode::Return
         | Opcode::ReturnVoid => JitSupport::NativeExact,
 
-        // ===== Strings =====
-        // Slen has a verified length helper. Sconcat's helper is a stub that
-        // returns null, and Seq..Sge route through unverified comparison
-        // paths, so they stay out until differential tests exist.
-        Opcode::Slen => JitSupport::HelperExact,
-        Opcode::ToString => JitSupport::HelperExact,
+        // ===== Strings and generic equality =====
+        Opcode::Slen
+        | Opcode::ToString
+        | Opcode::Sconcat
+        | Opcode::Seq
+        | Opcode::Sne
+        | Opcode::Slt
+        | Opcode::Sle
+        | Opcode::Sgt
+        | Opcode::Sge
+        | Opcode::Eq
+        | Opcode::Ne
+        | Opcode::StrictEq
+        | Opcode::StrictNe => JitSupport::HelperExact,
 
         // ===== Objects (helper-backed) =====
         Opcode::NewType
@@ -170,8 +178,6 @@ pub fn opcode_supported_for_jit(opcode: Opcode) -> bool {
 ///
 /// - `IPow`/`FPow`: lowered as multiplication (S1)
 /// - `FMod`: returned the left operand unchanged (S1)
-/// - `Eq`/`Ne`/`StrictEq`/`StrictNe`: generic-equality helper returns false
-/// - `Sconcat`: concat helper returns null
 /// - `BindMethod`: emitted nothing, corrupting the lifted stack model
 /// - `GetArgCount`/`LoadArgLocal`: no-op / constant zero (S2)
 /// - `Try`/`Rethrow`/`Throw`: placeholder handler installation; throw and
@@ -185,11 +191,6 @@ pub fn produces_incorrect_native_results(opcode: Opcode) -> bool {
             | Opcode::Imod
             | Opcode::Fpow
             | Opcode::Fmod
-            | Opcode::Eq
-            | Opcode::Ne
-            | Opcode::StrictEq
-            | Opcode::StrictNe
-            | Opcode::Sconcat
             | Opcode::BindMethod
             | Opcode::GetArgCount
             | Opcode::LoadArgLocal
@@ -234,11 +235,6 @@ mod tests {
             Opcode::Ipow,
             Opcode::Fpow,
             Opcode::Fmod,
-            Opcode::Eq,
-            Opcode::Ne,
-            Opcode::StrictEq,
-            Opcode::StrictNe,
-            Opcode::Sconcat,
             Opcode::BindMethod,
             Opcode::GetArgCount,
             Opcode::LoadArgLocal,

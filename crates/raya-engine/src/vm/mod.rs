@@ -28,6 +28,7 @@ pub mod stack;
 pub mod sync;
 pub mod types;
 pub mod value;
+pub(crate) mod value_semantics;
 
 // Re-export SDK types (canonical definitions live in raya-sdk)
 pub use raya_sdk::{

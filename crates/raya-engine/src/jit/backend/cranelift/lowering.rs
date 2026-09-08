@@ -48,6 +48,8 @@ pub struct LoweringContext<'a> {
     sig_alloc_object: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.alloc_string
     sig_alloc_string: Option<ir::SigRef>,
+    /// Imported signature for RuntimeHelperTable.const_string
+    sig_const_string: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.object_get_field
     sig_object_get_field: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.object_get_shape_field
@@ -62,6 +64,14 @@ pub struct LoweringContext<'a> {
     sig_interpreter_call: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.string_len
     sig_string_len: Option<ir::SigRef>,
+    /// Imported signature for RuntimeHelperTable.string_concat
+    sig_string_concat: Option<ir::SigRef>,
+    /// Imported signature for RuntimeHelperTable.generic_equals
+    sig_generic_equals: Option<ir::SigRef>,
+    /// Imported signature for RuntimeHelperTable.string_compare
+    sig_string_compare: Option<ir::SigRef>,
+    /// Imported signature for RuntimeHelperTable.value_to_string
+    sig_value_to_string: Option<ir::SigRef>,
 }
 
 /// The five parameters of the JIT entry function ABI
@@ -172,6 +182,7 @@ impl<'a> LoweringContext<'a> {
             sig_native_call_dispatch: None,
             sig_alloc_object: None,
             sig_alloc_string: None,
+            sig_const_string: None,
             sig_object_get_field: None,
             sig_object_get_shape_field: None,
             sig_object_set_shape_field: None,
@@ -179,6 +190,10 @@ impl<'a> LoweringContext<'a> {
             sig_object_is_nominal: None,
             sig_interpreter_call: None,
             sig_string_len: None,
+            sig_string_concat: None,
+            sig_generic_equals: None,
+            sig_string_compare: None,
+            sig_value_to_string: None,
         };
 
         // Declare all registers as Cranelift variables
@@ -383,20 +398,10 @@ impl<'a> LoweringContext<'a> {
                 self.def_reg(builder, *dest, val);
             }
             JitInstr::ConstString { dest, pool_index } => {
-                let text = self
-                    .module
-                    .constants
-                    .get_string(*pool_index)
-                    .unwrap_or_default();
-                self.lower_const_string_ptr(builder, *dest, text.as_bytes());
+                self.lower_const_string_ptr(builder, *dest, *pool_index);
             }
             JitInstr::ConstStr { dest, str_index } => {
-                let text = self
-                    .module
-                    .constants
-                    .get_string(*str_index as u32)
-                    .unwrap_or_default();
-                self.lower_const_string_ptr(builder, *dest, text.as_bytes());
+                self.lower_const_string_ptr(builder, *dest, *str_index as u32);
             }
 
             // ===== Integer Arithmetic =====
@@ -615,6 +620,32 @@ impl<'a> LoweringContext<'a> {
                 );
             }
 
+            // ===== String and Generic Comparison =====
+            JitInstr::SCmpEq { dest, left, right } => {
+                self.lower_string_compare(builder, Opcode::Seq, *dest, *left, *right);
+            }
+            JitInstr::SCmpNe { dest, left, right } => {
+                self.lower_string_compare(builder, Opcode::Sne, *dest, *left, *right);
+            }
+            JitInstr::SCmpLt { dest, left, right } => {
+                self.lower_string_compare(builder, Opcode::Slt, *dest, *left, *right);
+            }
+            JitInstr::SCmpLe { dest, left, right } => {
+                self.lower_string_compare(builder, Opcode::Sle, *dest, *left, *right);
+            }
+            JitInstr::SCmpGt { dest, left, right } => {
+                self.lower_string_compare(builder, Opcode::Sgt, *dest, *left, *right);
+            }
+            JitInstr::SCmpGe { dest, left, right } => {
+                self.lower_string_compare(builder, Opcode::Sge, *dest, *left, *right);
+            }
+            JitInstr::Eq { dest, left, right } | JitInstr::StrictEq { dest, left, right } => {
+                self.lower_generic_equals(builder, *dest, *left, *right, false);
+            }
+            JitInstr::Ne { dest, left, right } | JitInstr::StrictNe { dest, left, right } => {
+                self.lower_generic_equals(builder, *dest, *left, *right, true);
+            }
+
             // ===== Logical =====
             JitInstr::Not { dest, operand } => {
                 let v = self.use_reg(builder, *operand);
@@ -702,12 +733,147 @@ impl<'a> LoweringContext<'a> {
             }
 
             // ===== String Operations =====
+            JitInstr::SConcat {
+                dest,
+                left,
+                right,
+                stack,
+                bytecode_offset,
+            } => {
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "string concat fallback stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let done = builder.create_block();
+                builder.append_block_param(done, types::I64);
+                builder
+                    .ins()
+                    .brif(is_ctx_null, fallback_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_STRING_CONCAT_OFFSET,
+                );
+                let sig = self.string_concat_sig(builder);
+                let left = self.boxed_reg_value(builder, *left);
+                let right = self.boxed_reg_value(builder, *right);
+                let call = builder
+                    .ins()
+                    .call_indirect(sig, fn_ptr, &[left, right, shared_state]);
+                let result = builder.inst_results(call)[0];
+                let sentinel = builder
+                    .ins()
+                    .iconst(types::I64, JIT_INTERPRETER_FALLBACK_SENTINEL as i64);
+                let is_fallback =
+                    builder
+                        .ins()
+                        .icmp(condcodes::IntCC::Equal, result, sentinel);
+                let fast_continue = builder.create_block();
+                builder
+                    .ins()
+                    .brif(is_fallback, fallback_block, &[], fast_continue, &[]);
+                builder.seal_block(fast_continue);
+                builder.switch_to_block(fast_continue);
+                let result = abi::emit_unbox_ptr(builder, result);
+                builder.ins().jump(done, &[ir::BlockArg::Value(result)]);
+
+                builder.seal_block(fallback_block);
+                builder.switch_to_block(fallback_block);
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.seal_block(done);
+                builder.switch_to_block(done);
+                let merged = builder.block_params(done)[0];
+                self.def_reg(builder, *dest, merged);
+            }
+            JitInstr::ToString {
+                dest,
+                value,
+                stack,
+                bytecode_offset,
+            } => {
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "value-to-string fallback stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let done = builder.create_block();
+                builder.append_block_param(done, types::I64);
+                builder
+                    .ins()
+                    .brif(is_ctx_null, fallback_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_VALUE_TO_STRING_OFFSET,
+                );
+                let sig = self.value_to_string_sig(builder);
+                let value = self.boxed_reg_value(builder, *value);
+                let call = builder
+                    .ins()
+                    .call_indirect(sig, fn_ptr, &[value, shared_state]);
+                let result = builder.inst_results(call)[0];
+                let sentinel = builder
+                    .ins()
+                    .iconst(types::I64, JIT_INTERPRETER_FALLBACK_SENTINEL as i64);
+                let is_fallback =
+                    builder
+                        .ins()
+                        .icmp(condcodes::IntCC::Equal, result, sentinel);
+                let fast_continue = builder.create_block();
+                builder
+                    .ins()
+                    .brif(is_fallback, fallback_block, &[], fast_continue, &[]);
+                builder.seal_block(fast_continue);
+                builder.switch_to_block(fast_continue);
+                let result = abi::emit_unbox_ptr(builder, result);
+                builder.ins().jump(done, &[ir::BlockArg::Value(result)]);
+
+                builder.seal_block(fallback_block);
+                builder.switch_to_block(fallback_block);
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.seal_block(done);
+                builder.switch_to_block(done);
+                let merged = builder.block_params(done)[0];
+                self.def_reg(builder, *dest, merged);
+            }
             JitInstr::SLen {
                 dest,
                 string,
                 stack,
                 bytecode_offset,
             } => {
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "string length fallback stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
                 let ctx = self.params.ctx_ptr;
                 let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
                 let call_block = builder.create_block();
@@ -2192,33 +2358,45 @@ impl<'a> LoweringContext<'a> {
         sig_ref
     }
 
+    fn const_string_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_const_string {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I32));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_const_string = Some(sig_ref);
+        sig_ref
+    }
+
     fn lower_const_string_ptr(
         &mut self,
         builder: &mut FunctionBuilder<'_>,
         dest: Reg,
-        bytes: &[u8],
+        pool_index: u32,
     ) {
         let ctx = self.params.ctx_ptr;
         let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
-        let fn_ptr = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 40);
-        let slot_size = bytes.len().max(1) as u32;
-        let data_slot = builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            slot_size,
-            1,
-        ));
-        let data_ptr = builder.ins().stack_addr(types::I64, data_slot, 0);
-        for (i, byte) in bytes.iter().copied().enumerate() {
-            let value = builder.ins().iconst(types::I8, byte as i64);
-            builder
-                .ins()
-                .store(MemFlags::trusted(), value, data_ptr, i as i32);
-        }
-        let len = builder.ins().iconst(types::I64, bytes.len() as i64);
-        let sig = self.alloc_string_sig(builder);
+        let module_ptr = builder.ins().load(
+            types::I64,
+            MemFlags::trusted(),
+            ctx,
+            crate::jit::runtime::trampoline::RUNTIME_CONTEXT_MODULE_OFFSET,
+        );
+        let fn_ptr = builder.ins().load(
+            types::I64,
+            MemFlags::trusted(),
+            ctx,
+            crate::jit::runtime::trampoline::HELPER_CONST_STRING_OFFSET,
+        );
+        let index = builder.ins().iconst(types::I32, pool_index as i64);
+        let sig = self.const_string_sig(builder);
         let call = builder
             .ins()
-            .call_indirect(sig, fn_ptr, &[data_ptr, len, shared_state]);
+            .call_indirect(sig, fn_ptr, &[index, module_ptr, shared_state]);
         let string_ptr = builder.inst_results(call)[0];
         self.def_reg(builder, dest, string_ptr);
     }
@@ -2303,6 +2481,146 @@ impl<'a> LoweringContext<'a> {
         let sig_ref = builder.func.import_signature(sig);
         self.sig_object_set_shape_field = Some(sig_ref);
         sig_ref
+    }
+
+    fn string_concat_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_string_concat {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_string_concat = Some(sig_ref);
+        sig_ref
+    }
+
+    fn generic_equals_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_generic_equals {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I8));
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_generic_equals = Some(sig_ref);
+        sig_ref
+    }
+
+    fn string_compare_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_string_compare {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I8));
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_string_compare = Some(sig_ref);
+        sig_ref
+    }
+
+    fn value_to_string_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_value_to_string {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_value_to_string = Some(sig_ref);
+        sig_ref
+    }
+
+    fn lower_generic_equals(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        dest: Reg,
+        left: Reg,
+        right: Reg,
+        invert: bool,
+    ) {
+        let ctx = self.params.ctx_ptr;
+        let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+        let fn_ptr = builder.ins().load(
+            types::I64,
+            MemFlags::trusted(),
+            ctx,
+            crate::jit::runtime::trampoline::HELPER_GENERIC_EQUALS_OFFSET,
+        );
+        let sig = self.generic_equals_sig(builder);
+        let left = self.boxed_reg_value(builder, left);
+        let right = self.boxed_reg_value(builder, right);
+        let call = builder
+            .ins()
+            .call_indirect(sig, fn_ptr, &[left, right, shared_state]);
+        let mut result = builder.inst_results(call)[0];
+        if invert {
+            let one = builder.ins().iconst(types::I8, 1);
+            result = builder.ins().bxor(result, one);
+        }
+        self.def_reg(builder, dest, result);
+    }
+
+    fn lower_string_compare(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        opcode: Opcode,
+        dest: Reg,
+        left: Reg,
+        right: Reg,
+    ) {
+        let ctx = self.params.ctx_ptr;
+        let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+        let fn_ptr = builder.ins().load(
+            types::I64,
+            MemFlags::trusted(),
+            ctx,
+            crate::jit::runtime::trampoline::HELPER_STRING_COMPARE_OFFSET,
+        );
+        let sig = self.string_compare_sig(builder);
+        let left = self.boxed_reg_value(builder, left);
+        let right = self.boxed_reg_value(builder, right);
+        let call = builder
+            .ins()
+            .call_indirect(sig, fn_ptr, &[left, right, shared_state]);
+        let comparison = builder.inst_results(call)[0];
+        let result = match opcode {
+            Opcode::Seq => builder
+                .ins()
+                .icmp_imm(condcodes::IntCC::Equal, comparison, 0),
+            Opcode::Sne => builder
+                .ins()
+                .icmp_imm(condcodes::IntCC::NotEqual, comparison, 0),
+            Opcode::Slt => builder
+                .ins()
+                .icmp_imm(condcodes::IntCC::Equal, comparison, -1),
+            Opcode::Sle => builder
+                .ins()
+                .icmp_imm(condcodes::IntCC::SignedLessThan, comparison, 1),
+            Opcode::Sgt => builder
+                .ins()
+                .icmp_imm(condcodes::IntCC::Equal, comparison, 1),
+            Opcode::Sge => {
+                let nonnegative = builder.ins().icmp_imm(
+                    condcodes::IntCC::SignedGreaterThanOrEqual,
+                    comparison,
+                    0,
+                );
+                let concrete = builder
+                    .ins()
+                    .icmp_imm(condcodes::IntCC::SignedLessThan, comparison, 2);
+                builder.ins().band(nonnegative, concrete)
+            }
+            _ => unreachable!("not a string comparison opcode"),
+        };
+        self.def_reg(builder, dest, result);
     }
 
     /// Lower an integer comparison

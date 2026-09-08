@@ -523,6 +523,8 @@ pub enum JitInstr {
         dest: Reg,
         left: Reg,
         right: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     SLen {
         dest: Reg,
@@ -533,6 +535,8 @@ pub enum JitInstr {
     ToString {
         dest: Reg,
         value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
 
     // ===== Interpreter Resume Boundary =====

@@ -178,11 +178,6 @@ fn capability_table_is_internally_consistent() {
         Opcode::Ipow,
         Opcode::Fpow,
         Opcode::Fmod,
-        Opcode::Eq,
-        Opcode::Ne,
-        Opcode::StrictEq,
-        Opcode::StrictNe,
-        Opcode::Sconcat,
         Opcode::BindMethod,
         Opcode::GetArgCount,
         Opcode::LoadArgLocal,
@@ -194,6 +189,29 @@ fn capability_table_is_internally_consistent() {
         assert!(!opcode_supported_for_jit(op), "{op:?}");
         assert_ne!(jit_support(op), JitSupport::NativeExact, "{op:?}");
         assert_ne!(jit_support(op), JitSupport::HelperExact, "{op:?}");
+    }
+}
+
+#[test]
+fn string_and_equality_family_is_selectable() {
+    for op in [
+        Opcode::Slen,
+        Opcode::ToString,
+        Opcode::Sconcat,
+        Opcode::Seq,
+        Opcode::Sne,
+        Opcode::Slt,
+        Opcode::Sle,
+        Opcode::Sgt,
+        Opcode::Sge,
+        Opcode::Eq,
+        Opcode::Ne,
+        Opcode::StrictEq,
+        Opcode::StrictNe,
+    ] {
+        assert_eq!(jit_support(op), JitSupport::HelperExact, "{op:?}");
+        assert!(opcode_supported_for_jit(op), "{op:?}");
+        assert!(!produces_incorrect_native_results(op), "{op:?}");
     }
 }
 

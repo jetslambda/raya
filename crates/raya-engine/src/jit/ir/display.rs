@@ -330,11 +330,11 @@ impl fmt::Display for JitInstr {
             }
 
             // String
-            JitInstr::SConcat { dest, left, right } => {
+            JitInstr::SConcat { dest, left, right, .. } => {
                 write!(f, "{} = sconcat {}, {}", dest, left, right)
             }
             JitInstr::SLen { dest, string, .. } => write!(f, "{} = slen {}", dest, string),
-            JitInstr::ToString { dest, value } => write!(f, "{} = tostring {}", dest, value),
+            JitInstr::ToString { dest, value, .. } => write!(f, "{} = tostring {}", dest, value),
 
             // Interpreter boundary
             JitInstr::InterpreterBoundary {

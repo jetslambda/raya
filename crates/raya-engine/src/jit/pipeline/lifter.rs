@@ -954,12 +954,17 @@ fn lift_instruction(
 
         // ===== String Operations =====
         Opcode::Sconcat => {
+            let pre_stack = stack.clone_state();
             let right = stack.pop(instr.offset)?;
             let left = stack.pop(instr.offset)?;
             let dest = func.alloc_reg(JitType::Ptr);
-            func.block_mut(block)
-                .instrs
-                .push(JitInstr::SConcat { dest, left, right });
+            func.block_mut(block).instrs.push(JitInstr::SConcat {
+                dest,
+                left,
+                right,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
             stack.push(dest);
         }
         Opcode::Slen => {
@@ -977,11 +982,15 @@ fn lift_instruction(
             stack.push(dest);
         }
         Opcode::ToString => {
+            let pre_stack = stack.clone_state();
             let value = stack.pop(instr.offset)?;
             let dest = func.alloc_reg(JitType::Ptr);
-            func.block_mut(block)
-                .instrs
-                .push(JitInstr::ToString { dest, value });
+            func.block_mut(block).instrs.push(JitInstr::ToString {
+                dest,
+                value,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
             stack.push(dest);
         }
 
