@@ -286,24 +286,39 @@ impl fmt::Display for JitInstr {
             } => write!(f, "{} = optional.field {}.{}", dest, object, offset),
 
             // Array
-            JitInstr::NewArray { dest, type_index } => {
-                write!(f, "{} = newarray @{}", dest, type_index)
+            JitInstr::NewArray {
+                dest,
+                type_index,
+                len,
+                ..
+            } => {
+                write!(f, "{} = newarray @{} len={}", dest, type_index, len)
             }
-            JitInstr::LoadElem { dest, array, index } => {
+            JitInstr::LoadElem {
+                dest, array, index, ..
+            } => {
                 write!(f, "{} = load.elem {}[{}]", dest, array, index)
             }
             JitInstr::StoreElem {
                 array,
                 index,
                 value,
+                ..
             } => write!(f, "store.elem {}[{}], {}", array, index, value),
-            JitInstr::ArrayLen { dest, array } => write!(f, "{} = array.len {}", dest, array),
-            JitInstr::ArrayPush { array, value } => write!(f, "array.push {}, {}", array, value),
-            JitInstr::ArrayPop { dest, array } => write!(f, "{} = array.pop {}", dest, array),
+            JitInstr::ArrayLen { dest, array, .. } => {
+                write!(f, "{} = array.len {}", dest, array)
+            }
+            JitInstr::ArrayPush { array, value, .. } => {
+                write!(f, "array.push {}, {}", array, value)
+            }
+            JitInstr::ArrayPop { dest, array, .. } => {
+                write!(f, "{} = array.pop {}", dest, array)
+            }
             JitInstr::ArrayLiteral {
                 dest,
                 type_index,
                 elements,
+                ..
             } => {
                 write!(f, "{} = array.literal @{} [", dest, type_index)?;
                 for (i, e) in elements.iter().enumerate() {
@@ -315,18 +330,12 @@ impl fmt::Display for JitInstr {
                 write!(f, "]")
             }
             JitInstr::InitArray {
-                dest,
-                count,
-                elements,
+                array,
+                index,
+                value,
+                ..
             } => {
-                write!(f, "{} = init.array {} [", dest, count)?;
-                for (i, e) in elements.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", e)?;
-                }
-                write!(f, "]")
+                write!(f, "init.array {}[{}], {}", array, index, value)
             }
 
             // String

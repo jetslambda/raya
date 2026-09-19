@@ -146,6 +146,65 @@ mod tests {
         assert!(bytecode.function_signatures.is_empty());
     }
 
+    /// Read the u32 operand following the first `NewArray` (0xC0) opcode.
+    fn first_new_array_element_id(code: &[u8]) -> Option<u32> {
+        let op = crate::compiler::bytecode::Opcode::NewArray as u8;
+        let pos = code.iter().position(|&b| b == op)?;
+        let bytes = code.get(pos + 1..pos + 5)?;
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn new_array_module(elem_ty: TypeId) -> IrModule {
+        let mut module = IrModule::new("arr");
+        let mut func = IrFunction::new("main", vec![], TypeId::new(0));
+        let mut entry = BasicBlock::new(BasicBlockId(0));
+        let len_reg = make_reg(0, 0);
+        entry.add_instr(IrInstr::Assign {
+            dest: len_reg.clone(),
+            value: IrValue::Constant(IrConstant::I32(3)),
+        });
+        entry.add_instr(IrInstr::NewArray {
+            dest: make_reg(1, 0),
+            len: len_reg,
+            elem_ty,
+        });
+        entry.set_terminator(Terminator::Return(None));
+        func.add_block(entry);
+        module.add_function(func);
+        module
+    }
+
+    #[test]
+    fn codegen_emits_typed_element_descriptor_for_new_array() {
+        use crate::parser::types::context::TypeContext;
+        let mut type_ctx = TypeContext::new();
+        let int_ty = type_ctx.int_type();
+
+        let bytecode =
+            generate_with_types(&new_array_module(int_ty), false, Some(&type_ctx)).unwrap();
+        // int[] element descriptor id is the I32 primitive id (0), not the old
+        // hard-coded 0-that-meant-nothing: here 0 *is* the correct I32 id.
+        assert_eq!(
+            first_new_array_element_id(&bytecode.functions[0].code),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn codegen_emits_any_value_element_when_untyped() {
+        // Without a type context the element id is AnyValue (dynamic), not I32.
+        let any_value_id = crate::compiler::bytecode::types::RuntimeTypeDescriptor::AnyValue
+            .primitive_id()
+            .unwrap()
+            .0;
+        let bytecode = generate(&new_array_module(TypeId::new(0)), false).unwrap();
+        assert_eq!(
+            first_new_array_element_id(&bytecode.functions[0].code),
+            Some(any_value_id)
+        );
+        assert_eq!(any_value_id, 6);
+    }
+
     #[test]
     fn test_generate_return_constant() {
         let mut module = IrModule::new("test");

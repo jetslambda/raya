@@ -268,7 +268,10 @@ pub enum Opcode {
     OptionalFieldShape = 0xBA,
 
     // ===== Array Operations (0xC0-0xCF) =====
-    /// Create new array: pop length (operand: u32 typeIndex)
+    /// Create new array: pop length (operand: u32 elementTypeId).
+    /// `elementTypeId` is a runtime element descriptor id (primitive id < 8, or
+    /// `COMPLEX_BASE + index` into the module's `runtime_types`); `AnyValue`
+    /// (6) denotes a dynamic array.
     NewArray = 0xC0,
     /// Load array element: pop index, pop array, push element
     LoadElem = 0xC1,
@@ -276,9 +279,13 @@ pub enum Opcode {
     StoreElem = 0xC2,
     /// Get array length: pop array, push length
     ArrayLen = 0xC3,
-    /// Create array literal (operands: u32 typeIndex, u32 length)
+    /// Create array literal (operands: u32 elementTypeId, u32 length).
+    /// `elementTypeId` follows the same encoding as NewArray.
     ArrayLiteral = 0xC4,
-    /// Initialize array: pop N values (operand: u16 count)
+    /// Initialize one array element (operand: u16 index).
+    /// Stack: [.., array, value] -> [.., array]. Mirrors InitObject: pops the
+    /// value, peeks the array, stores value at `index`, and leaves the array on
+    /// the stack so successive InitArray ops populate it slot by slot.
     InitArray = 0xC5,
 
     // ===== Tuple Operations (0xC6-0xC9) =====

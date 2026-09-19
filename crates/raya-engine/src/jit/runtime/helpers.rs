@@ -16,7 +16,7 @@ use crate::vm::interpreter::{
 use crate::vm::native_handler::NativeHandler;
 use crate::vm::native_registry::ResolvedNatives;
 use crate::vm::object::{
-    global_layout_names, BoundMethod, BoundNativeMethod, Closure, Object, RayaString,
+    global_layout_names, Array, BoundMethod, BoundNativeMethod, Closure, Object, RayaString,
 };
 use crate::vm::reflect::ClassMetadataRegistry;
 use crate::vm::scheduler::IoSubmission;
@@ -45,6 +45,9 @@ pub const JIT_SHAPE_FIELD_FALLBACK_SENTINEL: u64 = 0xFFFF_DEAD_0000_0004;
 // this invalid NaN-boxed encoding, so it cannot alias a valid Value.
 pub const JIT_LAYOUT_GUARD_FALLBACK_SENTINEL: u64 = 0xFFFE_DEAD_0000_0005;
 pub const JIT_STRING_LEN_FALLBACK_SENTINEL: i32 = i32::MIN;
+/// Returned by `helper_array_len` when the receiver is not an array. Distinct
+/// from any valid non-negative length.
+pub const JIT_ARRAY_LEN_FALLBACK_SENTINEL: i32 = i32::MIN;
 const JIT_SHAPE_ADAPTER_PIC_CAPACITY: usize = 4;
 
 thread_local! {
@@ -204,6 +207,11 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         string_compare: helper_string_compare,
         value_to_string: helper_value_to_string,
         const_string: helper_const_string,
+        array_load: helper_array_load,
+        array_store: helper_array_store,
+        array_push: helper_array_push,
+        array_pop: helper_array_pop,
+        array_len: helper_array_len,
     }
 }
 
@@ -1007,12 +1015,179 @@ unsafe extern "C" fn helper_alloc_object(
     obj_ptr.as_ptr().cast::<()>()
 }
 
+/// Allocate a new array of `capacity` null-filled slots.
+///
+/// `type_index` is the emitted element descriptor id (see the interpreter's
+/// `NewArray`); it is resolved into the array's self-contained element
+/// constraint. Returns null on any misconfiguration so the caller fails closed.
+///
+/// A fresh array holds no live operands across the single `gc.allocate` call,
+/// so no ephemeral-root scope is needed here; the returned pointer is published
+/// to the caller immediately.
 unsafe extern "C" fn helper_alloc_array(
-    _type_id: u32,
-    _capacity: usize,
-    _shared_state: *mut (),
+    type_index: u32,
+    capacity: usize,
+    module_ptr: *const (),
+    shared_state: *mut (),
 ) -> *mut () {
-    std::ptr::null_mut()
+    if shared_state.is_null() {
+        return std::ptr::null_mut();
+    }
+    let bridge = &*(shared_state.cast::<JitRuntimeBridgeContext>());
+    if bridge.gc.is_null() {
+        return std::ptr::null_mut();
+    }
+    let element_type = if module_ptr.is_null() {
+        None
+    } else {
+        let module = &*(module_ptr.cast::<Module>());
+        jit_resolve_array_element_descriptor(module, type_index)
+    };
+    let mut gc = (&*bridge.gc).lock();
+    let array_ptr = gc.allocate(Array::with_element_type(
+        type_index as usize,
+        element_type,
+        capacity,
+    ));
+    array_ptr.as_ptr().cast::<()>()
+}
+
+/// Resolve an emitted element descriptor id into a self-contained constraint,
+/// matching the interpreter's `resolve_element_descriptor`. `AnyValue`, `Ref`,
+/// and unresolvable ids map to `None` (dynamic).
+unsafe fn jit_resolve_array_element_descriptor(
+    module: &Module,
+    type_index: u32,
+) -> Option<crate::compiler::bytecode::RuntimeTypeDescriptor> {
+    use crate::compiler::bytecode::types::COMPLEX_BASE;
+    use crate::compiler::bytecode::RuntimeTypeDescriptor as D;
+    let descriptor = if type_index < COMPLEX_BASE {
+        match type_index {
+            0 => D::I32,
+            1 => D::F64,
+            2 => D::Bool,
+            3 => D::String,
+            4 => D::Null,
+            5 => D::Void,
+            6 => return None, // AnyValue == dynamic
+            7 => return None, // Ref == accept-all
+            _ => return None,
+        }
+    } else {
+        module
+            .runtime_types
+            .get((type_index - COMPLEX_BASE) as usize)
+            .cloned()?
+    };
+    match descriptor {
+        D::AnyValue | D::Ref => None,
+        other => Some(other),
+    }
+}
+
+/// Return an array pointer only when `value` is a GC allocation whose concrete
+/// type is `Array`, verified through the GC header. Mirrors the interpreter's
+/// `raya_array_ptr_checked` so native and interpreted array identity agree.
+#[inline]
+unsafe fn jit_array_ptr_checked(value: Value) -> Option<NonNull<crate::vm::object::Array>> {
+    if !value.is_ptr() {
+        return None;
+    }
+    let ptr = value.as_ptr::<u8>()?;
+    let header = &*crate::vm::gc::header_ptr_from_value_ptr(ptr.as_ptr());
+    (header.type_id() == std::any::TypeId::of::<crate::vm::object::Array>())
+        .then(|| ptr.cast::<crate::vm::object::Array>())
+}
+
+/// Load `array[index]`. Returns the element, or the interpreter-fallback
+/// sentinel when the receiver is not an array or the index is out of bounds.
+/// Reads never validate element types, matching the interpreter.
+unsafe extern "C" fn helper_array_load(array_raw: u64, index: i64, _shared_state: *mut ()) -> u64 {
+    let array_value = Value::from_raw(array_raw);
+    let Some(array_ptr) = jit_array_ptr_checked(array_value) else {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    };
+    if index < 0 {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+    let array = &*array_ptr.as_ptr();
+    match array.get(index as usize) {
+        Some(value) => value.raw(),
+        None => JIT_INTERPRETER_FALLBACK_SENTINEL,
+    }
+}
+
+/// Store `array[index] = value`, honoring the resolved element constraint.
+/// Returns [`JIT_STORE_SUCCESS`] on success and [`JIT_STORE_FALLBACK`] when the
+/// receiver is not an array, the index is out of bounds, or the value violates
+/// the element constraint (the interpreter then produces the exact error).
+unsafe extern "C" fn helper_array_store(
+    array_raw: u64,
+    index: i64,
+    value_raw: u64,
+    _shared_state: *mut (),
+) -> i8 {
+    let array_value = Value::from_raw(array_raw);
+    let Some(array_ptr) = jit_array_ptr_checked(array_value) else {
+        return JIT_STORE_FALLBACK;
+    };
+    if index < 0 {
+        return JIT_STORE_FALLBACK;
+    }
+    let array = &mut *array_ptr.as_ptr();
+    match array.checked_set(index as usize, Value::from_raw(value_raw)) {
+        Ok(()) => JIT_STORE_SUCCESS,
+        Err(_) => JIT_STORE_FALLBACK,
+    }
+}
+
+/// Push `value` onto `array`, honoring the resolved element constraint.
+///
+/// Growing the backing `Vec` may allocate, so both the array and the pushed
+/// value are rooted for the mutation window. Returns [`JIT_STORE_SUCCESS`] or
+/// [`JIT_STORE_FALLBACK`].
+unsafe extern "C" fn helper_array_push(array_raw: u64, value_raw: u64, shared_state: *mut ()) -> i8 {
+    if shared_state.is_null() {
+        return JIT_STORE_FALLBACK;
+    }
+    let bridge = &*(shared_state.cast::<JitRuntimeBridgeContext>());
+    let array_value = Value::from_raw(array_raw);
+    let element = Value::from_raw(value_raw);
+    let Some(array_ptr) = jit_array_ptr_checked(array_value) else {
+        return JIT_STORE_FALLBACK;
+    };
+    // Root the receiver and the element across the push, which may reallocate.
+    let Some(_scope) = EphemeralRootScope::open(bridge, &[array_value, element]) else {
+        return JIT_STORE_FALLBACK;
+    };
+    let array = &mut *array_ptr.as_ptr();
+    match array.checked_push(element) {
+        Ok(_) => JIT_STORE_SUCCESS,
+        Err(_) => JIT_STORE_FALLBACK,
+    }
+}
+
+/// Pop the last element of `array`. Returns the popped value, `null` for an
+/// empty array (matching the interpreter), or the fallback sentinel when the
+/// receiver is not an array.
+unsafe extern "C" fn helper_array_pop(array_raw: u64, _shared_state: *mut ()) -> u64 {
+    let array_value = Value::from_raw(array_raw);
+    let Some(array_ptr) = jit_array_ptr_checked(array_value) else {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    };
+    let array = &mut *array_ptr.as_ptr();
+    array.pop().unwrap_or(Value::null()).raw()
+}
+
+/// Return `array.length`, or [`JIT_ARRAY_LEN_FALLBACK_SENTINEL`] when the
+/// receiver is not an array.
+unsafe extern "C" fn helper_array_len(array_raw: u64, _shared_state: *mut ()) -> i32 {
+    let array_value = Value::from_raw(array_raw);
+    let Some(array_ptr) = jit_array_ptr_checked(array_value) else {
+        return JIT_ARRAY_LEN_FALLBACK_SENTINEL;
+    };
+    let array = &*array_ptr.as_ptr();
+    i32::try_from(array.len()).unwrap_or(JIT_ARRAY_LEN_FALLBACK_SENTINEL)
 }
 
 unsafe extern "C" fn helper_alloc_string(
@@ -1356,6 +1531,46 @@ fn jit_add_ephemeral_roots(bridge: &JitRuntimeBridgeContext, values: &[Value]) -
     let mut roots = unsafe { &*bridge.ephemeral_gc_roots }.write();
     roots.extend(values.iter().copied().filter(Value::is_heap_allocated));
     true
+}
+
+/// RAII guard that keeps a set of `Value`s reachable for the duration of an
+/// allocation helper window.
+///
+/// JIT-compiled native frames publish empty stack maps, so a GC triggered by an
+/// allocation inside a helper cannot see operands that live only in machine
+/// registers. Every helper that holds a live `Value` across a `gc.allocate`
+/// call must open a scope so those inputs are treated as roots until the helper
+/// returns and the result is safely published. The guard releases exactly the
+/// roots it added on drop, including on the error/early-return paths.
+struct EphemeralRootScope<'a> {
+    bridge: &'a JitRuntimeBridgeContext,
+    rooted: Vec<Value>,
+    active: bool,
+}
+
+impl<'a> EphemeralRootScope<'a> {
+    /// Open a scope rooting `values`. Returns `None` when the root set is
+    /// unavailable (a null bridge field), so callers fail closed rather than
+    /// allocating with unprotected operands.
+    fn open(bridge: &'a JitRuntimeBridgeContext, values: &[Value]) -> Option<Self> {
+        if !jit_add_ephemeral_roots(bridge, values) {
+            return None;
+        }
+        Some(Self {
+            bridge,
+            rooted: values.to_vec(),
+            active: true,
+        })
+    }
+}
+
+impl Drop for EphemeralRootScope<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            jit_release_ephemeral_roots(self.bridge, &self.rooted);
+            self.active = false;
+        }
+    }
 }
 
 fn jit_release_ephemeral_roots(bridge: &JitRuntimeBridgeContext, values: &[Value]) {
@@ -2101,5 +2316,162 @@ mod tests {
         let obj = unsafe { &*(object_ptr.cast::<Object>()) };
         assert_eq!(obj.nominal_type_id_usize(), Some(expected_nominal_type_id));
         assert_eq!(obj.field_count(), 2);
+    }
+
+    /// Build a bridge context over a fresh shared VM state for array-helper
+    /// tests. Returns the shared state, module, code cache, and task so their
+    /// storage outlives the returned bridge.
+    fn array_helper_fixture() -> (
+        Arc<crate::vm::interpreter::SharedVmState>,
+        Arc<Module>,
+        Box<crate::jit::runtime::code_cache::CodeCache>,
+        Arc<Task>,
+    ) {
+        let safepoint = Arc::new(SafepointCoordinator::new(1));
+        let tasks = Arc::new(RwLock::new(FxHashMap::default()));
+        let injector = Arc::new(Injector::new());
+        let shared = Arc::new(crate::vm::interpreter::SharedVmState::new(
+            safepoint, tasks, injector,
+        ));
+        let module = Arc::new(Module::new("jit-array-test".to_string()));
+        let task = Arc::new(Task::new(0, module.clone(), None));
+        let code_cache = Box::new(crate::jit::runtime::code_cache::CodeCache::new(1024));
+        (shared, module, code_cache, task)
+    }
+
+    macro_rules! with_array_bridge {
+        ($shared:expr, $module:expr, $code_cache:expr, $task:expr, $bridge:ident, $body:block) => {{
+            let $bridge = build_runtime_bridge_context(
+                $shared.safepoint.as_ref(),
+                &$task,
+                &$shared.gc,
+                &$shared.classes,
+                &$shared.layouts,
+                &$code_cache,
+                &$shared.mutex_registry,
+                &$shared.semaphore_registry,
+                &$shared.globals_by_index,
+                &$shared.builtin_global_slots,
+                &$shared.constant_string_cache,
+                &$shared.ephemeral_gc_roots,
+                &$shared.pinned_handles,
+                &$shared.tasks,
+                &$shared.injector,
+                &$shared.module_layouts,
+                &$shared.metadata,
+                &$shared.class_metadata,
+                &$shared.native_handler,
+                &$shared.resolved_natives,
+                &$shared.structural_shape_names,
+                &$shared.structural_layout_shapes,
+                &$shared.structural_shape_adapters,
+                &$shared.aot_profile,
+                &$shared.type_handles,
+                &$shared.prop_keys,
+                &$shared.stack_pool,
+                $shared.max_preemptions,
+                0,
+                None,
+            );
+            $body
+        }};
+    }
+
+    #[test]
+    fn jit_array_helpers_roundtrip_and_reject_non_arrays() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+            let module_ptr = Arc::as_ptr(&module) as *const ();
+
+            // Dynamic array (AnyValue element id 6), capacity 2.
+            let arr_ptr = unsafe { helper_alloc_array(6, 2, module_ptr, ss) };
+            assert!(!arr_ptr.is_null());
+            let arr_val = unsafe { Value::from_ptr(NonNull::new(arr_ptr.cast::<u8>()).unwrap()) };
+
+            // len == 2, slots start null.
+            assert_eq!(unsafe { helper_array_len(arr_val.raw(), ss) }, 2);
+            assert!(unsafe { Value::from_raw(helper_array_load(arr_val.raw(), 0, ss)) }.is_null());
+
+            // store then load.
+            assert_eq!(
+                unsafe { helper_array_store(arr_val.raw(), 0, Value::i32(7).raw(), ss) },
+                JIT_STORE_SUCCESS
+            );
+            assert_eq!(
+                unsafe { Value::from_raw(helper_array_load(arr_val.raw(), 0, ss)).as_i32() },
+                Some(7)
+            );
+
+            // out-of-bounds store falls back; load falls back with the sentinel.
+            assert_eq!(
+                unsafe { helper_array_store(arr_val.raw(), 5, Value::i32(1).raw(), ss) },
+                JIT_STORE_FALLBACK
+            );
+            assert_eq!(
+                unsafe { helper_array_load(arr_val.raw(), 5, ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL
+            );
+
+            // push grows the array; pop returns it.
+            assert_eq!(
+                unsafe { helper_array_push(arr_val.raw(), Value::i32(9).raw(), ss) },
+                JIT_STORE_SUCCESS
+            );
+            assert_eq!(unsafe { helper_array_len(arr_val.raw(), ss) }, 3);
+            assert_eq!(
+                unsafe { Value::from_raw(helper_array_pop(arr_val.raw(), ss)).as_i32() },
+                Some(9)
+            );
+
+            // A non-array receiver (a string) is rejected by every helper.
+            let string_val = {
+                let mut gc = shared.gc.lock();
+                let s = gc.allocate(RayaString::new("nope".to_string()));
+                unsafe { Value::from_ptr(NonNull::new(s.as_ptr()).unwrap()) }
+            };
+            assert_eq!(
+                unsafe { helper_array_len(string_val.raw(), ss) },
+                JIT_ARRAY_LEN_FALLBACK_SENTINEL
+            );
+            assert_eq!(
+                unsafe { helper_array_load(string_val.raw(), 0, ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL
+            );
+            assert_eq!(
+                unsafe { helper_array_store(string_val.raw(), 0, Value::i32(1).raw(), ss) },
+                JIT_STORE_FALLBACK
+            );
+            assert_eq!(
+                unsafe { helper_array_pop(string_val.raw(), ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL
+            );
+        });
+    }
+
+    #[test]
+    fn jit_typed_array_store_enforces_element_constraint() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+            let module_ptr = Arc::as_ptr(&module) as *const ();
+
+            // Bool-typed array (element id 2): storing a bool succeeds, an i32 falls back.
+            let arr_ptr = unsafe { helper_alloc_array(2, 1, module_ptr, ss) };
+            let arr_val = unsafe { Value::from_ptr(NonNull::new(arr_ptr.cast::<u8>()).unwrap()) };
+            assert_eq!(
+                unsafe { helper_array_store(arr_val.raw(), 0, Value::bool(true).raw(), ss) },
+                JIT_STORE_SUCCESS
+            );
+            assert_eq!(
+                unsafe { helper_array_store(arr_val.raw(), 0, Value::i32(1).raw(), ss) },
+                JIT_STORE_FALLBACK
+            );
+            // null is always accepted, even into a typed slot.
+            assert_eq!(
+                unsafe { helper_array_store(arr_val.raw(), 0, Value::null().raw(), ss) },
+                JIT_STORE_SUCCESS
+            );
+        });
     }
 }

@@ -465,22 +465,117 @@ impl Default for VTable {
     }
 }
 
+/// Failure modes of a checked array store.
+///
+/// Distinguishing these lets callers map bounds violations to a runtime error
+/// and element-type violations to a `TypeError`, without re-deriving intent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArrayStoreError {
+    /// The index was outside the current element range.
+    OutOfBounds {
+        /// Requested array index.
+        index: usize,
+        /// Array length at the time of the attempted store.
+        len: usize,
+    },
+    /// The value did not satisfy the array's resolved element constraint.
+    ElementType {
+        /// Resolved element descriptor that rejected the value, if one exists.
+        expected: Option<crate::compiler::bytecode::RuntimeTypeDescriptor>,
+    },
+}
+
+impl std::fmt::Display for ArrayStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ArrayStoreError::OutOfBounds { index, len } => {
+                write!(f, "Array index {index} out of bounds (length: {len})")
+            }
+            ArrayStoreError::ElementType { expected } => match expected {
+                Some(descriptor) => write!(
+                    f,
+                    "Cannot store value: array element type is {}",
+                    descriptor.atom()
+                ),
+                None => write!(f, "Cannot store value: array element type mismatch"),
+            },
+        }
+    }
+}
+
 /// Array object (heap-allocated)
+///
+/// `type_id` is a legacy, module-local element hint retained for backward
+/// compatibility with the many builtin call sites that construct dynamic
+/// arrays. It is **not** a global runtime descriptor and must not be treated
+/// as one (descriptor ids are only meaningful relative to the producing
+/// module's `runtime_types` table).
+///
+/// `element_type` is the resolved, self-contained element constraint. It is
+/// `None` for dynamic/legacy arrays (equivalent to `AnyValue`) and `Some(desc)`
+/// for arrays whose element type was resolved at their construction site. The
+/// resolved descriptor is safe to read across module boundaries because it
+/// carries only runtime-global identity (primitives, or nominal/layout ids that
+/// are already VM-global). It holds no GC references, so array tracing and
+/// snapshotting are unaffected by its presence.
 #[derive(Debug, Clone)]
 pub struct Array {
-    /// Element type ID (for type checking)
+    /// Legacy module-local element type hint (see struct docs). Do not treat as
+    /// a global runtime descriptor.
     pub type_id: usize,
+    /// Resolved element constraint, self-contained across module boundaries.
+    /// `None` means dynamic (`AnyValue`) semantics.
+    pub element_type: Option<crate::compiler::bytecode::RuntimeTypeDescriptor>,
     /// Array elements
     pub elements: Vec<Value>,
 }
 
+/// True when `value` is a GC allocation whose concrete type is `RayaString`,
+/// verified via the GC-header Rust `TypeId`. A bare `is_ptr()` is insufficient
+/// because objects and arrays are also pointers.
+#[inline]
+fn value_is_raya_string(value: Value) -> bool {
+    if !value.is_ptr() {
+        return false;
+    }
+    let Some(raw_ptr) = (unsafe { value.as_ptr::<u8>() }) else {
+        return false;
+    };
+    let header = unsafe { &*crate::vm::gc::header_ptr_from_value_ptr(raw_ptr.as_ptr()) };
+    header.type_id() == TypeId::of::<RayaString>()
+}
+
 impl Array {
-    /// Create a new array with given length
+    /// Create a new dynamic array with given length and legacy element hint.
+    ///
+    /// The resolved `element_type` constraint is left unset (`None` = dynamic);
+    /// callers with a resolved descriptor should use
+    /// [`Array::with_element_type`].
     pub fn new(type_id: usize, length: usize) -> Self {
         Self {
             type_id,
+            element_type: None,
             elements: vec![Value::null(); length],
         }
+    }
+
+    /// Create a new array carrying a resolved element-type constraint.
+    pub fn with_element_type(
+        type_id: usize,
+        element_type: Option<crate::compiler::bytecode::RuntimeTypeDescriptor>,
+        length: usize,
+    ) -> Self {
+        Self {
+            type_id,
+            element_type,
+            elements: vec![Value::null(); length],
+        }
+    }
+
+    /// Resolved element constraint, if any. `None` means dynamic (`AnyValue`).
+    #[inline]
+    pub fn element_type(&self) -> Option<&crate::compiler::bytecode::RuntimeTypeDescriptor> {
+        self.element_type.as_ref()
     }
 
     /// Get array length
@@ -498,7 +593,12 @@ impl Array {
         self.elements.get(index).copied()
     }
 
-    /// Set element at index
+    /// Set element at index (unchecked element type; bounds-checked only).
+    ///
+    /// Prefer [`Array::checked_set`] on paths that must honor a resolved
+    /// element constraint. This raw setter is retained for internal builtin
+    /// paths that construct arrays element-by-element with values they already
+    /// produced.
     pub fn set(&mut self, index: usize, value: Value) -> Result<(), String> {
         if index < self.elements.len() {
             self.elements[index] = value;
@@ -512,10 +612,150 @@ impl Array {
         }
     }
 
-    /// Push element to end of array, returns new length
+    /// Push element to end of array, returns new length (unchecked element
+    /// type). Prefer [`Array::checked_push`] where a resolved constraint must
+    /// be honored.
     pub fn push(&mut self, value: Value) -> usize {
         self.elements.push(value);
         self.elements.len()
+    }
+
+    /// Whether `value` satisfies this array's resolved element constraint.
+    ///
+    /// Dynamic arrays (`element_type == None`) and the boxed/opaque descriptors
+    /// (`AnyValue`, `Ref`, and all complex descriptors) accept any value. Only
+    /// the concrete, unambiguously checkable primitive descriptors are enforced
+    /// here. Reads are never affected — this governs stores only. A null value
+    /// is always accepted so that newly allocated, null-filled slots and
+    /// explicit nulls never spuriously fail a typed store.
+    #[inline]
+    pub fn element_matches(&self, value: Value) -> bool {
+        use crate::compiler::bytecode::RuntimeTypeDescriptor as D;
+        let Some(descriptor) = self.element_type.as_ref() else {
+            return true;
+        };
+        if value.is_null() {
+            return true;
+        }
+        match descriptor {
+            D::I32 => value.is_i32(),
+            D::F64 => value.is_f64() || value.is_i32(),
+            D::Bool => value.is_bool(),
+            // A `String` slot must hold an actual `RayaString`. Verify the GC
+            // header's Rust `TypeId` so an `Object`/`Array` pointer (which is
+            // also `is_ptr()`) is rejected rather than silently accepted.
+            D::String => value_is_raya_string(value),
+            D::Null => value.is_null(),
+            // Boxed, opaque, unit, reference, and every complex descriptor are
+            // treated as accept-all: soundly enforcing them would require the
+            // module-local nominal/layout/shape context that is not available
+            // here, and a partial check risks the exact class of unsound
+            // mistreatment (Void/AnyValue/Ref, and false rejections of valid
+            // complex values) that a prior attempt introduced. This is a
+            // deliberately conservative policy: it never wrongly rejects, and
+            // no JIT-generated code relies on complex-element enforcement
+            // because array capability opcodes remain rejected.
+            D::Void
+            | D::AnyValue
+            | D::Ref
+            | D::Object { .. }
+            | D::Array { .. }
+            | D::Tuple { .. }
+            | D::Function { .. }
+            | D::Task { .. } => true,
+        }
+    }
+
+    /// Store `value` at `index`, honoring the resolved element constraint.
+    ///
+    /// This is the centralized checked mutation path for indexed stores. Bounds
+    /// are enforced, and — when a resolved constraint is present — the value is
+    /// validated via [`Array::element_matches`]. Reads never route through here,
+    /// so null-filled slots are never type-rejected.
+    pub fn checked_set(&mut self, index: usize, value: Value) -> Result<(), ArrayStoreError> {
+        if index >= self.elements.len() {
+            return Err(ArrayStoreError::OutOfBounds {
+                index,
+                len: self.elements.len(),
+            });
+        }
+        if !self.element_matches(value) {
+            return Err(ArrayStoreError::ElementType {
+                expected: self.element_type.clone(),
+            });
+        }
+        self.elements[index] = value;
+        Ok(())
+    }
+
+    /// Append `value`, honoring the resolved element constraint. Returns the new
+    /// length. Centralized checked mutation path for pushes.
+    pub fn checked_push(&mut self, value: Value) -> Result<usize, ArrayStoreError> {
+        if !self.element_matches(value) {
+            return Err(ArrayStoreError::ElementType {
+                expected: self.element_type.clone(),
+            });
+        }
+        self.elements.push(value);
+        Ok(self.elements.len())
+    }
+
+    /// Prepend `value`, honoring the resolved element constraint. Returns the
+    /// new length. Centralized checked mutation path for `unshift`.
+    pub fn checked_unshift(&mut self, value: Value) -> Result<usize, ArrayStoreError> {
+        if !self.element_matches(value) {
+            return Err(ArrayStoreError::ElementType {
+                expected: self.element_type.clone(),
+            });
+        }
+        self.elements.insert(0, value);
+        Ok(self.elements.len())
+    }
+
+    /// Fill `[start, end)` with `value`, honoring the resolved element
+    /// constraint. The range is clamped to the current length. Rejects the
+    /// whole operation before mutating if `value` violates the constraint, so a
+    /// partially-filled array is never observable on the error path.
+    pub fn checked_fill(
+        &mut self,
+        value: Value,
+        start: usize,
+        end: usize,
+    ) -> Result<(), ArrayStoreError> {
+        if !self.element_matches(value) {
+            return Err(ArrayStoreError::ElementType {
+                expected: self.element_type.clone(),
+            });
+        }
+        let end = end.min(self.elements.len());
+        for slot in self.elements.iter_mut().take(end).skip(start) {
+            *slot = value;
+        }
+        Ok(())
+    }
+
+    /// Replace the element range `[start, end)` with `items`, honoring the
+    /// resolved element constraint for each inserted item. Validates every item
+    /// before mutating; returns the removed elements on success.
+    pub fn checked_splice(
+        &mut self,
+        start: usize,
+        end: usize,
+        items: Vec<Value>,
+    ) -> Result<Vec<Value>, ArrayStoreError> {
+        for item in &items {
+            if !self.element_matches(*item) {
+                return Err(ArrayStoreError::ElementType {
+                    expected: self.element_type.clone(),
+                });
+            }
+        }
+        let len = self.elements.len();
+        let start = start.min(len);
+        let end = end.clamp(start, len);
+        let removed: Vec<Value> = self.elements[start..end].to_vec();
+        self.elements.splice(start..end, items);
+        Ok(removed)
     }
 
     /// Pop element from end of array
@@ -1700,6 +1940,107 @@ impl Clone for ChannelObject {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::bytecode::RuntimeTypeDescriptor as D;
+
+    #[test]
+    fn typed_checked_set_and_push_enforce_primitive_constraint() {
+        // I32-typed array: i32 stores succeed, bool/f64 stores are ElementType errors.
+        let mut arr = Array::with_element_type(0, Some(D::I32), 2);
+        assert!(arr.checked_set(0, Value::i32(7)).is_ok());
+        assert!(matches!(
+            arr.checked_set(1, Value::bool(true)),
+            Err(ArrayStoreError::ElementType { .. })
+        ));
+        assert!(matches!(
+            arr.checked_push(Value::f64(1.5)),
+            Err(ArrayStoreError::ElementType { .. })
+        ));
+        assert!(arr.checked_push(Value::i32(9)).is_ok());
+        // null is always accepted, even into a typed slot.
+        assert!(arr.checked_set(0, Value::null()).is_ok());
+    }
+
+    #[test]
+    fn typed_checked_set_out_of_bounds_is_distinct_from_type_error() {
+        let mut arr = Array::with_element_type(0, Some(D::I32), 1);
+        assert!(matches!(
+            arr.checked_set(5, Value::i32(1)),
+            Err(ArrayStoreError::OutOfBounds { .. })
+        ));
+    }
+
+    #[test]
+    fn dynamic_array_accepts_any_value() {
+        // element_type == None => accept-all.
+        let mut arr = Array::new(0, 1);
+        assert!(arr.checked_set(0, Value::i32(1)).is_ok());
+        assert!(arr.checked_push(Value::bool(true)).is_ok());
+        assert!(arr.checked_push(Value::f64(2.0)).is_ok());
+    }
+
+    #[test]
+    fn typed_unshift_and_fill_enforce_constraint() {
+        let mut arr = Array::with_element_type(0, Some(D::Bool), 3);
+        assert!(arr.checked_unshift(Value::bool(false)).is_ok());
+        assert!(matches!(
+            arr.checked_unshift(Value::i32(1)),
+            Err(ArrayStoreError::ElementType { .. })
+        ));
+        assert!(arr.checked_fill(Value::bool(true), 0, 3).is_ok());
+        assert!(matches!(
+            arr.checked_fill(Value::i32(0), 0, 3),
+            Err(ArrayStoreError::ElementType { .. })
+        ));
+    }
+
+    #[test]
+    fn typed_splice_validates_items_before_mutating() {
+        let mut arr = Array::with_element_type(0, Some(D::I32), 3);
+        arr.checked_set(0, Value::i32(1)).unwrap();
+        arr.checked_set(1, Value::i32(2)).unwrap();
+        arr.checked_set(2, Value::i32(3)).unwrap();
+        // A bad item is rejected and the array is left unchanged.
+        assert!(matches!(
+            arr.checked_splice(1, 2, vec![Value::bool(true)]),
+            Err(ArrayStoreError::ElementType { .. })
+        ));
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr.get(1), Some(Value::i32(2)));
+        // A valid splice removes the range [1,3) (two elements) and inserts
+        // one item: [1,2,3] -> [1,20], removed = [2,3].
+        let removed = arr.checked_splice(1, 3, vec![Value::i32(20)]).unwrap();
+        assert_eq!(removed, vec![Value::i32(2), Value::i32(3)]);
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr.get(0), Some(Value::i32(1)));
+        assert_eq!(arr.get(1), Some(Value::i32(20)));
+    }
+
+    #[test]
+    fn f64_constraint_admits_integral_i32_bridge() {
+        // F64 slot admits i32 (the interpreter's integral bridge) and f64.
+        let mut arr = Array::with_element_type(0, Some(D::F64), 2);
+        assert!(arr.checked_set(0, Value::f64(1.5)).is_ok());
+        assert!(arr.checked_set(1, Value::i32(3)).is_ok());
+        assert!(matches!(
+            arr.checked_push(Value::bool(true)),
+            Err(ArrayStoreError::ElementType { .. })
+        ));
+    }
+
+    #[test]
+    fn complex_descriptor_constraints_accept_all_by_policy() {
+        // Object/Array/Tuple/Function/Task/AnyValue/Ref are accept-all: they are
+        // not soundly checkable without module-local context, so they must not
+        // reject valid values. Verify a non-null primitive is accepted.
+        for descriptor in [D::AnyValue, D::Ref, D::Void] {
+            let label = format!("{descriptor:?}");
+            let mut arr = Array::with_element_type(0, Some(descriptor), 1);
+            assert!(
+                arr.checked_set(0, Value::i32(1)).is_ok(),
+                "descriptor {label} should accept any value"
+            );
+        }
+    }
 
     #[test]
     fn test_object_creation() {

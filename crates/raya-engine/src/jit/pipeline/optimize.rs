@@ -616,10 +616,33 @@ fn collect_used_regs(instr: &JitInstr, used: &mut FxHashSet<Reg>) {
             array,
             index,
             value,
+            stack,
+            ..
         } => {
             used.insert(*array);
             used.insert(*index);
             used.insert(*value);
+            used.extend(stack.iter().copied());
+        }
+        JitInstr::NewArray { len, stack, .. } => {
+            used.insert(*len);
+            used.extend(stack.iter().copied());
+        }
+        JitInstr::ArrayLiteral {
+            elements, stack, ..
+        } => {
+            used.extend(elements.iter().copied());
+            used.extend(stack.iter().copied());
+        }
+        JitInstr::InitArray {
+            array,
+            value,
+            stack,
+            ..
+        } => {
+            used.insert(*array);
+            used.insert(*value);
+            used.extend(stack.iter().copied());
         }
 
         JitInstr::LoadFieldExact { object, stack, .. }
@@ -629,13 +652,24 @@ fn collect_used_regs(instr: &JitInstr, used: &mut FxHashSet<Reg>) {
             used.extend(stack.iter().copied());
         }
 
-        JitInstr::ArrayLen { array: object, .. }
-        | JitInstr::ArrayPop { array: object, .. }
-        | JitInstr::LoadRefCell { cell: object, .. }
+        JitInstr::ArrayLen {
+            array: object,
+            stack,
+            ..
+        }
+        | JitInstr::ArrayPop {
+            array: object,
+            stack,
+            ..
+        } => {
+            used.insert(*object);
+            used.extend(stack.iter().copied());
+        }
+
+        JitInstr::LoadRefCell { cell: object, .. }
         | JitInstr::Typeof {
             operand: object, ..
-        }
-        => {
+        } => {
             used.insert(*object);
         }
 
@@ -649,9 +683,12 @@ fn collect_used_regs(instr: &JitInstr, used: &mut FxHashSet<Reg>) {
             used.extend(stack.iter().copied());
         }
 
-        JitInstr::LoadElem { array, index, .. } => {
+        JitInstr::LoadElem {
+            array, index, stack, ..
+        } => {
             used.insert(*array);
             used.insert(*index);
+            used.extend(stack.iter().copied());
         }
 
         JitInstr::Call { closure: None, args, .. }
@@ -709,7 +746,14 @@ fn collect_used_regs(instr: &JitInstr, used: &mut FxHashSet<Reg>) {
         JitInstr::MutexLock { mutex } | JitInstr::MutexUnlock { mutex } => {
             used.insert(*mutex);
         }
-        JitInstr::ArrayPush { array, value } | JitInstr::DynArrayPush { array, value } => {
+        JitInstr::ArrayPush {
+            array, value, stack, ..
+        } => {
+            used.insert(*array);
+            used.insert(*value);
+            used.extend(stack.iter().copied());
+        }
+        JitInstr::DynArrayPush { array, value } => {
             used.insert(*array);
             used.insert(*value);
         }

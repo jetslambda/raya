@@ -422,10 +422,13 @@ impl BytecodeWriter {
         self.emit_u32(length);
     }
 
-    /// Emit INIT_ARRAY instruction
-    pub fn emit_init_array(&mut self, count: u16) {
+    /// Emit INIT_ARRAY instruction: initialize a single element at `index`.
+    ///
+    /// Mirrors [`Self::emit_init_object`]: the value is popped, the array is
+    /// peeked, and the array remains on the stack.
+    pub fn emit_init_array(&mut self, index: u16) {
         self.emit_opcode(Opcode::InitArray);
-        self.emit_u16(count);
+        self.emit_u16(index);
     }
 
     // ===== Task & Concurrency =====

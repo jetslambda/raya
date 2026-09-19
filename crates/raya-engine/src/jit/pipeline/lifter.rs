@@ -1184,28 +1184,44 @@ fn lift_instruction(
         }
 
         // ===== Array Operations =====
+        // Each op captures the pre-operation operand stack for an exact
+        // interpreter fallback and its bytecode offset. NewArray consumes the
+        // length operand so the lifted stack stays balanced with the
+        // interpreter.
         Opcode::NewArray => {
             if let Operands::U32(type_index) = instr.operands {
+                let pre_stack = stack.clone_state();
+                let len = stack.pop(instr.offset)?;
                 let dest = func.alloc_reg(JitType::Ptr);
                 func.block_mut(block)
                     .instrs
                     .push(JitInstr::GcSafepoint { bytecode_offset: instr.offset as u32 });
-                func.block_mut(block)
-                    .instrs
-                    .push(JitInstr::NewArray { dest, type_index });
+                func.block_mut(block).instrs.push(JitInstr::NewArray {
+                    dest,
+                    type_index,
+                    len,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
+                });
                 stack.push(dest);
             }
         }
         Opcode::LoadElem => {
+            let pre_stack = stack.clone_state();
             let index = stack.pop(instr.offset)?;
             let array = stack.pop(instr.offset)?;
             let dest = func.alloc_reg(JitType::Value);
-            func.block_mut(block)
-                .instrs
-                .push(JitInstr::LoadElem { dest, array, index });
+            func.block_mut(block).instrs.push(JitInstr::LoadElem {
+                dest,
+                array,
+                index,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
             stack.push(dest);
         }
         Opcode::StoreElem => {
+            let pre_stack = stack.clone_state();
             let value = stack.pop(instr.offset)?;
             let index = stack.pop(instr.offset)?;
             let array = stack.pop(instr.offset)?;
@@ -1213,33 +1229,48 @@ fn lift_instruction(
                 array,
                 index,
                 value,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
             });
         }
         Opcode::ArrayLen => {
+            let pre_stack = stack.clone_state();
             let array = stack.pop(instr.offset)?;
             let dest = func.alloc_reg(JitType::I32);
-            func.block_mut(block)
-                .instrs
-                .push(JitInstr::ArrayLen { dest, array });
+            func.block_mut(block).instrs.push(JitInstr::ArrayLen {
+                dest,
+                array,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
             stack.push(dest);
         }
         Opcode::ArrayPush => {
+            let pre_stack = stack.clone_state();
             let value = stack.pop(instr.offset)?;
             let array = stack.pop(instr.offset)?;
-            func.block_mut(block)
-                .instrs
-                .push(JitInstr::ArrayPush { array, value });
+            func.block_mut(block).instrs.push(JitInstr::ArrayPush {
+                array,
+                value,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
         }
         Opcode::ArrayPop => {
+            let pre_stack = stack.clone_state();
             let array = stack.pop(instr.offset)?;
             let dest = func.alloc_reg(JitType::Value);
-            func.block_mut(block)
-                .instrs
-                .push(JitInstr::ArrayPop { dest, array });
+            func.block_mut(block).instrs.push(JitInstr::ArrayPop {
+                dest,
+                array,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
             stack.push(dest);
         }
         Opcode::ArrayLiteral => {
             if let Operands::ArrayLiteral { type_index, length } = instr.operands {
+                let pre_stack = stack.clone_state();
                 let mut elements = Vec::new();
                 for _ in 0..length {
                     elements.push(stack.pop(instr.offset)?);
@@ -1250,24 +1281,33 @@ fn lift_instruction(
                     dest,
                     type_index,
                     elements,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
                 });
                 stack.push(dest);
             }
         }
         Opcode::InitArray => {
-            if let Operands::U16(count) = instr.operands {
-                let mut elements = Vec::new();
-                for _ in 0..count {
-                    elements.push(stack.pop(instr.offset)?);
-                }
-                elements.reverse();
-                let dest = func.alloc_reg(JitType::Ptr);
+            // Single-element initializer mirroring the interpreter:
+            //   stack [.., array, value] -> [.., array]
+            // The array is peeked (left on the stack) and the value stored at
+            // `index`. This opcode stays JIT-rejected; the lifting exists only
+            // so the IR is faithful if ever exercised.
+            if let Operands::U16(index) = instr.operands {
+                let pre_stack = stack.clone_state();
+                let value = stack.pop(instr.offset)?;
+                let array = stack
+                    .peek()
+                    .ok_or(LiftError::StackUnderflow { offset: instr.offset })?;
                 func.block_mut(block).instrs.push(JitInstr::InitArray {
-                    dest,
-                    count,
-                    elements,
+                    array,
+                    index,
+                    value,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
                 });
-                stack.push(dest);
+                // The array stays on the operand stack (peeked, not popped),
+                // exactly like InitObject.
             }
         }
 

@@ -107,6 +107,12 @@ pub struct RuntimeContext {
 
 /// ABI layout constants consumed by Cranelift lowering. Keep these derived from
 /// the Rust structs; never duplicate field offsets in native code.
+// The array runtime helpers added for D4.2 are appended to the end of
+// `RuntimeHelperTable`; existing field offsets are unchanged and the function
+// calling convention is untouched, so this stays lockstep with the bytecode
+// `CURRENT_ABI_VERSION`. Bumping it would falsely signal a calling-convention
+// change and disable typed JIT entry (see the guard in interpreter/core.rs),
+// so it is intentionally NOT bumped for a backward-compatible helper addition.
 pub const RUNTIME_CONTEXT_ABI_VERSION: u16 = 3;
 pub const RUNTIME_CONTEXT_MODULE_OFFSET: i32 =
     std::mem::offset_of!(RuntimeContext, module) as i32;
@@ -152,6 +158,21 @@ pub const HELPER_VALUE_TO_STRING_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, value_to_string) as i32;
 pub const HELPER_CONST_STRING_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, const_string) as i32;
+/// Byte offset of the array-load helper in [`RuntimeContext`].
+pub const HELPER_ARRAY_LOAD_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, array_load) as i32;
+/// Byte offset of the array-store helper in [`RuntimeContext`].
+pub const HELPER_ARRAY_STORE_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, array_store) as i32;
+/// Byte offset of the array-push helper in [`RuntimeContext`].
+pub const HELPER_ARRAY_PUSH_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, array_push) as i32;
+/// Byte offset of the array-pop helper in [`RuntimeContext`].
+pub const HELPER_ARRAY_POP_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, array_pop) as i32;
+/// Byte offset of the array-length helper in [`RuntimeContext`].
+pub const HELPER_ARRAY_LEN_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, array_len) as i32;
 
 const _: () = assert!(std::mem::align_of::<RuntimeContext>() >= 8);
 const _: () = assert!(std::mem::size_of::<RuntimeContext>() >= std::mem::size_of::<RuntimeHelperTable>());
@@ -164,8 +185,8 @@ const _: () = assert!(std::mem::size_of::<RuntimeContext>() >= std::mem::size_of
 pub struct RuntimeHelperTable {
     /// Allocate a new nominal object: (local_nominal_type_index, module_ptr, shared_state) -> obj_ptr
     pub alloc_object: unsafe extern "C" fn(u32, *const (), *mut ()) -> *mut (),
-    /// Allocate a new array: (type_id, capacity, shared_state) -> array_ptr
-    pub alloc_array: unsafe extern "C" fn(u32, usize, *mut ()) -> *mut (),
+    /// Allocate a new array: (element_type_index, capacity, module_ptr, shared_state) -> array_ptr
+    pub alloc_array: unsafe extern "C" fn(u32, usize, *const (), *mut ()) -> *mut (),
     /// Allocate a new string: (data_ptr, len, shared_state) -> string_ptr
     pub alloc_string: unsafe extern "C" fn(*const u8, usize, *mut ()) -> *mut (),
     /// GC safepoint poll: (shared_state)
@@ -209,6 +230,16 @@ pub struct RuntimeHelperTable {
     pub value_to_string: unsafe extern "C" fn(u64, *mut ()) -> u64,
     /// Interned constant string: (pool_index, module, shared_state) -> raw string pointer
     pub const_string: unsafe extern "C" fn(u32, *const (), *mut ()) -> *mut (),
+    /// Array element load: (array_val, index, shared_state) -> element_val or fallback sentinel
+    pub array_load: unsafe extern "C" fn(u64, i64, *mut ()) -> u64,
+    /// Array element store: (array_val, index, value, shared_state) -> 1 success / 0 fallback
+    pub array_store: unsafe extern "C" fn(u64, i64, u64, *mut ()) -> i8,
+    /// Array push: (array_val, value, shared_state) -> 1 success / 0 fallback
+    pub array_push: unsafe extern "C" fn(u64, u64, *mut ()) -> i8,
+    /// Array pop: (array_val, shared_state) -> popped_val (null if empty) or fallback sentinel
+    pub array_pop: unsafe extern "C" fn(u64, *mut ()) -> u64,
+    /// Array length: (array_val, shared_state) -> len or i32::MIN fallback sentinel
+    pub array_len: unsafe extern "C" fn(u64, *mut ()) -> i32,
 }
 
 /// Validate the boxed arguments at a JIT entry boundary against a verified

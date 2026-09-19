@@ -1,13 +1,69 @@
 //! Array built-in method handlers
+//!
+//! Every receiver is resolved through [`raya_array_ptr_checked`], which verifies
+//! the GC-header type identity, so a string, object, or any other allocation is
+//! never reinterpreted as an `Array`. Mutating built-ins route through the
+//! centralized checked mutation APIs on [`Array`] (`checked_push`,
+//! `checked_unshift`, `checked_fill`, `checked_splice`) so element-type
+//! constraints cannot be bypassed. Result arrays preserve the source element
+//! constraint where the operation preserves element types.
 
 use crate::compiler::Module;
 use crate::vm::interpreter::Interpreter;
-use crate::vm::object::{Array, RayaString};
+use crate::vm::object::{Array, ArrayStoreError, RayaString};
 use crate::vm::scheduler::Task;
 use crate::vm::stack::Stack;
 use crate::vm::value::Value;
+use crate::vm::value_semantics::{raya_array_ptr_checked, raya_string_ptr_checked};
 use crate::vm::VmError;
 use std::sync::Arc;
+
+/// Resolve an array receiver `Value` to a shared reference, rejecting any
+/// non-array with a `TypeError`.
+#[inline]
+unsafe fn array_ref<'r>(value: Value) -> Result<&'r Array, VmError> {
+    match raya_array_ptr_checked(value) {
+        Some(ptr) => Ok(&*ptr.as_ptr()),
+        None => Err(VmError::TypeError("Expected array".to_string())),
+    }
+}
+
+/// Resolve an array receiver `Value` to a mutable reference, rejecting any
+/// non-array with a `TypeError`.
+#[inline]
+unsafe fn array_ref_mut<'r>(value: Value) -> Result<&'r mut Array, VmError> {
+    match raya_array_ptr_checked(value) {
+        Some(ptr) => Ok(&mut *ptr.as_ptr()),
+        None => Err(VmError::TypeError("Expected array".to_string())),
+    }
+}
+
+/// Map a checked-store failure to the interpreter error taxonomy.
+#[inline]
+fn store_error_to_vm(err: ArrayStoreError) -> VmError {
+    match err {
+        ArrayStoreError::OutOfBounds { .. } => VmError::RuntimeError(err.to_string()),
+        ArrayStoreError::ElementType { .. } => VmError::TypeError(err.to_string()),
+    }
+}
+
+/// Value equality used by `indexOf`/`lastIndexOf`/`includes`: string pointers
+/// compare by content (checked via the GC header), everything else by identity.
+fn values_equal(a: &Value, b: &Value) -> bool {
+    if a == b {
+        return true;
+    }
+    let (Some(a_ptr), Some(b_ptr)) =
+        (unsafe { raya_string_ptr_checked(*a) }, unsafe {
+            raya_string_ptr_checked(*b)
+        })
+    else {
+        return false;
+    };
+    let a_str = unsafe { &*a_ptr.as_ptr() };
+    let b_str = unsafe { &*b_ptr.as_ptr() };
+    a_str.data == b_str.data
+}
 
 impl<'a> Interpreter<'a> {
     /// Handle built-in array methods
@@ -29,44 +85,10 @@ impl<'a> Interpreter<'a> {
                         arg_count
                     )));
                 }
-                let debug_native_stack = std::env::var("RAYA_DEBUG_NATIVE_STACK").is_ok();
-                if debug_native_stack {
-                    eprintln!(
-                        "[array.push] pre-pop stack_depth={} arg_count={}",
-                        stack.depth(),
-                        arg_count
-                    );
-                }
-                let value = match stack.pop() {
-                    Ok(v) => v,
-                    Err(e) => {
-                        if debug_native_stack {
-                            eprintln!(
-                                "[array.push] pop value underflow stack_depth={}",
-                                stack.depth()
-                            );
-                        }
-                        return Err(e);
-                    }
-                };
-                let array_val = match stack.pop() {
-                    Ok(v) => v,
-                    Err(e) => {
-                        if debug_native_stack {
-                            eprintln!(
-                                "[array.push] pop receiver underflow stack_depth={}",
-                                stack.depth()
-                            );
-                        }
-                        return Err(e);
-                    }
-                };
-                if !array_val.is_ptr() {
-                    return Err(VmError::TypeError("Expected array".to_string()));
-                }
-                let arr_ptr = unsafe { array_val.as_ptr::<Array>() };
-                let arr = unsafe { &mut *arr_ptr.unwrap().as_ptr() };
-                let new_len = arr.push(value);
+                let value = stack.pop()?;
+                let array_val = stack.pop()?;
+                let arr = unsafe { array_ref_mut(array_val)? };
+                let new_len = arr.checked_push(value).map_err(store_error_to_vm)?;
                 stack.push(Value::i32(new_len as i32))?;
                 Ok(())
             }
@@ -78,11 +100,7 @@ impl<'a> Interpreter<'a> {
                     )));
                 }
                 let array_val = stack.pop()?;
-                if !array_val.is_ptr() {
-                    return Err(VmError::TypeError("Expected array".to_string()));
-                }
-                let arr_ptr = unsafe { array_val.as_ptr::<Array>() };
-                let arr = unsafe { &mut *arr_ptr.unwrap().as_ptr() };
+                let arr = unsafe { array_ref_mut(array_val)? };
                 let result = arr.pop().unwrap_or(Value::null());
                 stack.push(result)?;
                 Ok(())
@@ -95,11 +113,7 @@ impl<'a> Interpreter<'a> {
                     )));
                 }
                 let array_val = stack.pop()?;
-                if !array_val.is_ptr() {
-                    return Err(VmError::TypeError("Expected array".to_string()));
-                }
-                let arr_ptr = unsafe { array_val.as_ptr::<Array>() };
-                let arr = unsafe { &mut *arr_ptr.unwrap().as_ptr() };
+                let arr = unsafe { array_ref_mut(array_val)? };
                 let result = arr.shift().unwrap_or(Value::null());
                 stack.push(result)?;
                 Ok(())
@@ -113,12 +127,8 @@ impl<'a> Interpreter<'a> {
                 }
                 let value = stack.pop()?;
                 let array_val = stack.pop()?;
-                if !array_val.is_ptr() {
-                    return Err(VmError::TypeError("Expected array".to_string()));
-                }
-                let arr_ptr = unsafe { array_val.as_ptr::<Array>() };
-                let arr = unsafe { &mut *arr_ptr.unwrap().as_ptr() };
-                let new_len = arr.unshift(value);
+                let arr = unsafe { array_ref_mut(array_val)? };
+                let new_len = arr.checked_unshift(value).map_err(store_error_to_vm)?;
                 stack.push(Value::i32(new_len as i32))?;
                 Ok(())
             }
@@ -137,34 +147,8 @@ impl<'a> Interpreter<'a> {
                 };
                 let value = stack.pop()?;
                 let array_val = stack.pop()?;
-                if !array_val.is_ptr() {
-                    return Err(VmError::TypeError("Expected array".to_string()));
-                }
-                let arr_ptr = unsafe { array_val.as_ptr::<Array>() };
-                let arr = unsafe { &*arr_ptr.unwrap().as_ptr() };
+                let arr = unsafe { array_ref(array_val)? };
                 let mut result: i32 = -1;
-
-                // Helper function to compare two values for equality
-                // For strings, uses value equality instead of pointer equality
-                let values_equal = |a: &Value, b: &Value| -> bool {
-                    if a == b {
-                        true
-                    } else if a.is_ptr() && b.is_ptr() {
-                        // Both are pointers - check if they're strings and compare data
-                        let a_str_ptr = unsafe { a.as_ptr::<RayaString>() };
-                        let b_str_ptr = unsafe { b.as_ptr::<RayaString>() };
-                        if let (Some(a_ptr), Some(b_ptr)) = (a_str_ptr, b_str_ptr) {
-                            let a_str = unsafe { &*a_ptr.as_ptr() };
-                            let b_str = unsafe { &*b_ptr.as_ptr() };
-                            a_str.data == b_str.data
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                };
-
                 for (i, elem) in arr.elements.iter().enumerate().skip(from_index) {
                     if values_equal(elem, &value) {
                         result = i as i32;
@@ -183,18 +167,14 @@ impl<'a> Interpreter<'a> {
                 }
                 let value = stack.pop()?;
                 let array_val = stack.pop()?;
-                if !array_val.is_ptr() {
-                    return Err(VmError::TypeError("Expected array".to_string()));
-                }
-                let arr_ptr = unsafe { array_val.as_ptr::<Array>() };
-                let arr = unsafe { &*arr_ptr.unwrap().as_ptr() };
-                let result = arr.includes(value);
+                let arr = unsafe { array_ref(array_val)? };
+                let result = arr.elements.iter().any(|elem| values_equal(elem, &value));
                 stack.push(Value::bool(result))?;
                 Ok(())
             }
             array::SLICE => {
                 // slice(start, end?) - arg_count is 1 or 2
-                // Supports negative indices: -1 = last element, -2 = second-to-last, etc.
+                // Supports negative indices: -1 = last element, etc.
                 let end_val = if arg_count >= 2 {
                     Some(stack.pop()?)
                 } else {
@@ -206,23 +186,15 @@ impl<'a> Interpreter<'a> {
                     Value::i32(0)
                 };
                 let array_val = stack.pop()?;
-
-                if !array_val.is_ptr() {
-                    return Err(VmError::TypeError("Expected array".to_string()));
-                }
-                let arr_ptr = unsafe { array_val.as_ptr::<Array>() };
-                let arr = unsafe { &*arr_ptr.unwrap().as_ptr() };
+                let arr = unsafe { array_ref(array_val)? };
 
                 let len = arr.len();
-
-                // Normalize negative indices
                 let start_raw = start_val.as_i32().unwrap_or(0);
                 let start = if start_raw < 0 {
                     ((len as i32 + start_raw).max(0) as usize).min(len)
                 } else {
                     (start_raw as usize).min(len)
                 };
-
                 let end = end_val
                     .and_then(|v| v.as_i32())
                     .map(|e| {
@@ -234,7 +206,9 @@ impl<'a> Interpreter<'a> {
                     })
                     .unwrap_or(len);
 
-                let mut new_arr = Array::new(arr.type_id, 0);
+                // slice preserves element type: same elements, same constraint.
+                let mut new_arr =
+                    Array::with_element_type(arr.type_id, arr.element_type.clone(), 0);
                 if start < end {
                     for i in start..end {
                         if let Some(v) = arr.get(i) {
@@ -249,22 +223,18 @@ impl<'a> Interpreter<'a> {
                 Ok(())
             }
             array::SPLICE => {
-                // splice(start, deleteCount?, ...items): remove elements and optionally insert new ones
-                // Returns array of removed elements
+                // splice(start, deleteCount?, ...items): remove and optionally insert.
                 if arg_count < 1 {
                     return Err(VmError::RuntimeError(format!(
                         "Array.splice expects at least 1 argument, got {}",
                         arg_count
                     )));
                 }
-
-                // Pop arguments in reverse order
                 let mut items = Vec::new();
                 for _ in 2..arg_count {
                     items.push(stack.pop()?);
                 }
                 items.reverse();
-
                 let delete_count_val = if arg_count >= 2 {
                     Some(stack.pop()?)
                 } else {
@@ -272,54 +242,29 @@ impl<'a> Interpreter<'a> {
                 };
                 let start_val = stack.pop()?;
                 let array_val = stack.pop()?;
-
-                if !array_val.is_ptr() {
-                    return Err(VmError::TypeError("Expected array".to_string()));
-                }
-                let arr_ptr = unsafe { array_val.as_ptr::<Array>() };
-                let arr = unsafe { &mut *arr_ptr.unwrap().as_ptr() };
+                let arr = unsafe { array_ref_mut(array_val)? };
 
                 let len = arr.len();
-                let start = start_val.as_i32().unwrap_or(0) as usize;
-                let start = if start > len { len } else { start };
-
-                // Calculate delete count (default to rest of array if not specified)
+                let start = (start_val.as_i32().unwrap_or(0).max(0) as usize).min(len);
                 let delete_count = if let Some(dc_val) = delete_count_val {
                     dc_val.as_i32().unwrap_or(0).max(0) as usize
                 } else {
                     len.saturating_sub(start)
                 };
-
-                // Calculate actual end of deletion
                 let end = (start + delete_count).min(len);
 
-                // Collect removed elements
-                let removed_vals: Vec<Value> = (start..end).filter_map(|i| arr.get(i)).collect();
+                // Inserted items are constraint-checked; removed elements share
+                // the source element type.
+                let element_type = arr.element_type.clone();
+                let removed_vals = arr
+                    .checked_splice(start, end, items)
+                    .map_err(store_error_to_vm)?;
 
-                // Build new elements list: [0..start] + items + [end..len]
-                let mut new_elements: Vec<Value> = Vec::new();
-                for i in 0..start {
-                    new_elements.push(arr.elements[i]);
-                }
-                for item in items {
-                    new_elements.push(item);
-                }
-                for i in end..len {
-                    new_elements.push(arr.elements[i]);
-                }
-
-                // Update array elements - use std::mem::take to avoid reallocation
-                let old_elements = std::mem::take(&mut arr.elements);
-                arr.elements = new_elements;
-                drop(old_elements); // Explicitly drop old elements
-
-                // Create removed array with same element type as source array
-                let mut removed = Array::new(arr.type_id, removed_vals.len());
+                let mut removed =
+                    Array::with_element_type(arr.type_id, element_type, removed_vals.len());
                 for (i, v) in removed_vals.iter().enumerate() {
                     removed.elements[i] = *v;
                 }
-
-                // Return removed elements
                 let gc_ptr = self.gc.lock().allocate(removed);
                 let value =
                     unsafe { Value::from_ptr(std::ptr::NonNull::new(gc_ptr.as_ptr()).unwrap()) };
@@ -334,17 +279,13 @@ impl<'a> Interpreter<'a> {
                     )));
                 }
                 let array_val = stack.pop()?;
-                if !array_val.is_ptr() {
-                    return Err(VmError::TypeError("Expected array".to_string()));
-                }
-                let arr_ptr = unsafe { array_val.as_ptr::<Array>() };
-                let arr = unsafe { &mut *arr_ptr.unwrap().as_ptr() };
+                let arr = unsafe { array_ref_mut(array_val)? };
                 arr.elements.reverse();
                 stack.push(array_val)?;
                 Ok(())
             }
             array::CONCAT => {
-                // concat(other): merge two arrays
+                // concat(other): merge two arrays.
                 if arg_count != 1 {
                     return Err(VmError::RuntimeError(format!(
                         "Array.concat expects 1 argument, got {}",
@@ -353,24 +294,23 @@ impl<'a> Interpreter<'a> {
                 }
                 let other_val = stack.pop()?;
                 let array_val = stack.pop()?;
+                let arr = unsafe { array_ref(array_val)? };
+                let other = unsafe { array_ref(other_val)? };
 
-                if !array_val.is_ptr() || !other_val.is_ptr() {
-                    return Err(VmError::TypeError("Expected array".to_string()));
-                }
-
-                let arr_ptr = unsafe { array_val.as_ptr::<Array>() };
-                let arr = unsafe { &*arr_ptr.unwrap().as_ptr() };
-                let other_ptr = unsafe { other_val.as_ptr::<Array>() };
-                let other = unsafe { &*other_ptr.unwrap().as_ptr() };
-
-                let mut new_arr = Array::new(0, 0);
+                // The result is dynamic unless both operands share the same
+                // resolved element constraint.
+                let element_type = if arr.element_type == other.element_type {
+                    arr.element_type.clone()
+                } else {
+                    None
+                };
+                let mut new_arr = Array::with_element_type(arr.type_id, element_type, 0);
                 for elem in arr.elements.iter() {
                     new_arr.push(*elem);
                 }
                 for elem in other.elements.iter() {
                     new_arr.push(*elem);
                 }
-
                 let gc_ptr = self.gc.lock().allocate(new_arr);
                 let value =
                     unsafe { Value::from_ptr(std::ptr::NonNull::new(gc_ptr.as_ptr()).unwrap()) };
@@ -378,7 +318,6 @@ impl<'a> Interpreter<'a> {
                 Ok(())
             }
             array::LAST_INDEX_OF => {
-                // lastIndexOf(value, fromIndex?): find last occurrence
                 if !(1..=2).contains(&arg_count) {
                     return Err(VmError::RuntimeError(format!(
                         "Array.lastIndexOf expects 1-2 arguments, got {}",
@@ -393,71 +332,34 @@ impl<'a> Interpreter<'a> {
                 };
                 let search_val = stack.pop()?;
                 let array_val = stack.pop()?;
-
-                if !array_val.is_ptr() {
-                    return Err(VmError::TypeError("Expected array".to_string()));
-                }
-
-                let arr_ptr = unsafe { array_val.as_ptr::<Array>() };
-                let arr = unsafe { &*arr_ptr.unwrap().as_ptr() };
+                let arr = unsafe { array_ref(array_val)? };
 
                 let end = from_index.unwrap_or(arr.elements.len().saturating_sub(1));
                 let mut found_index: i32 = -1;
-
-                // Helper function to compare two values for equality
-                // For strings, uses value equality instead of pointer equality
-                let values_equal = |a: &Value, b: &Value| -> bool {
-                    if a == b {
-                        true
-                    } else if a.is_ptr() && b.is_ptr() {
-                        // Both are pointers - check if they're strings and compare data
-                        let a_str_ptr = unsafe { a.as_ptr::<RayaString>() };
-                        let b_str_ptr = unsafe { b.as_ptr::<RayaString>() };
-                        if let (Some(a_ptr), Some(b_ptr)) = (a_str_ptr, b_str_ptr) {
-                            let a_str = unsafe { &*a_ptr.as_ptr() };
-                            let b_str = unsafe { &*b_ptr.as_ptr() };
-                            a_str.data == b_str.data
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                };
-
                 for i in (0..=end.min(arr.elements.len().saturating_sub(1))).rev() {
                     if values_equal(&arr.elements[i], &search_val) {
                         found_index = i as i32;
                         break;
                     }
                 }
-
                 stack.push(Value::i32(found_index))?;
                 Ok(())
             }
             array::FILL => {
-                // fill(value, start?, end?): fill with value
+                // fill(value, start?, end?): fill with value.
                 if !(1..=3).contains(&arg_count) {
                     return Err(VmError::RuntimeError(format!(
                         "Array.fill expects 1-3 arguments, got {}",
                         arg_count
                     )));
                 }
-
-                // Pop arguments in reverse order
                 let mut args = Vec::with_capacity(arg_count);
                 for _ in 0..arg_count {
                     args.push(stack.pop()?);
                 }
                 args.reverse();
-
                 let array_val = stack.pop()?;
-                if !array_val.is_ptr() {
-                    return Err(VmError::TypeError("Expected array".to_string()));
-                }
-
-                let arr_ptr = unsafe { array_val.as_ptr::<Array>() };
-                let arr = unsafe { &mut *arr_ptr.unwrap().as_ptr() };
+                let arr = unsafe { array_ref_mut(array_val)? };
 
                 let fill_value = args[0];
                 let start = if arg_count >= 2 {
@@ -470,16 +372,13 @@ impl<'a> Interpreter<'a> {
                 } else {
                     arr.len()
                 };
-
-                for i in start..end.min(arr.len()) {
-                    arr.elements[i] = fill_value;
-                }
-
+                arr.checked_fill(fill_value, start, end)
+                    .map_err(store_error_to_vm)?;
                 stack.push(array_val)?;
                 Ok(())
             }
             array::FLAT => {
-                // flat(depth?): flatten nested arrays
+                // flat(depth?): flatten nested arrays.
                 let depth = if arg_count >= 1 {
                     let d = stack.pop()?.as_i32().unwrap_or(1);
                     d.max(0) as usize
@@ -487,38 +386,23 @@ impl<'a> Interpreter<'a> {
                     1
                 };
                 let array_val = stack.pop()?;
+                let arr = unsafe { array_ref(array_val)? };
 
-                if !array_val.is_ptr() {
-                    return Err(VmError::TypeError("Expected array".to_string()));
-                }
-
-                let arr_ptr = unsafe { array_val.as_ptr::<Array>() };
-                let arr = unsafe { &*arr_ptr.unwrap().as_ptr() };
-
-                // `_gc` will be needed when flatten allocates GC-managed sub-arrays.
-                fn flatten(
-                    _gc: &parking_lot::Mutex<crate::vm::gc::GarbageCollector>,
-                    arr: &Array,
-                    depth: usize,
-                ) -> Array {
-                    let mut result = Array::new(0, 0);
+                // Flattening can mix element types, so the result is dynamic.
+                fn flatten(arr: &Array, depth: usize, out: &mut Array) {
                     for elem in arr.elements.iter() {
-                        if depth > 0 && elem.is_ptr() {
-                            if let Some(ptr) = unsafe { elem.as_ptr::<Array>() } {
+                        if depth > 0 {
+                            if let Some(ptr) = unsafe { raya_array_ptr_checked(*elem) } {
                                 let inner = unsafe { &*ptr.as_ptr() };
-                                let flattened = flatten(_gc, inner, depth - 1);
-                                for inner_elem in flattened.elements {
-                                    result.push(inner_elem);
-                                }
+                                flatten(inner, depth - 1, out);
                                 continue;
                             }
                         }
-                        result.push(*elem);
+                        out.push(*elem);
                     }
-                    result
                 }
-
-                let result = flatten(self.gc, arr, depth);
+                let mut result = Array::new(0, 0);
+                flatten(arr, depth, &mut result);
                 let gc_ptr = self.gc.lock().allocate(result);
                 let value =
                     unsafe { Value::from_ptr(std::ptr::NonNull::new(gc_ptr.as_ptr()).unwrap()) };
@@ -532,7 +416,7 @@ impl<'a> Interpreter<'a> {
                 // join(separator?) - arg_count is 0 or 1
                 let sep = if arg_count >= 1 {
                     let sep_val = stack.pop()?;
-                    if let Some(ptr) = unsafe { sep_val.as_ptr::<RayaString>() } {
+                    if let Some(ptr) = unsafe { raya_string_ptr_checked(sep_val) } {
                         let s = unsafe { &*ptr.as_ptr() };
                         s.data.clone()
                     } else {
@@ -542,19 +426,13 @@ impl<'a> Interpreter<'a> {
                     ",".to_string()
                 };
                 let array_val = stack.pop()?;
+                let arr = unsafe { array_ref(array_val)? };
 
-                if !array_val.is_ptr() {
-                    return Err(VmError::TypeError("Expected array".to_string()));
-                }
-                let arr_ptr = unsafe { array_val.as_ptr::<Array>() };
-                let arr = unsafe { &*arr_ptr.unwrap().as_ptr() };
-
-                // Convert elements to strings and join
                 let parts: Vec<String> = arr
                     .elements
                     .iter()
                     .map(|v| {
-                        if let Some(ptr) = unsafe { v.as_ptr::<RayaString>() } {
+                        if let Some(ptr) = unsafe { raya_string_ptr_checked(*v) } {
                             unsafe { &*ptr.as_ptr() }.data.clone()
                         } else if let Some(i) = v.as_i32() {
                             i.to_string()

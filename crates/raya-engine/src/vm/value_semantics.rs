@@ -1,7 +1,7 @@
 //! Shared interpreter and JIT semantics for boxed values.
 
 use crate::vm::gc::header_ptr_from_value_ptr;
-use crate::vm::object::RayaString;
+use crate::vm::object::{Array, RayaString};
 use crate::vm::value::Value;
 use std::any::TypeId;
 use std::cmp::Ordering;
@@ -19,6 +19,31 @@ pub(crate) unsafe fn raya_string_ptr_checked(value: Value) -> Option<NonNull<Ray
     let ptr = value.as_ptr::<u8>()?;
     let header = &*header_ptr_from_value_ptr(ptr.as_ptr());
     (header.type_id() == TypeId::of::<RayaString>()).then(|| ptr.cast::<RayaString>())
+}
+
+/// Return an array pointer only when `value` names a GC allocation whose
+/// concrete type is `Array`.
+///
+/// This is the single sanctioned way to obtain an `Array` from a `Value`: it
+/// verifies the GC-header Rust `TypeId` so a `RayaString`, `Object`, or any
+/// other heap allocation is never misread as an array. Callers must not
+/// short-circuit with a bare `is_ptr()` + `as_ptr::<Array>()` cast.
+///
+/// # Safety
+///
+/// Pointer-valued `Value`s must satisfy the normal VM invariant: they point to
+/// a live allocation managed by this VM's collector.
+#[inline]
+pub(crate) unsafe fn raya_array_ptr_checked(value: Value) -> Option<NonNull<Array>> {
+    let ptr = value.as_ptr::<u8>()?;
+    let header = &*header_ptr_from_value_ptr(ptr.as_ptr());
+    (header.type_id() == TypeId::of::<Array>()).then(|| ptr.cast::<Array>())
+}
+
+/// True when `value` is a GC allocation whose concrete type is `Array`.
+#[inline]
+pub(crate) unsafe fn value_is_array(value: Value) -> bool {
+    raya_array_ptr_checked(value).is_some()
 }
 
 /// Convert a value with the interpreter's existing `ToString` rules.
@@ -145,5 +170,80 @@ mod tests {
             assert!(!values_equal(first, object));
             assert_eq!(value_to_string(object), "[object]");
         }
+    }
+
+    #[test]
+    fn checked_array_identity_rejects_strings_and_objects() {
+        use super::{raya_array_ptr_checked, value_is_array};
+        use crate::vm::object::Array;
+
+        let safepoint = Arc::new(SafepointCoordinator::new(1));
+        let tasks = Arc::new(parking_lot::RwLock::new(FxHashMap::<
+            crate::vm::scheduler::TaskId,
+            Arc<Task>,
+        >::default()));
+        let shared = SharedVmState::new(safepoint, tasks, Arc::new(Injector::new()));
+        let (array_val, string_val, object_val) = {
+            let mut gc = shared.gc.lock();
+            let array = gc.allocate(Array::new(0, 2));
+            let string = gc.allocate(RayaString::new("s".to_string()));
+            let object = gc.allocate(Object::new_structural(7, 0));
+            unsafe {
+                (
+                    Value::from_ptr(NonNull::new(array.as_ptr()).unwrap()),
+                    Value::from_ptr(NonNull::new(string.as_ptr()).unwrap()),
+                    Value::from_ptr(NonNull::new(object.as_ptr()).unwrap()),
+                )
+            }
+        };
+
+        unsafe {
+            // Only the real array resolves; a string, an object, and a
+            // non-pointer are all rejected.
+            assert!(value_is_array(array_val));
+            assert!(raya_array_ptr_checked(array_val).is_some());
+            assert!(!value_is_array(string_val));
+            assert!(raya_array_ptr_checked(string_val).is_none());
+            assert!(!value_is_array(object_val));
+            assert!(raya_array_ptr_checked(object_val).is_none());
+            assert!(!value_is_array(Value::i32(3)));
+        }
+    }
+
+    #[test]
+    fn string_typed_array_rejects_object_pointer() {
+        use crate::compiler::bytecode::RuntimeTypeDescriptor as D;
+        use crate::vm::object::{Array, ArrayStoreError};
+
+        let safepoint = Arc::new(SafepointCoordinator::new(1));
+        let tasks = Arc::new(parking_lot::RwLock::new(FxHashMap::<
+            crate::vm::scheduler::TaskId,
+            Arc<Task>,
+        >::default()));
+        let shared = SharedVmState::new(safepoint, tasks, Arc::new(Injector::new()));
+        let (string_val, object_val) = {
+            let mut gc = shared.gc.lock();
+            let string = gc.allocate(RayaString::new("hello".to_string()));
+            let object = gc.allocate(Object::new_structural(7, 0));
+            unsafe {
+                (
+                    Value::from_ptr(NonNull::new(string.as_ptr()).unwrap()),
+                    Value::from_ptr(NonNull::new(object.as_ptr()).unwrap()),
+                )
+            }
+        };
+
+        let mut arr = Array::with_element_type(0, Some(D::String), 1);
+        // A real RayaString is accepted; an Object pointer (also is_ptr) is
+        // rejected by the GC-header identity check, not accepted as before.
+        assert!(arr.element_matches(string_val));
+        assert!(!arr.element_matches(object_val));
+        assert!(arr.checked_set(0, string_val).is_ok());
+        assert!(matches!(
+            arr.checked_set(0, object_val),
+            Err(ArrayStoreError::ElementType { .. })
+        ));
+        // A non-pointer is never a string.
+        assert!(!arr.element_matches(Value::i32(1)));
     }
 }

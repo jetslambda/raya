@@ -426,6 +426,7 @@ where
     // Create typed array
     let arr = crate::vm::object::Array {
         type_id: element_type_id,
+        element_type: None,
         elements: element_values,
     };
 

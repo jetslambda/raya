@@ -310,6 +310,7 @@ impl<'a> Parser<'a> {
             self.pos += 1;
             let arr = Array {
                 type_id: 0,
+                element_type: None,
                 elements,
             };
             let arr_ptr = self.gc.allocate(arr);
@@ -336,6 +337,7 @@ impl<'a> Parser<'a> {
                     self.pos += 1;
                     let arr = Array {
                         type_id: 0,
+                        element_type: None,
                         elements,
                     };
                     let arr_ptr = self.gc.allocate(arr);

@@ -481,41 +481,70 @@ pub enum JitInstr {
     },
 
     // ===== Array Operations =====
+    //
+    // Every array op is helper-backed and may allocate or exit to the
+    // interpreter, so each carries the pre-operation operand `stack` and its
+    // `bytecode_offset` for an exact interpreter fallback at that program point
+    // (mirroring the string ops above). `NewArray` consumes its `len` operand
+    // so the lifted stack model stays balanced with the interpreter, which
+    // pops the length.
     NewArray {
         dest: Reg,
         type_index: u32,
+        len: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     LoadElem {
         dest: Reg,
         array: Reg,
         index: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     StoreElem {
         array: Reg,
         index: Reg,
         value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     ArrayLen {
         dest: Reg,
         array: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     ArrayPush {
         array: Reg,
         value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     ArrayPop {
         dest: Reg,
         array: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     ArrayLiteral {
         dest: Reg,
         type_index: u32,
         elements: Vec<Reg>,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
+    /// Single-element array initializer, mirroring the normalized interpreter
+    /// semantics and `InitObject`: store `value` at `index` into `array`,
+    /// leaving `array` on the operand stack (no result register). Kept for
+    /// lifter completeness; the opcode stays JIT-rejected until its exact path
+    /// is proven.
     InitArray {
-        dest: Reg,
-        count: u16,
-        elements: Vec<Reg>,
+        array: Reg,
+        index: u16,
+        value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
 
     // ===== String Operations =====
@@ -918,7 +947,6 @@ impl JitInstr {
             | JitInstr::ArrayLen { dest, .. }
             | JitInstr::ArrayPop { dest, .. }
             | JitInstr::ArrayLiteral { dest, .. }
-            | JitInstr::InitArray { dest, .. }
             | JitInstr::OptionalFieldExact { dest, .. } => Some(*dest),
 
             // String
@@ -985,6 +1013,7 @@ impl JitInstr {
             | JitInstr::StoreFieldShape { .. }
             | JitInstr::StoreElem { .. }
             | JitInstr::ArrayPush { .. }
+            | JitInstr::InitArray { .. }
             | JitInstr::StoreCaptured { .. }
             | JitInstr::SetClosureCapture { .. }
             | JitInstr::CloseVar { .. }

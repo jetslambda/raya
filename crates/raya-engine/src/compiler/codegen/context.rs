@@ -528,6 +528,21 @@ impl<'a> IrCodeGenerator<'a> {
     }
 
     /// Generate bytecode for an instruction
+    /// Resolve an array's checker element type into the emitted element
+    /// descriptor id (primitive id `< 8`, or an interned complex id
+    /// `COMPLEX_BASE + index`). Without a type context, or for element types
+    /// the runtime cannot describe precisely, this yields the dynamic
+    /// `AnyValue` id so the array behaves as `any[]`.
+    fn array_element_type_id(&mut self, elem_ty: crate::parser::TypeId) -> u32 {
+        match self.type_ctx {
+            Some(type_ctx) => {
+                let descriptor = runtime_type_of_lenient(type_ctx, elem_ty);
+                self.tables.intern_descriptor(descriptor)
+            }
+            None => prim_any_value_id(),
+        }
+    }
+
     fn generate_instr(&mut self, ctx: &mut FunctionContext, instr: &IrInstr) -> CompileResult<()> {
         match instr {
             IrInstr::Assign { dest, value } => {
@@ -990,11 +1005,12 @@ impl<'a> IrCodeGenerator<'a> {
             IrInstr::NewArray {
                 dest,
                 len,
-                elem_ty: _,
+                elem_ty,
             } => {
+                let element_type_id = self.array_element_type_id(*elem_ty);
                 self.emit_load_register(ctx, len);
                 ctx.emit(Opcode::NewArray);
-                ctx.emit_u32(0); // Type index (TODO: proper type handling)
+                ctx.emit_u32(element_type_id);
                 let slot = ctx.get_or_alloc_slot(dest);
                 self.emit_store_local(ctx, slot);
             }
@@ -1002,14 +1018,15 @@ impl<'a> IrCodeGenerator<'a> {
             IrInstr::ArrayLiteral {
                 dest,
                 elements,
-                elem_ty: _,
+                elem_ty,
             } => {
+                let element_type_id = self.array_element_type_id(*elem_ty);
                 // Push all elements
                 for elem in elements {
                     self.emit_load_register(ctx, elem);
                 }
                 ctx.emit(Opcode::ArrayLiteral);
-                ctx.emit_u32(0); // Type index
+                ctx.emit_u32(element_type_id);
                 ctx.emit_u32(elements.len() as u32);
                 let slot = ctx.get_or_alloc_slot(dest);
                 self.emit_store_local(ctx, slot);

@@ -1986,7 +1986,7 @@ impl<'a> Interpreter<'a> {
             | Opcode::ArrayPush
             | Opcode::ArrayPop
             | Opcode::ArrayLiteral
-            | Opcode::InitArray => self.exec_array_ops(stack, ip, code, opcode),
+            | Opcode::InitArray => self.exec_array_ops(stack, ip, code, module, opcode),
 
             // =========================================================
             // Closure Operations

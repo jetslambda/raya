@@ -254,6 +254,26 @@ mod tests {
     }
 
     #[test]
+    fn array_opcodes_are_rejected_until_exact() {
+        // Fail-closed posture (D4.2): no array opcode is JIT-selectable until
+        // its native/helper path is proven exact and covered by JIT-active
+        // differential tests. InitArray in particular stays rejected.
+        for op in [
+            Opcode::NewArray,
+            Opcode::LoadElem,
+            Opcode::StoreElem,
+            Opcode::ArrayLen,
+            Opcode::ArrayPush,
+            Opcode::ArrayPop,
+            Opcode::ArrayLiteral,
+            Opcode::InitArray,
+        ] {
+            assert_eq!(jit_support(op), JitSupport::Rejected, "{op:?}");
+            assert!(!opcode_supported_for_jit(op), "{op:?} must not be selectable");
+        }
+    }
+
+    #[test]
     fn control_flow_and_locals_are_selectable() {
         for op in [
             Opcode::Jmp,

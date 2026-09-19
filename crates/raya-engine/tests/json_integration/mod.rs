@@ -420,6 +420,7 @@ fn test_stringify_preserves_types() {
     // Empty array
     let empty_arr = Array {
         type_id: 0,
+        element_type: None,
         elements: vec![],
     };
     let arr_ptr = gc.allocate(empty_arr);

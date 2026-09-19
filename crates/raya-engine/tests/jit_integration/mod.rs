@@ -2079,9 +2079,30 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     unsafe extern "C" fn stub_alloc_array(
         _type_id: u32,
         _capacity: usize,
+        _module: *const (),
         _shared_state: *mut (),
     ) -> *mut () {
         std::ptr::null_mut()
+    }
+    unsafe extern "C" fn stub_array_load(_array: u64, _index: i64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+    unsafe extern "C" fn stub_array_store(
+        _array: u64,
+        _index: i64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+    unsafe extern "C" fn stub_array_push(_array: u64, _value: u64, _shared_state: *mut ()) -> i8 {
+        0
+    }
+    unsafe extern "C" fn stub_array_pop(_array: u64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+    unsafe extern "C" fn stub_array_len(_array: u64, _shared_state: *mut ()) -> i32 {
+        0
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2171,6 +2192,11 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             string_compare: stub_string_compare,
             value_to_string: stub_value_to_string,
             const_string: stub_const_string,
+            array_load: stub_array_load,
+            array_store: stub_array_store,
+            array_push: stub_array_push,
+            array_pop: stub_array_pop,
+            array_len: stub_array_len,
         },
     };
 
@@ -2203,9 +2229,30 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     unsafe extern "C" fn stub_alloc_array(
         _type_id: u32,
         _capacity: usize,
+        _module: *const (),
         _shared_state: *mut (),
     ) -> *mut () {
         std::ptr::null_mut()
+    }
+    unsafe extern "C" fn stub_array_load(_array: u64, _index: i64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+    unsafe extern "C" fn stub_array_store(
+        _array: u64,
+        _index: i64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+    unsafe extern "C" fn stub_array_push(_array: u64, _value: u64, _shared_state: *mut ()) -> i8 {
+        0
+    }
+    unsafe extern "C" fn stub_array_pop(_array: u64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+    unsafe extern "C" fn stub_array_len(_array: u64, _shared_state: *mut ()) -> i32 {
+        0
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2295,6 +2342,11 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             string_compare: stub_string_compare,
             value_to_string: stub_value_to_string,
             const_string: stub_const_string,
+            array_load: stub_array_load,
+            array_store: stub_array_store,
+            array_push: stub_array_push,
+            array_pop: stub_array_pop,
+            array_len: stub_array_len,
         },
     };
 
@@ -2328,9 +2380,30 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     unsafe extern "C" fn stub_alloc_array(
         _type_id: u32,
         _capacity: usize,
+        _module: *const (),
         _shared_state: *mut (),
     ) -> *mut () {
         std::ptr::null_mut()
+    }
+    unsafe extern "C" fn stub_array_load(_array: u64, _index: i64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+    unsafe extern "C" fn stub_array_store(
+        _array: u64,
+        _index: i64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+    unsafe extern "C" fn stub_array_push(_array: u64, _value: u64, _shared_state: *mut ()) -> i8 {
+        0
+    }
+    unsafe extern "C" fn stub_array_pop(_array: u64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+    unsafe extern "C" fn stub_array_len(_array: u64, _shared_state: *mut ()) -> i32 {
+        0
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2427,6 +2500,11 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             string_compare: stub_string_compare,
             value_to_string: stub_value_to_string,
             const_string: stub_const_string,
+            array_load: stub_array_load,
+            array_store: stub_array_store,
+            array_push: stub_array_push,
+            array_pop: stub_array_pop,
+            array_len: stub_array_len,
         },
     };
 
@@ -2455,9 +2533,30 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     unsafe extern "C" fn stub_alloc_array(
         _type_id: u32,
         _capacity: usize,
+        _module: *const (),
         _shared_state: *mut (),
     ) -> *mut () {
         std::ptr::null_mut()
+    }
+    unsafe extern "C" fn stub_array_load(_array: u64, _index: i64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+    unsafe extern "C" fn stub_array_store(
+        _array: u64,
+        _index: i64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+    unsafe extern "C" fn stub_array_push(_array: u64, _value: u64, _shared_state: *mut ()) -> i8 {
+        0
+    }
+    unsafe extern "C" fn stub_array_pop(_array: u64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+    unsafe extern "C" fn stub_array_len(_array: u64, _shared_state: *mut ()) -> i32 {
+        0
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2554,6 +2653,11 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             string_compare: stub_string_compare,
             value_to_string: stub_value_to_string,
             const_string: stub_const_string,
+            array_load: stub_array_load,
+            array_store: stub_array_store,
+            array_push: stub_array_push,
+            array_pop: stub_array_pop,
+            array_len: stub_array_len,
         },
     };
 
@@ -2589,9 +2693,30 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     unsafe extern "C" fn stub_alloc_array(
         _type_id: u32,
         _capacity: usize,
+        _module: *const (),
         _shared_state: *mut (),
     ) -> *mut () {
         std::ptr::null_mut()
+    }
+    unsafe extern "C" fn stub_array_load(_array: u64, _index: i64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+    unsafe extern "C" fn stub_array_store(
+        _array: u64,
+        _index: i64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+    unsafe extern "C" fn stub_array_push(_array: u64, _value: u64, _shared_state: *mut ()) -> i8 {
+        0
+    }
+    unsafe extern "C" fn stub_array_pop(_array: u64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+    unsafe extern "C" fn stub_array_len(_array: u64, _shared_state: *mut ()) -> i32 {
+        0
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2696,6 +2821,11 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             string_compare: stub_string_compare,
             value_to_string: stub_value_to_string,
             const_string: stub_const_string,
+            array_load: stub_array_load,
+            array_store: stub_array_store,
+            array_push: stub_array_push,
+            array_pop: stub_array_pop,
+            array_len: stub_array_len,
         },
     };
 
