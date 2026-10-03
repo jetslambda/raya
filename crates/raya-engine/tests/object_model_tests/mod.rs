@@ -1611,3 +1611,125 @@ fn refcell_opcodes_reject_a_non_pointer_receiver() {
         "expected the interpreter's RefCell TypeError, got: {message}"
     );
 }
+
+
+// ---------------------------------------------------------------------------
+// Interpreter closure baseline (D4.4)
+//
+// Closures are the first family on this milestone whose baseline could not be
+// written from bytecode alone. `Closure.captures` is read only by the GC tracer,
+// the snapshot codec, `get_captured` and `capture_count` — the sole bytecode-level
+// reader is `LoadCaptured`, which needs an active closure. So `MakeClosure` pushes
+// a closure nobody can inspect, and `SetClosureCapture` patches a slot inside a
+// closure nobody can read. Their only observable effect is through code running
+// *inside* that closure.
+//
+// The missing piece of that harness is `Call` with the sentinel function index:
+//
+//     if func_index == 0xFFFFFFFF { /* closure call */ }
+//
+// which lifts the closure value from beneath the arguments and invokes it. That is
+// what these two tests use. `tests/closure_tests/mod.rs` holds 26 tests of which 12
+// are `assert!(true)` placeholders and 14 exercise *Rust* closures, so it is not
+// coverage; these live here instead, next to the object-model baselines.
+
+/// `Opcode::Call` selects a closure call with this function index, lifting the
+/// closure value from beneath the arguments (`vm/interpreter/opcodes/calls.rs`).
+const CLOSURE_CALL: u32 = 0xFFFF_FFFF;
+
+/// Builds a two-function module: `main` at index 0 and a closure body at index 1
+/// made of `body`. `main_body` is appended after the `MakeClosure` and is
+/// responsible for the `Call` and the `Return`.
+fn closure_call_module(initial_capture: i32, body: &[u8], main_body: &[u8]) -> Module {
+    let mut module = Module::new("closure_call".to_string());
+
+    let mut closure_code: Vec<u8> = body.to_vec();
+    closure_code.push(Opcode::Return as u8);
+    module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "closure_body".to_string(),
+        param_count: 0,
+        local_count: 0,
+        code: closure_code,
+    });
+
+    let mut code: Vec<u8> = Vec::new();
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&initial_capture.to_le_bytes());
+    code.push(Opcode::MakeClosure as u8);
+    code.extend_from_slice(&1u32.to_le_bytes()); // func_index = closure_body
+    code.extend_from_slice(&1u16.to_le_bytes()); // capture_count = 1
+    code.extend_from_slice(main_body);
+    code.push(Opcode::Return as u8);
+    module.functions.insert(
+        0,
+        Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
+            name: "main".to_string(),
+            param_count: 0,
+            local_count: 0,
+            code,
+        },
+    );
+    module
+}
+
+#[test]
+fn make_closure_then_call_invokes_the_closure_body() {
+    // `LoadCaptured 0; Return` — the body just hands the capture back.
+    let mut vm = Vm::new();
+    let module = closure_call_module(
+        42,
+        &[Opcode::LoadCaptured as u8, 0, 0],
+        &[
+            Opcode::Call as u8,
+            CLOSURE_CALL.to_le_bytes()[0],
+            CLOSURE_CALL.to_le_bytes()[1],
+            CLOSURE_CALL.to_le_bytes()[2],
+            CLOSURE_CALL.to_le_bytes()[3],
+            0,
+            0, // arg_count = 0
+        ],
+    );
+    let result = vm.execute(&module).expect("closure call must run");
+    assert_eq!(
+        result,
+        Value::i32(42),
+        "the closure body must observe the captured value"
+    );
+}
+
+#[test]
+fn set_closure_capture_patches_what_the_body_sees() {
+    // Create a closure capturing 0, patch slot 0 to 42 through SetClosureCapture,
+    // then call it. If the patch did not happen the body would see 0, so this is
+    // discriminating rather than a test that merely constructs a closure.
+    let mut vm = Vm::new();
+
+    let mut main_tail: Vec<u8> = Vec::new();
+    // SetClosureCapture pops the value then the closure, and pushes the closure back.
+    // Dup BEFORE the value: it duplicates the top of stack, which is the closure at
+    // that point. Duplicating after would copy the 42, and the opcode would then
+    // take an immediate as its closure operand -- which the interpreter's is_ptr()
+    // check rejects with "Expected closure", which is exactly what it did.
+    main_tail.push(Opcode::Dup as u8); // [closure, closure]
+    main_tail.push(Opcode::ConstI32 as u8);
+    main_tail.extend_from_slice(&42i32.to_le_bytes()); // [closure, closure, 42]
+    main_tail.push(Opcode::SetClosureCapture as u8);
+    main_tail.extend_from_slice(&0u16.to_le_bytes()); // capture index 0
+    main_tail.push(Opcode::Call as u8);
+    main_tail.extend_from_slice(&CLOSURE_CALL.to_le_bytes());
+    main_tail.extend_from_slice(&0u16.to_le_bytes()); // arg_count = 0
+
+    let module = closure_call_module(0, &[Opcode::LoadCaptured as u8, 0, 0], &main_tail);
+    let result = vm.execute(&module).expect("closure call must run");
+    assert_eq!(
+        result,
+        Value::i32(42),
+        "SetClosureCapture must be visible to the closure body; 0 means it never landed"
+    );
+}
