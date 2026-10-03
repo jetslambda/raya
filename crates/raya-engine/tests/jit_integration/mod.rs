@@ -5974,3 +5974,5 @@ fn bind_method_lowering_binds_natively() {
     assert_eq!(bound.func_id, 42, "vtable slot must resolve to the func id");
     assert_eq!(bound.receiver.raw(), object_raw, "receiver must be carried");
 }
+
+

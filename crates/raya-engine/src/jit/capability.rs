@@ -254,8 +254,15 @@ pub fn opcode_supported_for_jit(opcode: Opcode) -> bool {
 ///   was empty the opcode was rejected here AND unselectable, so neither gate could
 ///   be relied on alone.
 /// - `GetArgCount`/`LoadArgLocal`: no-op / constant zero (S2)
-/// - `Try`/`Rethrow`/`Throw`: placeholder handler installation; throw and
-///   deopt helpers panic instead of propagating
+/// - `Try`: placeholder handler installation (D4.5). `Rethrow` and `Throw` were
+///   removed from this list on 2026-10-03. The recorded reason was that "throw and
+///   deopt helpers panic instead of propagating", which turned out to name two
+///   functions nothing calls: `helper_throw_exception` and `helper_deoptimize` are
+///   referenced nowhere outside `trampoline.rs`. Both opcodes lift correctly and
+///   their lowering arms reach the interpreter through
+///   `emit_interpreter_boundary_exit`, which needs no helper at all. `Try` stays —
+///   its lifter arm is still the placeholder that computes catch/finally targets
+///   into unused bindings
 ///   integer division/remainder currently lack catchable zero-divisor paths
 pub fn produces_incorrect_native_results(opcode: Opcode) -> bool {
     matches!(
@@ -268,8 +275,6 @@ pub fn produces_incorrect_native_results(opcode: Opcode) -> bool {
             | Opcode::GetArgCount
             | Opcode::LoadArgLocal
             | Opcode::Try
-            | Opcode::Rethrow
-            | Opcode::Throw
     )
 }
 
@@ -476,12 +481,19 @@ mod tests {
             );
         }
 
-        for op in [Opcode::Try, Opcode::Throw, Opcode::Rethrow] {
+        // `Throw` and `Rethrow` left this list on 2026-10-03: their arms reach the
+        // interpreter through emit_interpreter_boundary_exit and need no helper.
+        // `Try` stays, because its lifter arm is still a placeholder.
+        for op in [Opcode::Throw, Opcode::Rethrow] {
             assert!(
-                produces_incorrect_native_results(op),
-                "{op:?} must stay lifter-rejected until its throw path propagates"
+                !produces_incorrect_native_results(op),
+                "{op:?} lifts correctly and must no longer be lifter-rejected"
             );
         }
+        assert!(
+            produces_incorrect_native_results(Opcode::Try),
+            "Try must stay lifter-rejected until its handler installation is modelled"
+        );
 
         assert!(
             !produces_incorrect_native_results(Opcode::EndTry),
@@ -498,8 +510,6 @@ mod tests {
             Opcode::GetArgCount,
             Opcode::LoadArgLocal,
             Opcode::Try,
-            Opcode::Rethrow,
-            Opcode::Throw,
         ] {
             assert!(
                 produces_incorrect_native_results(op),
