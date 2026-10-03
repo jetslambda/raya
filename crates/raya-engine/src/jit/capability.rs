@@ -267,15 +267,17 @@ pub fn opcode_supported_for_jit(opcode: Opcode) -> bool {
 ///   was empty the opcode was rejected here AND unselectable, so neither gate could
 ///   be relied on alone.
 /// - `GetArgCount`/`LoadArgLocal`: no-op / constant zero (S2)
-/// - `Try`: placeholder handler installation (D4.5). `Rethrow` and `Throw` were
-///   removed from this list on 2026-10-03. The recorded reason was that "throw and
-///   deopt helpers panic instead of propagating", which turned out to name two
-///   functions nothing calls: `helper_throw_exception` and `helper_deoptimize` are
-///   referenced nowhere outside `trampoline.rs`. Both opcodes lift correctly and
-///   their lowering arms reach the interpreter through
-///   `emit_interpreter_boundary_exit`, which needs no helper at all. `Try` stays —
-///   its lifter arm is still the placeholder that computes catch/finally targets
-///   into unused bindings
+/// - `Try`/`Rethrow`/`Throw`: all three removed on 2026-10-03. The recorded
+///   reason — "throw and deopt helpers panic instead of propagating" — named two
+///   functions nothing calls: `helper_throw_exception` and `helper_deoptimize` were
+///   referenced nowhere outside `trampoline.rs`, and both were deleted rather than
+///   implemented. `Throw` and `Rethrow` reach the interpreter through
+///   `emit_interpreter_boundary_exit`, which needs no helper at all. `Try`'s arm used
+///   to compute its catch/finally targets into unused bindings; it now resolves both
+///   through `JitFunction::block_at_offset` and fails with `UnresolvedTryTarget`
+///   rather than defaulting to block 0.
+///   `JitTerminator::Throw` still fails compilation deliberately, so a function
+///   containing any of these stays interpreted.
 ///   integer division/remainder currently lack catchable zero-divisor paths
 pub fn produces_incorrect_native_results(opcode: Opcode) -> bool {
     matches!(
@@ -443,15 +445,18 @@ mod tests {
 
     /// D4.5 baseline: the whole exception family, pinned explicitly.
     ///
-    /// All four are `Rejected` today, but for two different reasons, and the test
-    /// records both rather than letting one assertion cover them:
+    /// All four are `Rejected` at candidate selection, but for two different
+    /// reasons, and the test records both rather than letting one assertion cover
+    /// them:
     ///
-    /// - `Try`, `Throw` and `Rethrow` are on `produces_incorrect_native_results`,
-    ///   so the *lifter* rejects them. For `Throw`/`Rethrow` the recorded defect is
-    ///   that the throw and deopt helpers panic instead of propagating; for `Try`
-    ///   the lifter arm is a placeholder that computes catch/finally targets into
-    ///   unused bindings.
-    /// - `EndTry` is **not** on that list. Its lifter arm is correct and complete
+    /// - `Try`, `Throw` and `Rethrow` are **no longer** on
+    ///   `produces_incorrect_native_results` — they left it on 2026-10-03 once the
+    ///   throw/deopt helpers were deleted and `Try`'s arm began resolving its
+    ///   targets. All three still have no lowering arm reachable in practice, because
+    ///   `JitTerminator::Throw` fails compilation deliberately, so they stay
+    ///   interpreted. `Throw` and `Rethrow` are additionally promoted
+    ///   (`HelperExact`); `Try` is not, having no helper.
+    /// - `EndTry` was never on that list. Its lifter arm is correct and complete
     ///   (`JitInstr::EndTry`, no stack effect, matching the handler), so it is held
     ///   out only by the `Rejected` catch-all here.
     ///
