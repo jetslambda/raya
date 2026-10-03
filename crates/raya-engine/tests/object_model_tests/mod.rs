@@ -958,3 +958,182 @@ fn init_object_operand_is_a_field_offset_not_a_value_count() {
     let result = vm.execute(&module).unwrap();
     assert_eq!(result, Value::i32(20));
 }
+
+// ---------------------------------------------------------------------------
+// Descriptor accessor coverage (D4.3 / ALY-46)
+//
+// `Object.defineProperty` with a `get` descriptor stores `__node_compat_descriptor`
+// metadata, and the interpreter's field handlers consult it and invoke the getter
+// as a callable frame. The JIT field helpers never did, which is why five object
+// opcodes were demoted to `Rejected`. These tests pin the interpreter behaviour
+// the JIT has to match, and they are the corpus the plan requires before any of
+// those opcodes is promoted again.
+//
+// No test in this suite previously exercised `defineProperty` at all.
+// ---------------------------------------------------------------------------
+
+/// Native id of `Object.defineProperty` (`compiler/native_id.rs`).
+const OBJECT_DEFINE_PROPERTY: u16 = 0x0004;
+
+/// Positional layout of a Node-compat property descriptor, matching
+/// `legacy_field_index_for_layout` in `vm/interpreter/opcodes/objects.rs`:
+/// index 4 is the getter and index 0 is the data value.
+const DESCRIPTOR_FIELDS: [&str; 6] = [
+    "value",
+    "writable",
+    "configurable",
+    "enumerable",
+    "get",
+    "set",
+];
+
+/// Builds a module whose `main` (function 0) creates a target object, optionally
+/// installs a `get` accessor on it via `Object.defineProperty`, then reads field
+/// 0 and returns. Function 1 is the getter body, returning 42.
+///
+/// `with_descriptor` false leaves the descriptor uninstalled, which is the
+/// control: field 0 is never assigned, so a raw read must yield null.
+fn accessor_read_module(with_descriptor: bool) -> Module {
+    use raya_engine::compiler::bytecode::{
+        ClassReflectionData, FieldReflectionData, ReflectionData,
+    };
+
+    let mut module = Module::new("accessor".to_string());
+    module.classes.push(class_def("Point", 1, None));
+    // Descriptor layout is positional: `legacy_field_index_for_layout` maps
+    // [value, writable, configurable, enumerable, get, set] to indices 0..5.
+    // A short descriptor makes distinct probed names collide onto one slot, which
+    // trips the "cannot mix accessors and value" guard.
+    module.classes.push(class_def("Descriptor", 6, None));
+    module.constants.strings.push("x".to_string());
+
+    // Field names reach `class_metadata` only via reflection data, which is what
+    // `field_name_for_offset` uses to map an offset back to a name.
+    module.reflection = Some(ReflectionData {
+        classes: vec![
+            ClassReflectionData {
+                fields: vec![FieldReflectionData {
+                    name: "x".to_string(),
+                    type_name: "i32".to_string(),
+                    is_readonly: false,
+                    is_static: false,
+                }],
+                method_names: vec![],
+                static_field_names: vec![],
+            },
+            ClassReflectionData {
+                fields: DESCRIPTOR_FIELDS
+                    .iter()
+                    .map(|name| FieldReflectionData {
+                        name: (*name).to_string(),
+                        type_name: "func".to_string(),
+                        is_readonly: false,
+                        is_static: false,
+                    })
+                    .collect(),
+                method_names: vec![],
+                static_field_names: vec![],
+            },
+        ],
+    });
+
+    // The getter, referenced by `MakeClosure`.
+    module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "getter".to_string(),
+        param_count: 0,
+        local_count: 0,
+        code: vec![Opcode::ConstI32 as u8, 42, 0, 0, 0, Opcode::Return as u8],
+    });
+
+    fn push_local(code: &mut Vec<u8>, slot: u16) {
+        code.push(Opcode::LoadLocal as u8);
+        code.extend_from_slice(&slot.to_le_bytes());
+    }
+    fn store_local(code: &mut Vec<u8>, slot: u16) {
+        code.push(Opcode::StoreLocal as u8);
+        code.extend_from_slice(&slot.to_le_bytes());
+    }
+
+    let mut code: Vec<u8> = Vec::new();
+
+    // local 0 = target
+    code.push(Opcode::NewType as u8);
+    code.extend_from_slice(&0u16.to_le_bytes());
+    store_local(&mut code, 0);
+
+    if with_descriptor {
+        // local 1 = descriptor object
+        code.push(Opcode::NewType as u8);
+        code.extend_from_slice(&1u16.to_le_bytes());
+        store_local(&mut code, 1);
+        // local 2 = getter closure over function 1, no captures
+        code.push(Opcode::MakeClosure as u8);
+        code.extend_from_slice(&1u32.to_le_bytes());
+        code.extend_from_slice(&0u16.to_le_bytes());
+        store_local(&mut code, 2);
+        // descriptor.get = closure  (InitObject peeks the object, pops the value).
+        // Index 4 is "get" in the descriptor layout.
+        push_local(&mut code, 1);
+        push_local(&mut code, 2);
+        code.push(Opcode::InitObject as u8);
+        code.extend_from_slice(&4u16.to_le_bytes());
+        // InitObject leaves the descriptor on the stack; drop it so the final
+        // Return sees only the field value.
+        code.push(Opcode::Pop as u8);
+        // Object.defineProperty(target, "x", descriptor). NativeCall's operand is
+        // (u16 nativeId, u8 argCount) -- omitting the count makes the following
+        // opcode byte read as the count and underflow the stack.
+        push_local(&mut code, 0);
+        code.push(Opcode::ConstStr as u8);
+        code.extend_from_slice(&0u16.to_le_bytes());
+        push_local(&mut code, 1);
+        code.push(Opcode::NativeCall as u8);
+        code.extend_from_slice(&OBJECT_DEFINE_PROPERTY.to_le_bytes());
+        code.push(3u8);
+    }
+
+    // return target.x
+    push_local(&mut code, 0);
+    code.push(Opcode::LoadFieldExact as u8);
+    code.extend_from_slice(&0u16.to_le_bytes());
+    code.push(Opcode::Return as u8);
+
+    module.functions.insert(
+        0,
+        Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
+            name: "main".to_string(),
+            param_count: 0,
+            local_count: 3,
+            code,
+        },
+    );
+    module
+}
+
+#[test]
+fn load_field_exact_without_descriptor_reads_the_raw_field() {
+    // Control for the test below. Field 0 is never assigned, so a plain read is
+    // null. This is what the JIT helper does, unconditionally.
+    let mut vm = Vm::new();
+    let result = vm.execute(&accessor_read_module(false)).unwrap();
+    assert!(result.is_null(), "expected null raw field, got {result:?}");
+}
+
+#[test]
+fn load_field_exact_invokes_a_descriptor_getter() {
+    // With a `get` accessor installed, `LoadFieldExact` must invoke the getter and
+    // return 42 -- not the raw slot, which is still null.
+    let mut vm = Vm::new();
+    let result = vm.execute(&accessor_read_module(true)).unwrap();
+    assert_eq!(
+        result,
+        Value::i32(42),
+        "descriptor getter was not invoked; got {result:?}"
+    );
+}
