@@ -829,10 +829,16 @@ pub enum JitInstr {
         object: Reg,
         key_index: u32,
     },
+    // `stack` and `bytecode_offset` are required, not optional: the `Struct`
+    // view cannot be resolved here and returns the interpreter-fallback
+    // sentinel, so the lowering needs somewhere to hand control back to. The
+    // same is true of a malformed key, which raises in the interpreter.
     DynGetKeyed {
         dest: Reg,
         object: Reg,
         index: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     DynSetKeyed {
         object: Reg,

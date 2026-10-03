@@ -659,6 +659,7 @@ impl fmt::Display for JitInstr {
                 dest,
                 object,
                 index,
+                ..
             } => write!(f, "{} = json.index {}[{}]", dest, object, index),
             JitInstr::DynSetKeyed {
                 object,

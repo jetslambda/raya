@@ -1943,6 +1943,7 @@ fn lift_instruction(
 
         // ===== Dynamic keyed operations =====
         Opcode::DynGetKeyed => {
+            let pre_stack = stack.clone_state();
             let index = stack.pop(instr.offset)?;
             let object = stack.pop(instr.offset)?;
             let dest = func.alloc_reg(JitType::Value);
@@ -1950,6 +1951,8 @@ fn lift_instruction(
                 dest,
                 object,
                 index,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
             });
             stack.push(dest);
         }

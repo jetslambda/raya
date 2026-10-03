@@ -1018,7 +1018,7 @@ impl LiftedFunction {
                     });
                 }
             }
-            JitInstr::DynGetKeyed { dest, object, index } => out.push(SmInstr::CallHelper {
+            JitInstr::DynGetKeyed { dest, object, index, .. } => out.push(SmInstr::CallHelper {
                 dest: Some(dest.0),
                 helper: HelperCall::DynGetProp,
                 args: vec![object.0, index.0],
