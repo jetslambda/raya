@@ -1706,11 +1706,15 @@ fn lift_instruction(
             }
         }
         Opcode::Await => {
+            let pre_stack = stack.clone_state();
             let task = stack.pop(instr.offset)?;
             let dest = func.alloc_reg(JitType::Value);
-            func.block_mut(block)
-                .instrs
-                .push(JitInstr::Await { dest, task });
+            func.block_mut(block).instrs.push(JitInstr::Await {
+                dest,
+                task,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
             stack.push(dest);
         }
         Opcode::Yield => {

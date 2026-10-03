@@ -740,9 +740,16 @@ pub enum JitInstr {
         closure: Reg,
         args: Vec<Reg>,
     },
+    /// `stack` and `bytecode_offset` are required, not optional: `Await` has three
+    /// paths, and the two non-suspending ones can still decline — a cancelled,
+    /// pending or unknown task id returns the interpreter-fallback sentinel. Without
+    /// these the lowering arm has no way to hand back to the interpreter, and would
+    /// have to invent a value instead.
     Await {
         dest: Reg,
         task: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     Yield,
     Sleep {

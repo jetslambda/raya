@@ -587,7 +587,7 @@ impl fmt::Display for JitInstr {
                 format_args_list(f, args)?;
                 write!(f, ")")
             }
-            JitInstr::Await { dest, task } => write!(f, "{} = await {}", dest, task),
+            JitInstr::Await { dest, task, .. } => write!(f, "{} = await {}", dest, task),
             JitInstr::Yield => write!(f, "yield"),
             JitInstr::Sleep { duration } => write!(f, "sleep {}", duration),
             JitInstr::NewMutex { dest } => write!(f, "{} = new.mutex", dest),
