@@ -1517,3 +1517,97 @@ fn set_field_message_is_unchanged_by_the_delegation() {
     assert!(object.set_field(0, Value::i32(3)).is_ok());
     assert_eq!(object.get_field(0), Some(Value::i32(3)));
 }
+
+// ---------------------------------------------------------------------------
+// Interpreter RefCell baseline (D4.4)
+//
+// This is the *interpreter* half of the RefCell story. The three JIT lowering arms
+// have direct-lift tests, but until this existed there was nothing to compare them
+// against: no test exercised the interpreter's `NewRefCell`/`LoadRefCell`/
+// `StoreRefCell` handlers at all. A promotion justified by comparing the JIT only
+// against itself is not evidence, so this has to come first.
+//
+// It is also the same gap that let D4.3 ship: the accessor divergence survived
+// because no test in the suite constructed a `defineProperty` case.
+//
+// Note the weak type check these handlers use -- `is_ptr()` only, never a
+// GC-header TypeId (ALY-54). A non-RefCell heap value is therefore accepted and
+// reinterpreted, here as in the JIT helpers. These tests pin the *actual*
+// behaviour, not the behaviour anyone would want.
+
+/// `NewRefCell` pops an initial value and pushes a new cell; `LoadRefCell` pops a
+/// cell and pushes its contents; `StoreRefCell` pops a value then a cell and pushes
+/// nothing (net -2).
+#[test]
+fn refcell_opcodes_roundtrip_through_the_interpreter() {
+    let mut vm = Vm::new();
+
+    let mut code: Vec<u8> = Vec::new();
+    // cell = new RefCell(11); push it back so we can store through it.
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&11i32.to_le_bytes());
+    code.push(Opcode::NewRefCell as u8);
+    // cell.x = 99  (StoreRefCell pops value then cell, pushes nothing)
+    //
+    // The Dup must come BEFORE the value: it duplicates the top of stack, which is
+    // the cell at that point. Duplicating after pushing 99 would copy the value,
+    // and the store would then target that immediate -- which the interpreter's
+    // is_ptr() check rejects.
+    code.push(Opcode::Dup as u8); // [cell, cell]
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&99i32.to_le_bytes()); // [cell, cell, 99]
+    code.push(Opcode::StoreRefCell as u8); // -> [cell], cell now holds 99
+    // return cell's contents
+    code.push(Opcode::LoadRefCell as u8);
+    code.push(Opcode::Return as u8);
+
+    let mut module = Module::new("refcell".to_string());
+    module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "main".to_string(),
+        param_count: 0,
+        local_count: 0,
+        code,
+    });
+
+    let result = vm.execute(&module).unwrap();
+    assert_eq!(
+        result,
+        Value::i32(99),
+        "StoreRefCell must write through to the cell that LoadRefCell reads"
+    );
+}
+
+#[test]
+fn refcell_opcodes_reject_a_non_pointer_receiver() {
+    let mut vm = Vm::new();
+
+    let mut code: Vec<u8> = Vec::new();
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&7i32.to_le_bytes());
+    // LoadRefCell on an immediate: the is_ptr() check must reject it.
+    code.push(Opcode::LoadRefCell as u8);
+    code.push(Opcode::Return as u8);
+
+    let mut module = Module::new("refcell_bad_receiver".to_string());
+    module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "main".to_string(),
+        param_count: 0,
+        local_count: 0,
+        code,
+    });
+
+    let error = vm
+        .execute(&module)
+        .expect_err("a non-pointer RefCell receiver must be a TypeError");
+    let message = error.to_string();
+    assert!(
+        message.contains("Expected RefCell"),
+        "expected the interpreter's RefCell TypeError, got: {message}"
+    );
+}
