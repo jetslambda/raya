@@ -179,7 +179,18 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // against `task.current_closure()` and the JIT has no active-closure
         // model. See the D4.4 spec.
         | Opcode::MakeClosure
-        | Opcode::SetClosureCapture => JitSupport::HelperExact,
+        | Opcode::SetClosureCapture
+        // `LoadCaptured`/`StoreCaptured` read and write the closure of the frame
+        // currently executing, which they get from `Task::current_closure()` — the
+        // innermost entry on `closure_stack`, exactly as the interpreter does.
+        // They are promoted on an interpreter baseline (through the
+        // `Call 0xFFFFFFFF` closure-call path) and a direct-lift test of the
+        // closure body that executes both arms natively. Note that is NOT a
+        // shared-bytecode differential: `Call` routes every callee through
+        // `interpreter_call`, so lifting `main` and calling a closure would run
+        // the body interpreted and prove nothing. See the D4.4 spec.
+        | Opcode::LoadCaptured
+        | Opcode::StoreCaptured => JitSupport::HelperExact,
         Opcode::StoreFieldExact => JitSupport::InterpreterBoundary,
         Opcode::LoadFieldExact
         | Opcode::OptionalFieldExact
@@ -293,6 +304,8 @@ mod tests {
             (Opcode::StoreRefCell, "StoreRefCell"),
             (Opcode::MakeClosure, "MakeClosure"),
             (Opcode::SetClosureCapture, "SetClosureCapture"),
+            (Opcode::LoadCaptured, "LoadCaptured"),
+            (Opcode::StoreCaptured, "StoreCaptured"),
         ] {
             assert!(
                 function_supported_for_jit(&function_with(vec![
@@ -306,15 +319,14 @@ mod tests {
         // The closure opcodes remain excluded: they have no lowering arm at all, so
         // eligibility would be a crash rather than a fast path. Keep them pinned so
         // the family cannot widen by accident.
-        // `MakeClosure` and `SetClosureCapture` moved to the promoted set above.
-        // The other three still have no operand naming the closure they act on, so
-        // they remain excluded: the interpreter resolves them against
-        // `task.current_closure()` and the JIT has no active-closure model.
-        for (op, label) in [
-            (Opcode::LoadCaptured, "LoadCaptured"),
-            (Opcode::StoreCaptured, "StoreCaptured"),
-            (Opcode::CloseVar, "CloseVar"),
-        ] {
+        // Only `CloseVar` remains excluded in this family, and NOT for a JIT
+        // reason. There is no interpreter handler for it at all, and its encoder
+        // method has no caller, so nothing can produce the opcode. "Matching the
+        // interpreter" is undefined for it, so it is excluded until it is either
+        // finished (emission, handler, helper) or deleted. That is a different
+        // situation from its siblings above, which had handlers and were merely
+        // unreachable from native code.
+        for (op, label) in [(Opcode::CloseVar, "CloseVar")] {
             assert!(
                 !function_supported_for_jit(&function_with(vec![
                     op as u8,
@@ -356,6 +368,8 @@ mod tests {
                     | Opcode::StoreRefCell
                     | Opcode::MakeClosure
                     | Opcode::SetClosureCapture
+                    | Opcode::LoadCaptured
+                    | Opcode::StoreCaptured
             );
             let expected = if promoted {
                 JitSupport::HelperExact
