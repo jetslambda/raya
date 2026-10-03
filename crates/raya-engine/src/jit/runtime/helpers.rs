@@ -1716,6 +1716,87 @@ unsafe extern "C" fn helper_value_to_string(value_raw: u64, shared_state: *mut (
 // `Rejected`. The helpers are written and tested first so the semantics are settled
 // before anything can call them — the same order the RefCell helpers used.
 
+/// Bind a method on a nominal object, producing a `BoundMethod`.
+///
+/// This is the body that `7d211cd` removed from `helper_object_get_field`: the
+/// vtable lookup and `BoundMethod` allocation. It was dead there — that helper
+/// constructed its binding as `Field(...)` and matched on it, so the `Method` arm
+/// could never run. It is needed here, with the class-registry lookups actually
+/// wired. The machinery was not wrong, only unreachable and in the wrong place.
+///
+/// The interpreter's handler (`vm/interpreter/opcodes/objects.rs`) does, in order:
+/// `ensure_object_receiver`, then `nominal_type_id_usize`, then
+/// `classes.get_class`, then `class.vtable.get_method`, then build and allocate.
+/// All four failure points return `0` here rather than being raised, because a
+/// leaf helper cannot raise a catchable error; the lowering turns a zero result
+/// into the interpreter boundary exit, which produces the real diagnostic:
+///   * receiver is not an object -> `TypeError("Expected Object receiver for method binding")`
+///   * structural object          -> `TypeError("Cannot bind method on structural object value")`
+///   * unknown nominal type id    -> `RuntimeError("Invalid nominal type id: N")`
+///   * no method in that slot     -> `RuntimeError("Invalid method slot: N for class X")`
+///
+/// The receiver is a live value across the allocation, so it is rooted with
+/// `EphemeralRootScope` — native stack maps are empty.
+///
+/// NOT YET LOWERED. See the note on the RefCell helpers.
+#[allow(dead_code)]
+unsafe extern "C" fn helper_bind_method(
+    object_raw: u64,
+    method_slot: u32,
+    shared_state: *mut (),
+) -> u64 {
+    let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
+        Some(ptr) => &*ptr.as_ptr(),
+        None => return 0,
+    };
+    if bridge.gc.is_null() || bridge.classes.is_null() {
+        return 0;
+    }
+
+    let object_value = Value::from_raw(object_raw);
+    // Deliberately the interpreter's weak `is_ptr()` check, not a TypeId
+    // comparison -- see ALY-54. A stronger check here would diverge.
+    if !object_value.is_ptr() {
+        return 0;
+    }
+    let Some(object_ptr) = object_value.as_ptr::<crate::vm::object::Object>() else {
+        return 0;
+    };
+    let object = &*object_ptr.as_ptr();
+
+    let Some(nominal_type_id) = object.nominal_type_id_usize() else {
+        // Structural object -- the interpreter's "Cannot bind method on structural
+        // object value".
+        return 0;
+    };
+
+    let (func_id, method_module) = {
+        let classes = (&*bridge.classes).read();
+        let Some(class) = classes.get_class(nominal_type_id) else {
+            return 0;
+        };
+        let Some(func_id) = class.vtable.get_method(method_slot as usize) else {
+            return 0;
+        };
+        (func_id, class.module.clone())
+    };
+
+    // Root the receiver across the allocation: it is a live heap value and native
+    // stack maps are empty.
+    let Some(_scope) = EphemeralRootScope::open(bridge, &[object_value]) else {
+        return 0;
+    };
+
+    let bound = crate::vm::object::BoundMethod {
+        receiver: object_value,
+        func_id,
+        module: method_module,
+    };
+    let mut gc = (&*bridge.gc).lock();
+    let ptr = gc.allocate(bound);
+    Value::from_ptr(NonNull::new(ptr.as_ptr()).unwrap()).raw()
+}
+
 /// Read one capture of the closure currently executing.
 ///
 /// The active closure is NOT carried in the JIT frame. It is read from the task,
@@ -2820,6 +2901,72 @@ mod tests {
 
     /// `helper_set_closure_capture`, tested before anything can call it.
     /// `helper_load_captured`, tested before anything can call it. NOT lowered yet.
+    /// `helper_bind_method`, tested before anything can call it. NOT lowered yet.
+    ///
+    /// The failure cases matter more than the success case here: the interpreter
+    /// has four distinct diagnostics for this opcode and every one of them has to
+    /// collapse to a zero return so the boundary exit can raise the right thing.
+    #[test]
+    fn bind_method_helper_binds_and_rejects() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // Register the class first: `register_class` assigns the nominal type
+            // id, and the object must carry that same id.
+            let nominal_type_id = {
+                let mut classes = unsafe { (&*bridge.classes).write() };
+                let mut class = crate::vm::object::Class::new(0, "Point".to_string(), 2);
+                class.module = Some(module.clone());
+                class.vtable.add_method(42);
+                classes.register_class(class)
+            };
+
+            let object_raw = {
+                let mut gc = shared.gc.lock();
+                let mut object =
+                    crate::vm::object::Object::new_nominal(1, nominal_type_id as u32, 2);
+                object.set_field(0, Value::i32(99)).unwrap();
+                let ptr = gc.allocate(object);
+                unsafe { Value::from_ptr(NonNull::new(ptr.as_ptr()).unwrap()).raw() }
+            };
+            {
+                let mut classes = unsafe { (&*bridge.classes).write() };
+                // `register_class` assigns the type id, so build a class carrying the
+                // one we need and register it; the object below uses that id.
+                let mut class = crate::vm::object::Class::new(0, "Point".to_string(), 2);
+                class.module = Some(module.clone());
+                class.vtable.add_method(42);
+                let id = classes.register_class(class);
+            }
+
+            // Success: a BoundMethod carrying the receiver and the resolved func_id.
+            let bound = unsafe { helper_bind_method(object_raw, 0, ss) };
+            assert_ne!(bound, 0, "binding method slot 0 must succeed");
+            let bm = unsafe {
+                let value = Value::from_raw(bound);
+                let ptr = value
+                    .as_ptr::<crate::vm::object::BoundMethod>()
+                    .expect("result must be a BoundMethod");
+                &*ptr.as_ptr()
+            };
+            assert_eq!(bm.func_id, 42, "vtable slot must resolve to the func id");
+            assert_eq!(bm.receiver.raw(), object_raw, "receiver must be carried");
+
+            // Failure cases, each of which is a distinct interpreter diagnostic.
+            assert_eq!(
+                unsafe { helper_bind_method(Value::i32(1).raw(), 0, ss) },
+                0,
+                "a non-pointer receiver must be refused"
+            );
+            assert_eq!(
+                unsafe { helper_bind_method(object_raw, 99, ss) },
+                0,
+                "an unknown method slot must be refused"
+            );
+        });
+    }
+
     #[test]
     fn load_captured_helper_reads_the_active_closure() {
         let (shared, module, code_cache, task) = array_helper_fixture();
