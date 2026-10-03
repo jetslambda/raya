@@ -443,6 +443,52 @@ mod tests {
         }
     }
 
+    /// D4.5 baseline: the whole exception family, pinned explicitly.
+    ///
+    /// All four are `Rejected` today, but for two different reasons, and the test
+    /// records both rather than letting one assertion cover them:
+    ///
+    /// - `Try`, `Throw` and `Rethrow` are on `produces_incorrect_native_results`,
+    ///   so the *lifter* rejects them. For `Throw`/`Rethrow` the recorded defect is
+    ///   that the throw and deopt helpers panic instead of propagating; for `Try`
+    ///   the lifter arm is a placeholder that computes catch/finally targets into
+    ///   unused bindings.
+    /// - `EndTry` is **not** on that list. Its lifter arm is correct and complete
+    ///   (`JitInstr::EndTry`, no stack effect, matching the handler), so it is held
+    ///   out only by the `Rejected` catch-all here.
+    ///
+    /// That distinction is the point. `EndTry` being excluded by accident is how
+    /// `BindMethod` went wrong, so it is pinned explicitly: a future promotion has
+    /// to be a visible act with evidence behind it, not a side effect of the
+    /// table's default.
+    #[test]
+    fn exception_family_is_rejected_until_the_throw_path_propagates() {
+        for op in [
+            Opcode::Throw,
+            Opcode::Try,
+            Opcode::EndTry,
+            Opcode::Rethrow,
+        ] {
+            assert_eq!(jit_support(op), JitSupport::Rejected, "{op:?}");
+            assert!(
+                !opcode_supported_for_jit(op),
+                "{op:?} must not be selectable"
+            );
+        }
+
+        for op in [Opcode::Try, Opcode::Throw, Opcode::Rethrow] {
+            assert!(
+                produces_incorrect_native_results(op),
+                "{op:?} must stay lifter-rejected until its throw path propagates"
+            );
+        }
+
+        assert!(
+            !produces_incorrect_native_results(Opcode::EndTry),
+            "EndTry lifts correctly, so it has no lifter-level defect; it is excluded              by the Rejected catch-all instead, and this test records that rather              than leaving it implicit"
+        );
+    }
+
     #[test]
     fn known_wrong_lowerings_are_rejected() {
         for op in [
