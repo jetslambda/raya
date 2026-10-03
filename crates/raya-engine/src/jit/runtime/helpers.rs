@@ -1719,41 +1719,19 @@ unsafe extern "C" fn helper_object_get_field(
     let _ = bridge;
     let _ = module_ptr;
     let _ = func_id;
-    let binding = StructuralSlotBinding::Field(expected_slot as usize);
+    let _ = object_val;
 
-    match binding {
-        StructuralSlotBinding::Field(slot) => object.get_field(slot).unwrap_or(Value::null()).raw(),
-        StructuralSlotBinding::Method(method_slot) => {
-            let Some(nominal_type_id) = object.nominal_type_id_usize() else {
-                return Value::null().raw();
-            };
-            let (func_id, method_module) = {
-                let classes = (&*bridge.classes).read();
-                let Some(class) = classes.get_class(nominal_type_id) else {
-                    return Value::null().raw();
-                };
-                let Some(fid) = class.vtable.get_method(method_slot) else {
-                    return Value::null().raw();
-                };
-                (fid, class.module.clone())
-            };
-
-            let bound = BoundMethod {
-                receiver: object_val,
-                func_id,
-                module: method_module,
-            };
-            let mut gc = (&*bridge.gc).lock();
-            let bm_ptr = gc.allocate(bound);
-            Value::from_ptr(NonNull::new(bm_ptr.as_ptr()).unwrap()).raw()
-        }
-        StructuralSlotBinding::Dynamic(key) => object
-            .dyn_map()
-            .and_then(|dyn_map| dyn_map.get(&key).copied())
-            .unwrap_or(Value::null())
-            .raw(),
-        StructuralSlotBinding::Missing => Value::null().raw(),
-    }
+    // A raw field read, matching the interpreter's `LoadFieldExact`. See
+    // `helper_object_set_field` for why there is no adapter resolution.
+    //
+    // The `Method`, `Dynamic` and `Missing` arms this used to carry were
+    // unreachable, since `binding` was constructed as `Field`. The `Method` arm
+    // also allocated a `BoundMethod` under the GC lock, which a plain field read
+    // has no reason to do. Gone.
+    object
+        .get_field(expected_slot as usize)
+        .unwrap_or(Value::null())
+        .raw()
 }
 
 /// Exact field store.
@@ -1789,27 +1767,20 @@ unsafe extern "C" fn helper_object_set_field(
     let _ = bridge;
     let _ = module_ptr;
     let _ = func_id;
-    let binding = StructuralSlotBinding::Field(expected_slot as usize);
-    match binding {
-        StructuralSlotBinding::Field(slot) => {
-            object.set_field(slot, Value::from_raw(value_raw)).is_ok()
-        }
-        StructuralSlotBinding::Dynamic(key) => {
-            // `ensure_dyn_map` allocates, and native stack maps are empty, so a
-            // collection here would not see these operands. Root the receiver and
-            // the incoming value across the window, and fail closed if the root
-            // set is unavailable: the caller must be able to treat a false
-            // return as "nothing was mutated".
-            let value = Value::from_raw(value_raw);
-            let Some(_scope) = EphemeralRootScope::open(bridge, &[object_val, value])
-            else {
-                return false;
-            };
-            object.ensure_dyn_map().insert(key, value);
-            true
-        }
-        StructuralSlotBinding::Method(_) | StructuralSlotBinding::Missing => false,
-    }
+    // A raw field write, matching the interpreter's `StoreFieldExact`, which also
+    // constructs `StructuralSlotBinding::Field(field_offset)` directly. There is
+    // deliberately no adapter resolution here: the opcode is
+    // `InterpreterBoundary` because its handler can invoke a descriptor setter as
+    // a callable frame, which a leaf helper cannot express, so a faithful
+    // implementation is not available to write.
+    //
+    // This previously carried `Dynamic`, `Method` and `Missing` arms behind a
+    // `match` on a value constructed as `Field` one line above. All three were
+    // unreachable, and the `Dynamic` arm carried an allocation the helper had no
+    // business performing. Removing them makes the helper honest about what it is.
+    object
+        .set_field(expected_slot as usize, Value::from_raw(value_raw))
+        .is_ok()
 }
 
 unsafe extern "C" fn helper_object_implements_shape(
