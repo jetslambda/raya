@@ -1346,6 +1346,18 @@ impl JitFunction {
         id
     }
 
+    /// The block beginning at a bytecode offset, or `None` if there is none.
+    ///
+    /// Used to resolve `Try` handler targets. Returns `None` rather than
+    /// defaulting to the entry block, so an unresolvable target is an error at the
+    /// call site instead of a jump into unrelated code.
+    pub fn block_at_offset(&self, offset: usize) -> Option<JitBlockId> {
+        self.blocks
+            .iter()
+            .find(|block| block.start_offset == offset)
+            .map(|block| block.id)
+    }
+
     /// A block's start offset, or `None` when it was never recorded.
     ///
     /// Returning `Option` rather than the raw value means a consumer cannot read

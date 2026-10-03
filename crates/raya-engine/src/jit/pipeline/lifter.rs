@@ -21,6 +21,13 @@ pub enum LiftError {
     StackUnderflow { offset: usize },
     #[error("Unsupported opcode {opcode:?} at offset {offset}")]
     UnsupportedOpcode { opcode: Opcode, offset: usize },
+    /// A `Try` handler target that maps to no lifted block.
+    ///
+    /// Deliberately an error rather than a default. Defaulting to `BlockId(0)` —
+    /// which `cfg.rs` does in places — turns a missing target into a jump into the
+    /// entry block, which is silent miscompilation rather than a build failure.
+    #[error("Try handler target at bytecode offset {offset} maps to no block")]
+    UnresolvedTryTarget { offset: usize },
 }
 
 /// Abstract stack state during lifting
@@ -1876,17 +1883,37 @@ fn lift_instruction(
                 finally_offset,
             } = instr.operands
             {
-                let _catch_target = ((instr.offset as i64) + (catch_offset as i64)) as usize;
-                let _finally_target = if finally_offset > 0 {
-                    Some(((instr.offset as i64) + (finally_offset as i64)) as usize)
+                // THE TWO BASES DIFFER, and that is the whole trap. The
+                // interpreter computes each target with `*ip` as it stands at that
+                // moment: `catch_abs` after reading only `catch_rel`
+                // (`instr.offset` + 1 opcode byte + 4 operand bytes), and
+                // `finally_abs` after reading both (another 4 bytes).
+                //
+                // Unifying them puts a handler four bytes out. See the D4.5 spec —
+                // several turns were lost to exactly this.
+                let catch_base = instr.offset + 1 + 4;
+                let catch_abs = catch_base.wrapping_add_signed(catch_offset as isize) as usize;
+                let catch_block = func.block_at_offset(catch_abs).ok_or(
+                    LiftError::UnresolvedTryTarget { offset: catch_abs },
+                )?;
+
+                // `finally_rel > 0` selects a finally target; anything else means
+                // there is none. Matching the interpreter's test exactly.
+                let finally_block = if finally_offset > 0 {
+                    let finally_base = instr.offset + 1 + 8;
+                    let finally_abs = finally_base.wrapping_add_signed(finally_offset as isize) as usize;
+                    Some(
+                        func.block_at_offset(finally_abs).ok_or(LiftError::UnresolvedTryTarget {
+                            offset: finally_abs,
+                        })?,
+                    )
                 } else {
                     None
                 };
-                // We'd need offset_to_block mapping here, but for now emit a simplified version
-                // The catch/finally blocks will be resolved later
+
                 func.block_mut(block).instrs.push(JitInstr::SetupTry {
-                    catch_block: JitBlockId(0), // placeholder
-                    finally_block: None,
+                    catch_block,
+                    finally_block,
                 });
             }
         }
