@@ -693,6 +693,21 @@ pub enum JitInstr {
         bytecode_offset: u32,
     },
 
+    // ===== Bound methods =====
+    //
+    // Pops the receiver, pushes a `BoundMethod`. The stack effect is net zero but
+    // the *value* on top changes, which is why the lifter must model it rather
+    // than skip it: the previous arm consumed no operand and touched no stack, so
+    // the lifted `ip` never advanced past the operand and every instruction after
+    // it was misaligned.
+    BindMethod {
+        dest: Reg,
+        object: Reg,
+        method_slot: u16,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
+    },
+
     // ===== RefCell (closure-captured mutable variables) =====
     //
     // `stack` and `bytecode_offset` exist so a lowering arm can call
@@ -1006,7 +1021,9 @@ impl JitInstr {
             }
 
             // Closures
-            JitInstr::MakeClosure { dest, .. } | JitInstr::LoadCaptured { dest, .. } => Some(*dest),
+            JitInstr::MakeClosure { dest, .. }
+            | JitInstr::LoadCaptured { dest, .. }
+            | JitInstr::BindMethod { dest, .. } => Some(*dest),
 
             // RefCell
             JitInstr::NewRefCell { dest, .. } | JitInstr::LoadRefCell { dest, .. } => Some(*dest),

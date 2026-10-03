@@ -526,6 +526,12 @@ impl fmt::Display for JitInstr {
                 ..
             } => write!(f, "set.capture {}.{}, {}", closure, index, value),
             JitInstr::CloseVar { index, .. } => write!(f, "close.var {}", index),
+            JitInstr::BindMethod {
+                dest,
+                object,
+                method_slot,
+                ..
+            } => write!(f, "{} = bind.method {}.{}", dest, object, method_slot),
 
             // RefCell
             JitInstr::NewRefCell {

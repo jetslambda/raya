@@ -235,7 +235,18 @@ pub fn opcode_supported_for_jit(opcode: Opcode) -> bool {
 ///
 /// - `IPow`/`FPow`: lowered as multiplication (S1)
 /// - `FMod`: returned the left operand unchanged (S1)
-/// - `BindMethod`: emitted nothing, corrupting the lifted stack model
+/// - `BindMethod`: **removed 2026-10-03.** The lifter's arm used to be an empty
+///   body, so it consumed no operand and touched no stack while the interpreter read
+///   the operand, popped the receiver and pushed a `BoundMethod` — leaving the
+///   lifted `ip` un-advanced and every later instruction misaligned. The arm now
+///   models that effect, so the opcode no longer belongs in this list.
+///
+///   It is still **not selectable**: there is no `helper_bind_method` and no
+///   Cranelift arm yet, so `jit_support` keeps it `Rejected` and a function
+///   containing it is never a compilation candidate. Lifting now produces a correct
+///   `JitInstr::BindMethod`; lowering it would fail loudly with
+///   `UnsupportedInstruction`, which is the fail-closed shape, rather than
+///   silently mis-executing.
 /// - `GetArgCount`/`LoadArgLocal`: no-op / constant zero (S2)
 /// - `Try`/`Rethrow`/`Throw`: placeholder handler installation; throw and
 ///   deopt helpers panic instead of propagating
@@ -248,7 +259,6 @@ pub fn produces_incorrect_native_results(opcode: Opcode) -> bool {
             | Opcode::Imod
             | Opcode::Fpow
             | Opcode::Fmod
-            | Opcode::BindMethod
             | Opcode::GetArgCount
             | Opcode::LoadArgLocal
             | Opcode::Try
@@ -384,13 +394,20 @@ mod tests {
             );
         }
 
-        // `BindMethod` stays out. Its reason is different and stronger: the lifter
-        // emits nothing for it, so a function containing one would execute natively
-        // with a stack model that disagrees with the interpreter's. That corrupts
-        // everything downstream, so it must not be promoted until the lifter is
-        // fixed and proven — not merely until a helper exists.
-        assert!(produces_incorrect_native_results(Opcode::BindMethod));
-        assert!(!opcode_supported_for_jit(Opcode::BindMethod));
+        // `BindMethod` left `produces_incorrect_native_results` when its lifter arm
+        // was fixed (2026-10-03). It is still NOT selectable, for a different
+        // reason: no helper and no Cranelift arm exist yet, so lifting it would
+        // produce a correct instruction that lowering cannot compile. That is the
+        // fail-closed shape — a loud UnsupportedInstruction rather than a silently
+        // miscompiled function — so both facts are asserted separately.
+        assert!(
+            !produces_incorrect_native_results(Opcode::BindMethod),
+            "BindMethod must no longer be lifter-rejected; its arm now models the stack effect"
+        );
+        assert!(
+            !opcode_supported_for_jit(Opcode::BindMethod),
+            "BindMethod must stay unselectable until a helper and a lowering arm exist"
+        );
     }
 
     #[test]
@@ -424,7 +441,6 @@ mod tests {
             Opcode::Ipow,
             Opcode::Fpow,
             Opcode::Fmod,
-            Opcode::BindMethod,
             Opcode::GetArgCount,
             Opcode::LoadArgLocal,
             Opcode::Try,

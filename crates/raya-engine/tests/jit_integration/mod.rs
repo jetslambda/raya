@@ -5793,3 +5793,61 @@ fn captured_opcodes_execute_natively_when_the_body_is_lifted_directly() {
          LoadCaptured must read it back; 7 means the store never landed"
     );
 }
+
+
+/// `BindMethod`'s lifter arm is no longer empty.
+///
+/// The interpreter reads the u16 operand, pops the receiver and pushes a
+/// `BoundMethod`. The old arm did none of that, so the lifted `ip` never advanced
+/// past the operand and the stack model disagreed with the interpreter from that
+/// instruction onward — which is why the opcode was rejected at the lifter rather
+/// than merely missing a helper.
+///
+/// This asserts the observable consequence: the lifted stream contains a
+/// `BindMethod` that consumes the operand, and the instruction AFTER it is the
+/// `Return` rather than something misaligned.
+#[test]
+fn bind_method_lifter_keeps_the_stack_model_in_step() {
+    use raya_engine::jit::ir::instr::JitInstr;
+
+    // BindMethod slot 0, then Return. The object operand comes from local 0.
+    let mut code: Vec<u8> = Vec::new();
+    emit_load_local(&mut code, 0);
+    code.push(Opcode::BindMethod as u8);
+    code.extend_from_slice(&0u16.to_le_bytes());
+    emit(&mut code, Opcode::Return);
+
+    let module = finalize_module(make_module(code, 0, 1));
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let instrs: Vec<&JitInstr> = jit_func
+        .blocks
+        .iter()
+        .flat_map(|block| block.instrs.iter())
+        .collect();
+
+    let at = instrs
+        .iter()
+        .position(|instr| matches!(instr, JitInstr::BindMethod { .. }))
+        .expect("lifted IR must contain BindMethod; an empty arm is exactly the defect");
+
+    // It must carry the operand the bytecode declared, and it must be followed by
+    // the Return rather than by an instruction from the wrong offset.
+    match instrs[at] {
+        JitInstr::BindMethod { method_slot, .. } => assert_eq!(
+            *method_slot, 0,
+            "the operand must be consumed, not left for the next instruction"
+        ),
+        other => panic!("expected BindMethod, got {other:?}"),
+    }
+    // `Return` is a lifter terminator and emits no instruction, so a correctly
+    // lifted stream ENDS with BindMethod. Anything after it would mean the operand
+    // was not consumed and the stream is misaligned.
+    assert_eq!(
+        at + 1,
+        instrs.len(),
+        "BindMethod must be the last lifted instruction; found {:?} after it — the \
+         operand was not consumed",
+        &instrs[at + 1..]
+    );
+}

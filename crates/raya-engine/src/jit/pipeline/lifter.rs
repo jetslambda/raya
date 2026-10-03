@@ -1958,7 +1958,25 @@ fn lift_instruction(
 
         // ===== Bound Methods =====
         Opcode::BindMethod => {
-            // Falls back to interpreter — bound method creation requires GC allocation
+            if let Operands::U16(method_slot) = instr.operands {
+                // Previously this arm was empty. The interpreter reads the operand,
+                // pops the receiver and pushes a `BoundMethod`, so an arm that does
+                // nothing leaves the lifted `ip` un-advanced and the stack model
+                // disagreeing with the interpreter from this instruction onward.
+                // Modelling the effect here is what makes a lowering arm possible
+                // at all; the allocation itself happens in the helper.
+                let pre_stack = stack.clone_state();
+                let object = stack.pop(instr.offset)?;
+                let dest = func.alloc_reg(JitType::Ptr);
+                func.block_mut(block).instrs.push(JitInstr::BindMethod {
+                    dest,
+                    object,
+                    method_slot,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
+                });
+                stack.push(dest);
+            }
         }
     }
 
