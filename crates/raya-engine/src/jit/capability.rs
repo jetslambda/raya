@@ -169,7 +169,17 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // interpreter-fallback sentinel so the interpreter raises the real error.
         | Opcode::NewRefCell
         | Opcode::LoadRefCell
-        | Opcode::StoreRefCell => JitSupport::HelperExact,
+        | Opcode::StoreRefCell
+        // Closures (D4.4). Same three-part evidence as the RefCell family:
+        // interpreter baseline, direct-lift tests for each arm, and a
+        // differential running the SAME bytecode through both engines. The two
+        // here are the only closure opcodes that can be promoted at all --
+        // `LoadCaptured`, `StoreCaptured` and `CloseVar` still have no operand
+        // naming the closure they act on, because the interpreter resolves them
+        // against `task.current_closure()` and the JIT has no active-closure
+        // model. See the D4.4 spec.
+        | Opcode::MakeClosure
+        | Opcode::SetClosureCapture => JitSupport::HelperExact,
         Opcode::StoreFieldExact => JitSupport::InterpreterBoundary,
         Opcode::LoadFieldExact
         | Opcode::OptionalFieldExact
@@ -281,6 +291,8 @@ mod tests {
             (Opcode::NewRefCell, "NewRefCell"),
             (Opcode::LoadRefCell, "LoadRefCell"),
             (Opcode::StoreRefCell, "StoreRefCell"),
+            (Opcode::MakeClosure, "MakeClosure"),
+            (Opcode::SetClosureCapture, "SetClosureCapture"),
         ] {
             assert!(
                 function_supported_for_jit(&function_with(vec![
@@ -294,11 +306,13 @@ mod tests {
         // The closure opcodes remain excluded: they have no lowering arm at all, so
         // eligibility would be a crash rather than a fast path. Keep them pinned so
         // the family cannot widen by accident.
+        // `MakeClosure` and `SetClosureCapture` moved to the promoted set above.
+        // The other three still have no operand naming the closure they act on, so
+        // they remain excluded: the interpreter resolves them against
+        // `task.current_closure()` and the JIT has no active-closure model.
         for (op, label) in [
-            (Opcode::MakeClosure, "MakeClosure"),
             (Opcode::LoadCaptured, "LoadCaptured"),
             (Opcode::StoreCaptured, "StoreCaptured"),
-            (Opcode::SetClosureCapture, "SetClosureCapture"),
             (Opcode::CloseVar, "CloseVar"),
         ] {
             assert!(
@@ -337,7 +351,11 @@ mod tests {
         ] {
             let promoted = matches!(
                 op,
-                Opcode::NewRefCell | Opcode::LoadRefCell | Opcode::StoreRefCell
+                Opcode::NewRefCell
+                    | Opcode::LoadRefCell
+                    | Opcode::StoreRefCell
+                    | Opcode::MakeClosure
+                    | Opcode::SetClosureCapture
             );
             let expected = if promoted {
                 JitSupport::HelperExact
