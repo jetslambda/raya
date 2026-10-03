@@ -218,6 +218,7 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         load_captured: helper_load_captured,
         store_captured: helper_store_captured,
         bind_method: helper_bind_method,
+        await_task: helper_await_task,
     }
 }
 
@@ -1723,7 +1724,6 @@ unsafe extern "C" fn helper_value_to_string(value_raw: u64, shared_state: *mut (
 /// `InterpreterBoundary`. See the D4.6 spec.
 ///
 /// NOT YET LOWERED. See the note on the RefCell helpers.
-#[allow(dead_code)]
 unsafe extern "C" fn helper_await_task(value_raw: u64, shared_state: *mut ()) -> u64 {
     let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
         Some(ptr) => &*ptr.as_ptr(),

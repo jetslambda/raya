@@ -170,6 +170,13 @@ pub const HELPER_ARRAY_POP_OFFSET: i32 =
 pub const HELPER_ARRAY_LEN_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, array_len) as i32;
 
+/// Byte offset of the await helper in [`RuntimeContext`].
+///
+/// Returns the value unchanged for a non-task, the task's result once completed,
+/// or the interpreter-fallback sentinel when the interpreter must raise or suspend.
+pub const HELPER_AWAIT_TASK_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, await_task) as i32;
+
 /// Byte offset of the RefCell-load helper in [`RuntimeContext`].
 ///
 /// Appended after the array helpers: `RuntimeHelperTable` is layout-sensitive
@@ -309,6 +316,9 @@ pub struct RuntimeHelperTable {
     pub store_captured: unsafe extern "C" fn(u32, u64, *mut ()) -> i8,
     /// Method binding: (object, method_slot, shared_state) -> BoundMethod, or null
     pub bind_method: unsafe extern "C" fn(u64, u32, *mut ()) -> u64,
+    /// Await: (value, shared_state) -> value unchanged / task result, or the
+    /// interpreter-fallback sentinel.
+    pub await_task: unsafe extern "C" fn(u64, *mut ()) -> u64,
 }
 
 /// Validate the boxed arguments at a JIT entry boundary against a verified
