@@ -211,7 +211,15 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // Task registered in shared.tasks, which the interpreter cannot set up for
         // the same module, and path 3 is unreachable from native code by design
         // because JitSuspendReason has no AwaitTask variant.
-        | Opcode::Await => JitSupport::HelperExact,
+        | Opcode::Await
+        // D4.7: exact for the Str and Arr views, where the helper either computes
+        // the answer or declines via the fallback sentinel. The Struct view NEEDS
+        // `structural_object_shapes`, which the bridge does not carry, so it
+        // declines rather than guessing -- and declining is a deopt, not a wrong
+        // value. Engine-level Arr evidence is still gated on the array family
+        // (all Rejected under D4.2), so the differential covers Str only and says
+        // so in its own doc comment.
+        | Opcode::DynGetKeyed => JitSupport::HelperExact,
         Opcode::StoreFieldExact => JitSupport::InterpreterBoundary,
         Opcode::LoadFieldExact
         | Opcode::OptionalFieldExact
