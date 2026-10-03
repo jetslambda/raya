@@ -5347,3 +5347,53 @@ fn refcell_interpreter_and_jit_agree_on_the_same_bytecode() {
     );
     assert_eq!(decode_i32(raw), 99, "both engines should have produced 99");
 }
+
+
+/// The interpreter polls a safepoint at the start of `MakeClosure`, before it
+/// allocates. Compiled code has no other opportunity to offer the collector a stop
+/// point at that allocation, so the lifter must emit a matching `GcSafepoint`.
+///
+/// This is the one change on this milestone that a compiler cannot catch: a
+/// *missing* safepoint compiles perfectly and every existing test still passes,
+/// because nothing downstream exercises `MakeClosure` natively yet. Asserting on the
+/// lifted IR is the only way to hold it.
+#[test]
+fn make_closure_emits_a_safepoint_before_allocating() {
+    use raya_engine::jit::ir::instr::JitInstr;
+
+    // MakeClosure func_index=0, capture_count=0; then Return.
+    let mut code = Vec::new();
+    code.push(Opcode::MakeClosure as u8);
+    code.extend_from_slice(&0u32.to_le_bytes());
+    code.extend_from_slice(&0u16.to_le_bytes());
+    emit(&mut code, Opcode::Return);
+
+    let module = finalize_module(make_module(code, 0, 0));
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let instrs: Vec<&JitInstr> = jit_func
+        .blocks
+        .iter()
+        .flat_map(|block| block.instrs.iter())
+        .collect();
+
+    let make_closure_at = instrs
+        .iter()
+        .position(|instr| matches!(instr, JitInstr::MakeClosure { .. }))
+        .expect("lifted IR must contain MakeClosure");
+    let safepoint_at = instrs
+        .iter()
+        .position(|instr| matches!(instr, JitInstr::GcSafepoint { .. }));
+
+    assert!(
+        safepoint_at.is_some(),
+        "MakeClosure allocates and the interpreter polls a safepoint first, but the \
+         lifter emitted no GcSafepoint"
+    );
+    assert!(
+        safepoint_at < Some(make_closure_at),
+        "GcSafepoint must come BEFORE MakeClosure: the interpreter polls before \
+         allocating, so the stop point has to precede the allocation \
+         (safepoint at {safepoint_at:?}, MakeClosure at {make_closure_at})"
+    );
+}

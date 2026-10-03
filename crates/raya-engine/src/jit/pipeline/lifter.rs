@@ -1554,6 +1554,14 @@ fn lift_instruction(
                     captures.push(stack.pop(instr.offset)?);
                 }
                 captures.reverse();
+                // The interpreter polls a safepoint here before allocating
+                // (vm/interpreter/opcodes/closures.rs). Emit the matching
+                // `GcSafepoint`, as the `NewType` arm does for `NewObject` -- a
+                // collection must be able to stop the world at this allocation,
+                // and compiled code has no other place to offer it.
+                func.block_mut(block).instrs.push(JitInstr::GcSafepoint {
+                    bytecode_offset: instr.offset as u32,
+                });
                 let dest = func.alloc_reg(JitType::Ptr);
                 func.block_mut(block).instrs.push(JitInstr::MakeClosure {
                     dest,
