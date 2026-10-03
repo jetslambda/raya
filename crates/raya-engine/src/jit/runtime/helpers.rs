@@ -1760,6 +1760,48 @@ unsafe extern "C" fn helper_load_captured(index: u32, shared_state: *mut ()) -> 
     }
 }
 
+/// Write one capture of the closure currently executing.
+///
+/// Reads the active closure from the task via `Task::current_closure()`, exactly as
+/// the interpreter does and as `helper_load_captured` does — the innermost closure
+/// on `closure_stack`, which is faithful to the handler including its edge cases.
+///
+/// Both interpreter failure modes return `JIT_STORE_FALLBACK` rather than being
+/// raised, since a leaf helper cannot raise a catchable error:
+///   * no active closure  -> `RuntimeError("StoreCaptured without active closure")`
+///   * capture index high -> the `set_captured` error string, a `RuntimeError`
+///
+/// The check happens before the write, so a fallback return means the closure was
+/// not modified and an interpreter fallback cannot double-apply the store.
+///
+/// NOT YET LOWERED. See the note on the RefCell helpers.
+#[allow(dead_code)]
+unsafe extern "C" fn helper_store_captured(
+    index: u32,
+    value_raw: u64,
+    shared_state: *mut (),
+) -> i8 {
+    let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
+        Some(ptr) => &*ptr.as_ptr(),
+        None => return JIT_STORE_FALLBACK,
+    };
+    if bridge.task_arc.is_null() {
+        return JIT_STORE_FALLBACK;
+    }
+    let Some(closure_val) = (&*bridge.task_arc).current_closure() else {
+        // Matches the interpreter's "StoreCaptured without active closure".
+        return JIT_STORE_FALLBACK;
+    };
+    let Some(ptr) = closure_val.as_ptr::<crate::vm::object::Closure>() else {
+        return JIT_STORE_FALLBACK;
+    };
+    let closure = &mut *ptr.as_ptr();
+    match closure.set_captured(index as usize, Value::from_raw(value_raw)) {
+        Ok(()) => JIT_STORE_SUCCESS,
+        Err(_) => JIT_STORE_FALLBACK,
+    }
+}
+
 /// Patch one capture slot of an existing closure.
 ///
 /// This is how recursive closures are wired up: `MakeClosure` runs first, then
@@ -2817,6 +2859,54 @@ mod tests {
             assert_eq!(
                 unsafe { helper_load_captured(0, ss) },
                 JIT_INTERPRETER_FALLBACK_SENTINEL
+            );
+        });
+    }
+
+    /// `helper_store_captured`, tested before anything can call it. NOT lowered yet.
+    #[test]
+    fn store_captured_helper_writes_through_the_active_closure() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            let closure_raw = {
+                let mut gc = shared.gc.lock();
+                let closure =
+                    crate::vm::object::Closure::new(0, vec![Value::i32(7), Value::i32(8)]);
+                let ptr = gc.allocate(closure);
+                unsafe { Value::from_ptr(NonNull::new(ptr.as_ptr()).unwrap()).raw() }
+            };
+            task.push_closure(unsafe { Value::from_raw(closure_raw) });
+
+            assert_eq!(
+                unsafe { helper_store_captured(0, Value::i32(42).raw(), ss) },
+                JIT_STORE_SUCCESS
+            );
+            // The write must be visible through the load helper, which reads the
+            // same active closure.
+            assert_eq!(
+                unsafe { helper_load_captured(0, ss) },
+                Value::i32(42).raw()
+            );
+
+            // Out of range falls back without mutating.
+            assert_eq!(
+                unsafe { helper_store_captured(9, Value::i32(1).raw(), ss) },
+                JIT_STORE_FALLBACK
+            );
+            assert_eq!(
+                unsafe { helper_load_captured(1, ss) },
+                Value::i32(8).raw(),
+                "a rejected store must leave the capture untouched"
+            );
+
+            // With no active closure the interpreter raises, so the helper refuses
+            // rather than writing to whatever happens to be on the stack.
+            task.pop_closure();
+            assert_eq!(
+                unsafe { helper_store_captured(0, Value::i32(1).raw(), ss) },
+                JIT_STORE_FALLBACK
             );
         });
     }
