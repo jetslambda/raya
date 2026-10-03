@@ -1733,3 +1733,80 @@ fn set_closure_capture_patches_what_the_body_sees() {
         "SetClosureCapture must be visible to the closure body; 0 means it never landed"
     );
 }
+
+
+/// `LoadCaptured` and `StoreCaptured` need a baseline shape nothing else on this
+/// milestone did: they are only meaningful **inside** a closure body. A flat
+/// bytecode program cannot observe them, because a closure's captures are read
+/// solely through `LoadCaptured`, which needs an active closure, and the only way
+/// to have one is to call into the closure.
+///
+/// So the module is `main` plus a body that stores its argument into its own
+/// capture and reads it back:
+///
+/// ```text
+/// main:  ConstI32 7; MakeClosure func=1 captures=[7]; ConstI32 42;
+///        Call 0xFFFFFFFF arg_count=1; Return
+/// body:  StoreCaptured 0; LoadCaptured 0; Return
+/// ```
+///
+/// Expecting 42 rather than the captured 7 is what makes it discriminating: if
+/// `StoreCaptured` did not land, the body would read back 7, and if
+/// `LoadCaptured` were broken it would not observe the store at all.
+#[test]
+fn load_and_store_captured_are_observable_only_inside_a_closure() {
+    use raya_engine::vm::interpreter::Vm;
+
+    let mut module = Module::new("captured_baseline".to_string());
+
+    // functions[0] is main; the VM's entry point must be named "main".
+    module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "closure_body".to_string(),
+        param_count: 1,
+        local_count: 1,
+        code: vec![
+            Opcode::StoreCaptured as u8, 0, 0, // capture 0 <- local 0 (the argument)
+            Opcode::LoadCaptured as u8, 0, 0, // push capture 0 back
+            Opcode::Return as u8,
+        ],
+    });
+
+    let mut main_code: Vec<u8> = Vec::new();
+    main_code.push(Opcode::ConstI32 as u8);
+    main_code.extend_from_slice(&7i32.to_le_bytes()); // initial capture
+    main_code.push(Opcode::MakeClosure as u8);
+    main_code.extend_from_slice(&1u32.to_le_bytes()); // func_index = closure_body
+    main_code.extend_from_slice(&1u16.to_le_bytes()); // capture_count = 1
+    main_code.push(Opcode::ConstI32 as u8);
+    main_code.extend_from_slice(&42i32.to_le_bytes()); // the argument
+    main_code.push(Opcode::Call as u8);
+    main_code.extend_from_slice(&CLOSURE_CALL.to_le_bytes());
+    main_code.extend_from_slice(&1u16.to_le_bytes()); // arg_count = 1
+    main_code.push(Opcode::Return as u8);
+
+    module.functions.insert(
+        0,
+        Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
+            name: "main".to_string(),
+            param_count: 0,
+            local_count: 0,
+            code: main_code,
+        },
+    );
+
+    let mut vm = Vm::new();
+    let result = vm.execute(&module).expect("captured baseline must run");
+    assert_eq!(
+        result,
+        Value::i32(42),
+        "StoreCaptured must write the argument into the capture and LoadCaptured \
+         must read it back; 7 means the store never landed, null means neither \
+         opcode reached the closure's own captures"
+    );
+}
