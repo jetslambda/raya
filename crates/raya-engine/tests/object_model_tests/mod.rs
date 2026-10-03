@@ -1137,3 +1137,184 @@ fn load_field_exact_invokes_a_descriptor_getter() {
         "descriptor getter was not invoked; got {result:?}"
     );
 }
+
+/// Builds a module where `main` (function 0) optionally installs a `set`
+/// accessor on field 0 ("x") of a two-field target, stores 99 into it, then reads
+/// field 1 ("sink"). Function 1 is the setter, which captures the target and writes
+/// the constant 7 into the sink field.
+///
+/// Field 1 exists so the setter has somewhere to write that is *not* itself
+/// accessor-backed: a setter writing field 0 would re-enter the setter.
+///
+/// Returns `sink`. With the accessor, the setter runs and the sink is 7. Without
+/// it, the store lands in field 0 and the sink is never touched, so it is null.
+/// The stored value (99) therefore never appears, which is what makes the pair
+/// discriminating rather than merely asserting two different constants.
+fn accessor_setter_module(with_descriptor: bool) -> Module {
+    use raya_engine::compiler::bytecode::{
+        ClassReflectionData, FieldReflectionData, ReflectionData,
+    };
+
+    fn push_local(code: &mut Vec<u8>, slot: u16) {
+        code.push(Opcode::LoadLocal as u8);
+        code.extend_from_slice(&slot.to_le_bytes());
+    }
+    fn store_local(code: &mut Vec<u8>, slot: u16) {
+        code.push(Opcode::StoreLocal as u8);
+        code.extend_from_slice(&slot.to_le_bytes());
+    }
+
+    let mut module = Module::new("accessor_setter".to_string());
+    module.classes.push(class_def("Holder", 2, None));
+    module.classes.push(class_def("Descriptor", 6, None));
+    module.constants.strings.push("x".to_string());
+
+    module.reflection = Some(ReflectionData {
+        classes: vec![
+            ClassReflectionData {
+                fields: vec![
+                    FieldReflectionData {
+                        name: "x".to_string(),
+                        type_name: "i32".to_string(),
+                        is_readonly: false,
+                        is_static: false,
+                    },
+                    FieldReflectionData {
+                        name: "sink".to_string(),
+                        type_name: "i32".to_string(),
+                        is_readonly: false,
+                        is_static: false,
+                    },
+                ],
+                method_names: vec![],
+                static_field_names: vec![],
+            },
+            ClassReflectionData {
+                fields: DESCRIPTOR_FIELDS
+                    .iter()
+                    .map(|name| FieldReflectionData {
+                        name: (*name).to_string(),
+                        type_name: "func".to_string(),
+                        is_readonly: false,
+                        is_static: false,
+                    })
+                    .collect(),
+                method_names: vec![],
+                static_field_names: vec![],
+            },
+        ],
+    });
+
+    // The setter: capture 0 is the target; write the constant 7 into the sink
+    // field. It deliberately ignores its argument, so a value that comes back as
+    // 7 rather than 99 can only have come through the setter.
+    module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "setter".to_string(),
+        param_count: 1,
+        local_count: 0,
+        code: vec![
+            Opcode::LoadCaptured as u8,
+            0,
+            0, // capture 0: the target
+            Opcode::ConstI32 as u8,
+            7,
+            0,
+            0,
+            0,
+            Opcode::StoreFieldExact as u8,
+            1,
+            0, // sink field
+            Opcode::Return as u8,
+        ],
+    });
+
+    let mut code: Vec<u8> = Vec::new();
+    // local 0 = target
+    code.push(Opcode::NewType as u8);
+    code.extend_from_slice(&0u16.to_le_bytes());
+    store_local(&mut code, 0);
+
+    if with_descriptor {
+        // local 1 = descriptor object
+        code.push(Opcode::NewType as u8);
+        code.extend_from_slice(&1u16.to_le_bytes());
+        store_local(&mut code, 1);
+        // local 2 = setter closure capturing the target
+        push_local(&mut code, 0);
+        code.push(Opcode::MakeClosure as u8);
+        code.extend_from_slice(&1u32.to_le_bytes());
+        code.extend_from_slice(&1u16.to_le_bytes()); // captureCount = 1
+        store_local(&mut code, 2);
+        // descriptor.set = closure; index 5 is "set"
+        push_local(&mut code, 1);
+        push_local(&mut code, 2);
+        code.push(Opcode::InitObject as u8);
+        code.extend_from_slice(&5u16.to_le_bytes());
+        code.push(Opcode::Pop as u8);
+        // Object.defineProperty(target, "x", descriptor)
+        push_local(&mut code, 0);
+        code.push(Opcode::ConstStr as u8);
+        code.extend_from_slice(&0u16.to_le_bytes());
+        push_local(&mut code, 1);
+        code.push(Opcode::NativeCall as u8);
+        code.extend_from_slice(&OBJECT_DEFINE_PROPERTY.to_le_bytes());
+        code.push(3u8);
+    }
+
+    // target.x = 99. With the accessor this invokes the setter, which writes 7
+    // into the sink; without it the 99 lands in field 0.
+    push_local(&mut code, 0);
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&99i32.to_le_bytes());
+    code.push(Opcode::StoreFieldExact as u8);
+    code.extend_from_slice(&0u16.to_le_bytes());
+
+    // return the sink
+    push_local(&mut code, 0);
+    code.push(Opcode::LoadFieldExact as u8);
+    code.extend_from_slice(&1u16.to_le_bytes());
+    code.push(Opcode::Return as u8);
+
+    module.functions.insert(
+        0,
+        Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
+            name: "main".to_string(),
+            param_count: 0,
+            local_count: 3,
+            code,
+        },
+    );
+    module
+}
+
+#[test]
+fn store_field_without_descriptor_writes_the_field_directly() {
+    // Control for the test below. No descriptor, so the 99 lands in field 0 and
+    // the sink is never written.
+    let mut vm = Vm::new();
+    let result = vm.execute(&accessor_setter_module(false)).unwrap();
+    assert!(
+        result.is_null(),
+        "sink should be untouched without a setter, got {result:?}"
+    );
+}
+
+#[test]
+fn store_field_invokes_a_descriptor_setter() {
+    // With a `set` accessor, the store must invoke the setter. The setter ignores
+    // its argument and writes 7, so seeing 7 proves the accessor ran and seeing 99
+    // would mean the raw field was written instead.
+    let mut vm = Vm::new();
+    let result = vm.execute(&accessor_setter_module(true)).unwrap();
+    assert_eq!(
+        result,
+        Value::i32(7),
+        "descriptor setter was not invoked; got {result:?}"
+    );
+}
