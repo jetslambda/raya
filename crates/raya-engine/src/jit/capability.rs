@@ -230,6 +230,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn closure_and_refcell_family_is_fail_closed() {
+        // D4.4 baseline (ALY-46 follow-on). Unlike the object family in D4.3,
+        // which was promoted without evidence and shipped a live miscompilation,
+        // this family has no JIT helper at all and every opcode falls to the
+        // `_ => Rejected` catch-all. This test exists so that cannot change by
+        // accident: any promotion must edit the table, and editing the table
+        // without differential tests should break this.
+        //
+        // `BindMethod` is the one member with a stronger classification: the
+        // lifter consults `produces_incorrect_native_results` directly, because
+        // the lifter currently emits nothing for it and a function containing one
+        // would execute natively with a stack model that disagrees with the
+        // interpreter's. That is worse than a wrong value -- it corrupts
+        // everything downstream -- so it must stay rejected until the lifter is
+        // fixed and proven, not merely until a helper exists.
+        for op in [
+            Opcode::MakeClosure,
+            Opcode::CloseVar,
+            Opcode::LoadCaptured,
+            Opcode::StoreCaptured,
+            Opcode::SetClosureCapture,
+            Opcode::NewRefCell,
+            Opcode::LoadRefCell,
+            Opcode::StoreRefCell,
+        ] {
+            assert_eq!(jit_support(op), JitSupport::Rejected, "{op:?}");
+            assert!(!opcode_supported_for_jit(op), "{op:?} must not be selectable");
+        }
+
+        assert!(produces_incorrect_native_results(Opcode::BindMethod));
+        // Its classification today is whatever the catch-all gives it, but it must
+        // never become JIT-selectable while the lifter emits nothing for it.
+        assert!(!opcode_supported_for_jit(Opcode::BindMethod));
+    }
+
+    #[test]
     fn division_and_remainder_are_rejected_until_error_paths_are_exact() {
         assert_eq!(jit_support(Opcode::Idiv), JitSupport::Rejected);
         assert_eq!(jit_support(Opcode::Imod), JitSupport::Rejected);
