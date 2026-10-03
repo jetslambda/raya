@@ -130,10 +130,6 @@ pub const HELPER_NATIVE_CALL_OFFSET: i32 =
 pub const HELPER_INTERPRETER_CALL_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET
         + std::mem::offset_of!(RuntimeHelperTable, interpreter_call) as i32;
-pub const HELPER_THROW_OFFSET: i32 =
-    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, throw_exception) as i32;
-pub const HELPER_DEOPT_OFFSET: i32 =
-    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, deoptimize) as i32;
 pub const HELPER_STRING_CONCAT_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, string_concat) as i32;
 pub const HELPER_GENERIC_EQUALS_OFFSET: i32 =
@@ -254,10 +250,6 @@ pub struct RuntimeHelperTable {
     /// (opcode, operand_u64, operand_u32, receiver, args_ptr, arg_count, module_ptr, shared_state) -> result/sentinel
     pub interpreter_call:
         unsafe extern "C" fn(u8, u64, u32, u64, *const u64, u16, *const (), *mut ()) -> u64,
-    /// Throw an exception: (exception_value, shared_state) -> !
-    pub throw_exception: unsafe extern "C" fn(u64, *mut ()),
-    /// Deoptimize: (bytecode_offset, shared_state) -> !
-    pub deoptimize: unsafe extern "C" fn(u32, *mut ()),
     /// String concatenation: (left_val, right_val, shared_state) -> result_val
     pub string_concat: unsafe extern "C" fn(u64, u64, *mut ()) -> u64,
     /// Generic equality: (left_val, right_val, shared_state) -> bool

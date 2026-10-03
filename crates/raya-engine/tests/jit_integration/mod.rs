@@ -2218,12 +2218,6 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     ) -> u64 {
         NULL_VALUE
     }
-    unsafe extern "C" fn stub_throw_exception(_exception_value: u64, _shared_state: *mut ()) {
-        panic!("not used")
-    }
-    unsafe extern "C" fn stub_deoptimize(_bytecode_offset: u32, _shared_state: *mut ()) {
-        panic!("not used")
-    }
     unsafe extern "C" fn stub_string_concat(
         _left: u64,
         _right: u64,
@@ -2261,8 +2255,6 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             check_preemption: stub_check_preemption,
             native_call_dispatch: stub_native_call_dispatch,
             interpreter_call: stub_interpreter_call,
-            throw_exception: stub_throw_exception,
-            deoptimize: stub_deoptimize,
             string_concat: stub_string_concat,
             generic_equals: stub_generic_equals,
             object_get_field: stub_object_get_field,
@@ -2449,12 +2441,6 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     ) -> u64 {
         NULL_VALUE
     }
-    unsafe extern "C" fn stub_throw_exception(_exception_value: u64, _shared_state: *mut ()) {
-        panic!("not used")
-    }
-    unsafe extern "C" fn stub_deoptimize(_bytecode_offset: u32, _shared_state: *mut ()) {
-        panic!("not used")
-    }
     unsafe extern "C" fn stub_string_concat(
         _left: u64,
         _right: u64,
@@ -2492,8 +2478,6 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             check_preemption: stub_check_preemption,
             native_call_dispatch: stub_native_call_dispatch,
             interpreter_call: stub_interpreter_call,
-            throw_exception: stub_throw_exception,
-            deoptimize: stub_deoptimize,
             string_concat: stub_string_concat,
             generic_equals: stub_generic_equals,
             object_get_field: stub_object_get_field,
@@ -2686,12 +2670,6 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     ) -> u64 {
         NULL_VALUE
     }
-    unsafe extern "C" fn stub_throw_exception(_exception_value: u64, _shared_state: *mut ()) {
-        panic!("not used")
-    }
-    unsafe extern "C" fn stub_deoptimize(_bytecode_offset: u32, _shared_state: *mut ()) {
-        panic!("not used")
-    }
     unsafe extern "C" fn stub_string_concat(
         _left: u64,
         _right: u64,
@@ -2731,8 +2709,6 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             check_preemption: stub_check_preemption,
             native_call_dispatch: stub_native_call_dispatch,
             interpreter_call: stub_interpreter_call,
-            throw_exception: stub_throw_exception,
-            deoptimize: stub_deoptimize,
             string_concat: stub_string_concat,
             generic_equals: stub_generic_equals,
             object_get_field: stub_object_get_field,
@@ -2920,12 +2896,6 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     ) -> u64 {
         NULL_VALUE
     }
-    unsafe extern "C" fn stub_throw_exception(_exception_value: u64, _shared_state: *mut ()) {
-        panic!("not used")
-    }
-    unsafe extern "C" fn stub_deoptimize(_bytecode_offset: u32, _shared_state: *mut ()) {
-        panic!("not used")
-    }
     unsafe extern "C" fn stub_string_concat(
         _left: u64,
         _right: u64,
@@ -2965,8 +2935,6 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             check_preemption: stub_check_preemption,
             native_call_dispatch: stub_native_call_dispatch,
             interpreter_call: stub_interpreter_call,
-            throw_exception: stub_throw_exception,
-            deoptimize: stub_deoptimize,
             string_concat: stub_string_concat,
             generic_equals: stub_generic_equals,
             object_get_field: stub_object_get_field,
@@ -3156,12 +3124,6 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     ) -> u64 {
         NULL_VALUE
     }
-    unsafe extern "C" fn stub_throw_exception(_exception_value: u64, _shared_state: *mut ()) {
-        panic!("not used")
-    }
-    unsafe extern "C" fn stub_deoptimize(_bytecode_offset: u32, _shared_state: *mut ()) {
-        panic!("not used")
-    }
     unsafe extern "C" fn stub_string_concat(
         _left: u64,
         _right: u64,
@@ -3214,8 +3176,6 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             check_preemption: stub_check_preemption,
             native_call_dispatch: stub_native_call_dispatch,
             interpreter_call: stub_interpreter_call,
-            throw_exception: stub_throw_exception,
-            deoptimize: stub_deoptimize,
             string_concat: stub_string_concat,
             generic_equals: stub_generic_equals,
             object_get_field: stub_object_get_field,

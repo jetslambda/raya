@@ -193,8 +193,6 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         check_preemption: helper_check_preemption,
         native_call_dispatch: helper_native_call_dispatch,
         interpreter_call: helper_interpreter_call,
-        throw_exception: helper_throw_exception,
-        deoptimize: helper_deoptimize,
         string_concat: helper_string_concat,
         generic_equals: helper_generic_equals,
         object_get_field: helper_object_get_field,
@@ -1522,14 +1520,6 @@ unsafe extern "C" fn helper_interpreter_call(
             }
         }
     }
-}
-
-unsafe extern "C" fn helper_throw_exception(_exception_value: u64, _shared_state: *mut ()) {
-    panic!("helper_throw_exception is not wired yet")
-}
-
-unsafe extern "C" fn helper_deoptimize(_bytecode_offset: u32, _shared_state: *mut ()) {
-    panic!("helper_deoptimize is not wired yet")
 }
 
 fn jit_add_ephemeral_roots(bridge: &JitRuntimeBridgeContext, values: &[Value]) -> bool {
