@@ -1810,3 +1810,104 @@ fn load_and_store_captured_are_observable_only_inside_a_closure() {
          opcode reached the closure's own captures"
     );
 }
+
+
+// ---------------------------------------------------------------------------
+// BindMethod interpreter baseline (D4.4)
+//
+// The last piece of evidence BindMethod needs. Its handler has five ordered checks
+// and three error classes, so the baseline has to pin both the success and the
+// most specific failure — the structural-object case, which is the one a nominal
+// test would never reach.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bind_method_on_a_nominal_object_succeeds() {
+    let mut vm = Vm::new();
+
+    let mut module = Module::new("bind_method".to_string());
+    // `register_classes` populates the vtable from `ClassDef::methods`, so the
+    // class must DECLARE the method; a bare function pushed onto the module is not
+    // enough, and slot 0 comes back as "Invalid method slot".
+    let mut point = class_def("Point", 1, None);
+    point.methods.push(raya_engine::compiler::bytecode::module::Method {
+        name: "get".to_string(),
+        function_id: 0,
+        slot: 0,
+    });
+    module.classes.push(point);
+    // The method body, at the slot the class declares.
+    module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "get".to_string(),
+        param_count: 1,
+        local_count: 1,
+        code: vec![Opcode::ConstI32 as u8, 7, 0, 0, 0, Opcode::Return as u8],
+    });
+
+    let mut main_code: Vec<u8> = Vec::new();
+    main_code.push(Opcode::NewType as u8);
+    main_code.extend_from_slice(&0u16.to_le_bytes()); // class 0 = Point
+    main_code.push(Opcode::BindMethod as u8);
+    main_code.extend_from_slice(&0u16.to_le_bytes()); // method slot 0
+    main_code.push(Opcode::Return as u8);
+    module.functions.insert(
+        0,
+        Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
+            name: "main".to_string(),
+            param_count: 0,
+            local_count: 0,
+            code: main_code,
+        },
+    );
+
+    let result = vm
+        .execute(&module)
+        .expect("binding a method on a nominal object must succeed");
+    assert!(
+        result.is_ptr(),
+        "BindMethod must produce a heap BoundMethod, got {result:?}"
+    );
+}
+
+#[test]
+fn bind_method_on_a_structural_object_is_a_type_error() {
+    // The handler checks `nominal_type_id_usize()` and refuses a structural
+    // object with "Cannot bind method on structural object value". A nominal-only
+    // baseline would never reach this branch, so it is pinned separately.
+    let mut vm = Vm::new();
+
+    let mut code: Vec<u8> = Vec::new();
+    // ObjectLiteral with no fields makes a structural object.
+    code.push(Opcode::ObjectLiteral as u8);
+    code.extend_from_slice(&0u32.to_le_bytes()); // layout id
+    code.extend_from_slice(&0u16.to_le_bytes()); // field count
+    code.push(Opcode::BindMethod as u8);
+    code.extend_from_slice(&0u16.to_le_bytes()); // method slot 0
+    code.push(Opcode::Return as u8);
+
+    let mut module = Module::new("bind_structural".to_string());
+    module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "main".to_string(),
+        param_count: 0,
+        local_count: 0,
+        code,
+    });
+
+    let error = vm
+        .execute(&module)
+        .expect_err("a structural object must not accept BindMethod");
+    let message = error.to_string();
+    assert!(
+        message.contains("structural") || message.contains("method binding"),
+        "expected the handler's structural-object or receiver diagnostic, got: {message}"
+    );
+}
