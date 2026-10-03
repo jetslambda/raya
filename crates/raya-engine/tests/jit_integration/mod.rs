@@ -2167,6 +2167,16 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     unsafe extern "C" fn stub_load_captured(_index: u32, _shared_state: *mut ()) -> u64 {
         raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
+
+    /// Reports failure, which routes the store to the interpreter.
+    /// `StoreCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_store_captured(
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2266,6 +2276,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             set_closure_capture: stub_set_closure_capture,
             make_closure: stub_make_closure,
             load_captured: stub_load_captured,
+            store_captured: stub_store_captured,
         },
     };
 
@@ -2376,6 +2387,16 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     unsafe extern "C" fn stub_load_captured(_index: u32, _shared_state: *mut ()) -> u64 {
         raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
+
+    /// Reports failure, which routes the store to the interpreter.
+    /// `StoreCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_store_captured(
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2475,6 +2496,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             set_closure_capture: stub_set_closure_capture,
             make_closure: stub_make_closure,
             load_captured: stub_load_captured,
+            store_captured: stub_store_captured,
         },
     };
 
@@ -2586,6 +2608,16 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     unsafe extern "C" fn stub_load_captured(_index: u32, _shared_state: *mut ()) -> u64 {
         raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
+
+    /// Reports failure, which routes the store to the interpreter.
+    /// `StoreCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_store_captured(
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2692,6 +2724,7 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             set_closure_capture: stub_set_closure_capture,
             make_closure: stub_make_closure,
             load_captured: stub_load_captured,
+            store_captured: stub_store_captured,
         },
     };
 
@@ -2797,6 +2830,16 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     /// `LoadCaptured` is still `Rejected`, so no compiled test reaches this.
     unsafe extern "C" fn stub_load_captured(_index: u32, _shared_state: *mut ()) -> u64 {
         raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter.
+    /// `StoreCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_store_captured(
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2904,6 +2947,7 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             set_closure_capture: stub_set_closure_capture,
             make_closure: stub_make_closure,
             load_captured: stub_load_captured,
+            store_captured: stub_store_captured,
         },
     };
 
@@ -3016,6 +3060,16 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     /// `LoadCaptured` is still `Rejected`, so no compiled test reaches this.
     unsafe extern "C" fn stub_load_captured(_index: u32, _shared_state: *mut ()) -> u64 {
         raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter.
+    /// `StoreCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_store_captured(
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -3131,6 +3185,7 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             set_closure_capture: stub_set_closure_capture,
             make_closure: stub_make_closure,
             load_captured: stub_load_captured,
+            store_captured: stub_store_captured,
         },
     };
 

@@ -214,6 +214,13 @@ pub const HELPER_LOAD_CAPTURED_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET
         + std::mem::offset_of!(RuntimeHelperTable, load_captured) as i32;
 
+/// Byte offset of the captured-value store helper in [`RuntimeContext`].
+///
+/// 1 = `JIT_STORE_SUCCESS`, 0 = `JIT_STORE_FALLBACK`.
+pub const HELPER_STORE_CAPTURED_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET
+        + std::mem::offset_of!(RuntimeHelperTable, store_captured) as i32;
+
 const _: () = assert!(std::mem::align_of::<RuntimeContext>() >= 8);
 const _: () = assert!(std::mem::size_of::<RuntimeContext>() >= std::mem::size_of::<RuntimeHelperTable>());
 
@@ -297,6 +304,9 @@ pub struct RuntimeHelperTable {
     /// Captured-value load: (capture_index, shared_state) -> value, or the
     /// interpreter-fallback sentinel.
     pub load_captured: unsafe extern "C" fn(u32, *mut ()) -> u64,
+    /// Captured-value store: (capture_index, value, shared_state)
+    /// -> 1 success / 0 fallback
+    pub store_captured: unsafe extern "C" fn(u32, u64, *mut ()) -> i8,
 }
 
 /// Validate the boxed arguments at a JIT entry boundary against a verified

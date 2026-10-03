@@ -58,6 +58,7 @@ pub struct LoweringContext<'a> {
     sig_set_closure_capture: Option<ir::SigRef>,
     sig_make_closure: Option<ir::SigRef>,
     sig_load_captured: Option<ir::SigRef>,
+    sig_store_captured: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.object_get_shape_field
     sig_object_get_shape_field: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.object_set_shape_field
@@ -196,6 +197,7 @@ impl<'a> LoweringContext<'a> {
             sig_set_closure_capture: None,
             sig_make_closure: None,
             sig_load_captured: None,
+            sig_store_captured: None,
             sig_object_get_shape_field: None,
             sig_object_set_shape_field: None,
             sig_object_implements_shape: None,
@@ -934,6 +936,61 @@ impl<'a> LoweringContext<'a> {
             }
 
             // ===== Object Field Access (shape-aware helper path) =====
+            JitInstr::StoreCaptured {
+                index,
+                value,
+                stack,
+                bytecode_offset,
+            } => {
+                // Mirrors the RefCell store and `SetClosureCapture`: no destination,
+                // an i8 result, and both a null ctx and a helper FALLBACK take the
+                // interpreter exit. The helper resolves the active closure and
+                // bounds-checks the index BEFORE writing, so FALLBACK means the
+                // closure was not modified and the interpreter can redo it safely.
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "store captured fallback stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let success_block = builder.create_block();
+                builder
+                    .ins()
+                    .brif(is_ctx_null, fallback_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_STORE_CAPTURED_OFFSET,
+                );
+                let sig = self.store_captured_sig(builder);
+                let index_val = builder.ins().iconst(types::I32, *index as i64);
+                let value_val = self.boxed_reg_value(builder, *value);
+                let call = builder
+                    .ins()
+                    .call_indirect(sig, fn_ptr, &[index_val, value_val, shared_state]);
+                let result = builder.inst_results(call)[0];
+                let is_success = builder.ins().icmp_imm(condcodes::IntCC::Equal, result, 1);
+                builder
+                    .ins()
+                    .brif(is_success, success_block, &[], fallback_block, &[]);
+                builder.seal_block(fallback_block);
+                builder.seal_block(success_block);
+
+                builder.switch_to_block(fallback_block);
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.switch_to_block(success_block);
+            }
             JitInstr::LoadCaptured {
                 dest,
                 index,
@@ -2826,6 +2883,20 @@ impl<'a> LoweringContext<'a> {
             .call_indirect(sig, fn_ptr, &[index, module_ptr, shared_state]);
         let string_ptr = builder.inst_results(call)[0];
         self.def_reg(builder, dest, string_ptr);
+    }
+
+    fn store_captured_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_store_captured {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I32)); // capture index
+        sig.params.push(AbiParam::new(types::I64)); // value
+        sig.params.push(AbiParam::new(types::I64)); // shared_state ptr
+        sig.returns.push(AbiParam::new(types::I8)); // 1 success / 0 fallback
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_store_captured = Some(sig_ref);
+        sig_ref
     }
 
     fn load_captured_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {

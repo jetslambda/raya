@@ -218,6 +218,7 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         set_closure_capture: helper_set_closure_capture,
         make_closure: helper_make_closure,
         load_captured: helper_load_captured,
+        store_captured: helper_store_captured,
     }
 }
 
@@ -1775,7 +1776,6 @@ unsafe extern "C" fn helper_load_captured(index: u32, shared_state: *mut ()) -> 
 /// not modified and an interpreter fallback cannot double-apply the store.
 ///
 /// NOT YET LOWERED. See the note on the RefCell helpers.
-#[allow(dead_code)]
 unsafe extern "C" fn helper_store_captured(
     index: u32,
     value_raw: u64,
