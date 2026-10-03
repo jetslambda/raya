@@ -1714,6 +1714,52 @@ unsafe extern "C" fn helper_value_to_string(value_raw: u64, shared_state: *mut (
 // `Rejected`. The helpers are written and tested first so the semantics are settled
 // before anything can call them — the same order the RefCell helpers used.
 
+/// Read one capture of the closure currently executing.
+///
+/// The active closure is NOT carried in the JIT frame. It is read from the task,
+/// exactly as the interpreter does: `Task::current_closure()` returns
+/// `closure_stack.last()`. That is the same path `helper_make_closure` uses for
+/// the current module, and it is deliberate — reading the interpreter's own
+/// accessor is what makes this faithful, including the edge cases. In particular
+/// `closure_stack.last()` is the *innermost* closure, so a `LoadCaptured` in
+/// natively-compiled code that is not a closure body would read whatever closure is
+/// on top. The interpreter behaves identically, so reproducing it is the correct
+/// outcome, not a bug to guard against here (ALY-52/ALY-54 are the places that
+/// would want fixing, separately).
+///
+/// Both interpreter failure modes are returned as the fallback sentinel rather than
+/// raised, because a leaf helper cannot raise a catchable error:
+///   * no active closure      -> `RuntimeError("LoadCaptured without active closure")`
+///   * capture index too high -> `RuntimeError("Capture index N out of bounds")`
+/// The lowering turns either into the interpreter boundary exit, which raises them
+/// for real.
+///
+/// NOT YET LOWERED. See the note on the RefCell helpers.
+#[allow(dead_code)]
+unsafe extern "C" fn helper_load_captured(index: u32, shared_state: *mut ()) -> u64 {
+    let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
+        Some(ptr) => &*ptr.as_ptr(),
+        None => return JIT_INTERPRETER_FALLBACK_SENTINEL,
+    };
+    if bridge.task_arc.is_null() {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+    let Some(closure_val) = (&*bridge.task_arc).current_closure() else {
+        // Matches the interpreter's "LoadCaptured without active closure".
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    };
+    let Some(ptr) = closure_val.as_ptr::<crate::vm::object::Closure>() else {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    };
+    let closure = &*ptr.as_ptr();
+    // `get_captured` is bounds-checked and returns None, which is the interpreter's
+    // "Capture index N out of bounds".
+    match closure.get_captured(index as usize) {
+        Some(value) => value.raw(),
+        None => JIT_INTERPRETER_FALLBACK_SENTINEL,
+    }
+}
+
 /// Patch one capture slot of an existing closure.
 ///
 /// This is how recursive closures are wired up: `MakeClosure` runs first, then
@@ -2731,6 +2777,50 @@ mod tests {
     }
 
     /// `helper_set_closure_capture`, tested before anything can call it.
+    /// `helper_load_captured`, tested before anything can call it. NOT lowered yet.
+    #[test]
+    fn load_captured_helper_reads_the_active_closure() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // A closure capturing [7, 8], installed as the task's active closure.
+            let closure_raw = {
+                let mut gc = shared.gc.lock();
+                let closure =
+                    crate::vm::object::Closure::new(0, vec![Value::i32(7), Value::i32(8)]);
+                let ptr = gc.allocate(closure);
+                unsafe { Value::from_ptr(NonNull::new(ptr.as_ptr()).unwrap()).raw() }
+            };
+            task.push_closure(unsafe { Value::from_raw(closure_raw) });
+
+            // The helper reads the active closure from the task, not from a frame.
+            assert_eq!(
+                unsafe { helper_load_captured(0, ss) },
+                Value::i32(7).raw()
+            );
+            assert_eq!(
+                unsafe { helper_load_captured(1, ss) },
+                Value::i32(8).raw()
+            );
+
+            // Out of range: bounds-checked, so a fallback rather than a read past
+            // the capture vector.
+            assert_eq!(
+                unsafe { helper_load_captured(9, ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL
+            );
+
+            // With no active closure the interpreter raises "LoadCaptured without
+            // active closure", so the helper must refuse rather than invent a value.
+            task.pop_closure();
+            assert_eq!(
+                unsafe { helper_load_captured(0, ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL
+            );
+        });
+    }
+
     #[test]
     fn set_closure_capture_helper_patches_a_slot() {
         let (shared, module, code_cache, task) = array_helper_fixture();
