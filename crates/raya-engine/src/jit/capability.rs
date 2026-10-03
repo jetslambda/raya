@@ -173,11 +173,11 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // Closures (D4.4). Same three-part evidence as the RefCell family:
         // interpreter baseline, direct-lift tests for each arm, and a
         // differential running the SAME bytecode through both engines. The two
-        // here are the only closure opcodes that can be promoted at all --
-        // `LoadCaptured` and `StoreCaptured` still have no operand
-        // naming the closure they act on, because the interpreter resolves them
-        // against `task.current_closure()` and the JIT has no active-closure
-        // model. See the D4.4 spec.
+        // The closure opcodes. `LoadCaptured` and `StoreCaptured` resolve their
+        // closure through `Task::current_closure()`, the same accessor the
+        // interpreter uses, rather than through an operand — an earlier version of
+        // this comment claimed they could not be promoted for want of one, which
+        // stopped being true when the D4.4 helpers were written.
         | Opcode::MakeClosure
         | Opcode::SetClosureCapture
         // `LoadCaptured`/`StoreCaptured` read and write the closure of the frame
@@ -198,7 +198,20 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // interpreter baseline covering both the nominal success and the structural
         // -object failure, and a direct-lift test proving the vtable resolves and
         // the receiver is carried.
-        | Opcode::BindMethod => JitSupport::HelperExact,
+        | Opcode::BindMethod
+        // `Await` (2026-10-03). All three paths are correct: a non-task value is
+        // returned unchanged, a completed task yields its result, and a
+        // cancelled/pending/unknown task id returns the interpreter-fallback
+        // sentinel so the interpreter raises or suspends. It cannot be wrong in the
+        // middle.
+        //
+        // COVERAGE IS ASYMMETRIC, recorded rather than rounded up. Path 1 (non-task
+        // value) has interpreter-baseline, direct-lift AND cross-engine differential
+        // coverage. Paths 2 and 3 have in-crate helper coverage only: path 2 needs a
+        // Task registered in shared.tasks, which the interpreter cannot set up for
+        // the same module, and path 3 is unreachable from native code by design
+        // because JitSuspendReason has no AwaitTask variant.
+        | Opcode::Await => JitSupport::HelperExact,
         Opcode::StoreFieldExact => JitSupport::InterpreterBoundary,
         Opcode::LoadFieldExact
         | Opcode::OptionalFieldExact
@@ -327,6 +340,7 @@ mod tests {
             (Opcode::LoadCaptured, "LoadCaptured"),
             (Opcode::StoreCaptured, "StoreCaptured"),
             (Opcode::BindMethod, "BindMethod"),
+            (Opcode::Await, "Await"),
         ] {
             assert!(
                 function_supported_for_jit(&function_with(vec![
@@ -460,7 +474,6 @@ mod tests {
     fn task_and_concurrency_family_is_rejected() {
         for op in [
             Opcode::Spawn,
-            Opcode::Await,
             Opcode::Yield,
             Opcode::NewMutex,
             Opcode::MutexLock,
@@ -478,6 +491,13 @@ mod tests {
                 "{op:?} lifts cleanly, so it must not be on the known-wrong list"
             );
         }
+
+        // `Await` was promoted on 2026-10-03 and is asserted separately, because its
+        // evidence is asymmetric and the rest of the family's is not: path 1 has a
+        // cross-engine differential, paths 2 and 3 are helper-level only.
+        assert_eq!(jit_support(Opcode::Await), JitSupport::HelperExact);
+        assert!(opcode_supported_for_jit(Opcode::Await));
+        assert!(!produces_incorrect_native_results(Opcode::Await));
     }
 
     #[test]
@@ -616,10 +636,13 @@ mod tests {
 
     #[test]
     fn concurrency_is_never_selectable() {
+        // `Await` is no longer here: promoted 2026-10-03, with its coverage
+        // recorded as asymmetric in `jit_support` (path 1 has a cross-engine
+        // differential, paths 2 and 3 are helper-level only). It is asserted as
+        // selectable in `refcell_opcodes_make_a_function_jit_eligible`.
         for op in [
             Opcode::Spawn,
             Opcode::SpawnClosure,
-            Opcode::Await,
             Opcode::Sleep,
             Opcode::MutexLock,
             Opcode::MutexUnlock,
