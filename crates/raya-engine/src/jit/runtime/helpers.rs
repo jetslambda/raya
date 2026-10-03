@@ -219,6 +219,7 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         store_captured: helper_store_captured,
         bind_method: helper_bind_method,
         await_task: helper_await_task,
+        dyn_get_keyed: helper_dyn_get_keyed,
     }
 }
 
@@ -1787,7 +1788,6 @@ unsafe extern "C" fn helper_await_task(value_raw: u64, shared_state: *mut ()) ->
 /// parser or view dispatch is exactly the shape of divergence that ships.
 ///
 /// NOT YET LOWERED. See the note on the RefCell helpers.
-#[allow(dead_code)]
 unsafe extern "C" fn helper_dyn_get_keyed(
     object_raw: u64,
     key_raw: u64,

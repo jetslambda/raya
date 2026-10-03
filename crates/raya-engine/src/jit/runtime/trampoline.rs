@@ -177,6 +177,13 @@ pub const HELPER_ARRAY_LEN_OFFSET: i32 =
 pub const HELPER_AWAIT_TASK_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, await_task) as i32;
 
+/// Byte offset of the dynamic keyed-get helper in [`RuntimeContext`].
+///
+/// Returns the value unchanged for `Str`/`Arr`, or the interpreter-fallback
+/// sentinel for `Struct` and anything else.
+pub const HELPER_DYN_GET_KEYED_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, dyn_get_keyed) as i32;
+
 /// Byte offset of the RefCell-load helper in [`RuntimeContext`].
 ///
 /// Appended after the array helpers: `RuntimeHelperTable` is layout-sensitive
@@ -319,6 +326,9 @@ pub struct RuntimeHelperTable {
     /// Await: (value, shared_state) -> value unchanged / task result, or the
     /// interpreter-fallback sentinel.
     pub await_task: unsafe extern "C" fn(u64, *mut ()) -> u64,
+    /// Dynamic keyed get: (object, key, shared_state) -> value, or the
+    /// interpreter-fallback sentinel for the views this declines.
+    pub dyn_get_keyed: unsafe extern "C" fn(u64, u64, *mut ()) -> u64,
 }
 
 /// Validate the boxed arguments at a JIT entry boundary against a verified
