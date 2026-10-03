@@ -5702,3 +5702,94 @@ fn closure_interpreter_and_jit_agree_on_the_same_bytecode() {
     // 7, not the 42 originally captured — so the SetClosureCapture actually landed.
     assert_eq!(decode_i32(raw), 7);
 }
+
+
+/// `LoadCaptured` and `StoreCaptured` run **natively**, by lifting the closure body
+/// itself as the entry function.
+///
+/// This is not the shared-bytecode differential, and it is not meant to be. The
+/// `Call` lowering arm routes every callee through `interpreter_call`, so lifting
+/// `main` and calling a closure would run `main` natively but execute the body's
+/// captured opcodes **interpreted** — a test that passes while proving nothing about
+/// the two arms it appears to cover. Lifting the body directly is the only way these
+/// arms reach native code at all.
+///
+/// The active closure must be on the task **before** `build_bridge_and_ctx`, or the
+/// bridge's task will not have it and every read will take the fallback path.
+#[test]
+fn captured_opcodes_execute_natively_when_the_body_is_lifted_directly() {
+    use raya_engine::vm::value::Value;
+
+    // A two-function module. The body is the one that will be lifted; main is
+    // present only so the closure body has a plausible `func_index`.
+    let mut raw = make_module(Vec::new(), 0, 0);
+    raw.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "closure_body".to_string(),
+        param_count: 0,
+        local_count: 0,
+        // The lifter's stack model does not preload parameters, so the body pushes
+        // its own value rather than reading a parameter: relying on local 0 gave
+        // `Lift failed: StackUnderflow { offset: 0 }`.
+        code: vec![
+            Opcode::ConstI32 as u8,
+            42,
+            0,
+            0,
+            0, // value to store
+            Opcode::StoreCaptured as u8,
+            0,
+            0, // capture 0 <- value
+            Opcode::LoadCaptured as u8,
+            0,
+            0, // push capture 0 back
+            Opcode::Return as u8,
+        ],
+    });
+    let module = finalize_module(raw);
+
+    let (safepoint, shared) = new_shared_vm_state();
+
+    // A closure capturing [7], installed as the task's active closure.
+    let closure_raw = {
+        let mut gc = shared.gc.lock();
+        let closure = raya_engine::vm::object::Closure::new(0, vec![Value::i32(7)]);
+        let ptr = gc.allocate(closure);
+        unsafe { Value::from_ptr(std::ptr::NonNull::new(ptr.as_ptr()).unwrap()).raw() }
+    };
+    let closure_val = unsafe { Value::from_raw(closure_raw) };
+
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    task.push_closure(closure_val);
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+
+    // Lift the BODY (index 1), not main. local 0 is the argument StoreCaptured
+    // writes into capture 0.
+    let jit_func = lift_function(&module.functions[1], &module, 1).expect("Lift failed");
+    let mut locals: Vec<u64> = Vec::new();
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+        "both captured opcodes must run natively; a fallback here means the active \
+         closure was missing and the helper refused"
+    );
+    assert!(
+        is_i32(raw),
+        "expected a NaN-boxed i32, got 0x{raw:016X}"
+    );
+    // 42, not the captured 7: the store must have landed and the load must have
+    // read it back through the same active closure.
+    assert_eq!(
+        decode_i32(raw),
+        42,
+        "StoreCaptured must write local 0 into the active closure's capture 0, and \
+         LoadCaptured must read it back; 7 means the store never landed"
+    );
+}
