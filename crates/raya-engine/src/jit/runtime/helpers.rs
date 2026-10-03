@@ -1705,6 +1705,59 @@ unsafe extern "C" fn helper_value_to_string(value_raw: u64, shared_state: *mut (
 // interpreter, which is the opposite of the goal. Do not strengthen these checks
 // without fixing the interpreter in the same change.
 
+// ---------------------------------------------------------------------------
+// Closure helpers (D4.4)
+//
+// NOT YET LOWERED. `lowering.rs` has no `MakeClosure` arm and the opcode stays
+// `Rejected`. The helpers are written and tested first so the semantics are settled
+// before anything can call them — the same order the RefCell helpers used.
+
+// Unused until the Cranelift lowering for MakeClosure exists; see the note on the
+// RefCell helpers above for why that is marked rather than left to warn.
+#[allow(dead_code)]
+unsafe extern "C" fn helper_make_closure(
+    func_id: u32,
+    captures_ptr: *const u64,
+    capture_count: u32,
+    shared_state: *mut (),
+) -> u64 {
+    let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
+        Some(ptr) => &*ptr.as_ptr(),
+        None => return 0,
+    };
+    if bridge.gc.is_null() || bridge.task_arc.is_null() {
+        return 0;
+    }
+
+    // `Closure::with_module` needs an `Arc<Module>`, which cannot be reconstructed
+    // from the raw `*const Module` the lowering has. The bridge carries the current
+    // task, so the module comes from there — the same source the interpreter uses.
+    let module = {
+        let task_arc = &*bridge.task_arc;
+        task_arc.current_module()
+    };
+
+    let captures: Vec<Value> = if captures_ptr.is_null() || capture_count == 0 {
+        Vec::new()
+    } else {
+        (0..capture_count as usize)
+            .map(|i| Value::from_raw(*captures_ptr.add(i)))
+            .collect()
+    };
+
+    // Every capture is a live value across the allocation, and native stack maps are
+    // empty, so root them all — `EphemeralRootScope::open` filters to heap values
+    // itself. Fail closed to null, matching `helper_alloc_object`.
+    let Some(_scope) = EphemeralRootScope::open(bridge, &captures) else {
+        return 0;
+    };
+
+    let closure = crate::vm::object::Closure::with_module(func_id as usize, captures, module);
+    let mut gc = (&*bridge.gc).lock();
+    let ptr = gc.allocate(closure);
+    Value::from_ptr(NonNull::new(ptr.as_ptr()).unwrap()).raw()
+}
+
 /// Allocate a RefCell holding `initial_raw`.
 ///
 /// Returns null when the root set is unavailable, so the allocation cannot happen
@@ -2597,6 +2650,68 @@ mod tests {
     /// D4.4: the RefCell helpers exist and are tested before anything can call
     /// them. They are NOT wired into the lowering, and `NewRefCell`,
     /// `LoadRefCell` and `StoreRefCell` stay `Rejected` until it is.
+    /// D4.4: `helper_make_closure`, tested before anything can call it. NOT lowered
+    /// yet, and `MakeClosure` stays `Rejected`.
+    #[test]
+    fn make_closure_helper_builds_a_closure_over_the_given_captures() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // Captures must arrive in capture order: the interpreter pops them off
+            // the stack and reverses, so the JIT passes them already ordered.
+            let captures: Vec<u64> = vec![
+                Value::i32(7).raw(),
+                Value::i32(8).raw(),
+                Value::i32(9).raw(),
+            ];
+
+            let raw = unsafe {
+                helper_make_closure(42, captures.as_ptr(), captures.len() as u32, ss)
+            };
+            assert_ne!(raw, 0, "closure allocation must not fail closed here");
+
+            // Read the closure back out of the GC and check what was captured.
+            let closure = unsafe {
+                let value = Value::from_raw(raw);
+                let ptr = value.as_ptr::<crate::vm::object::Closure>().unwrap();
+                &*ptr.as_ptr()
+            };
+            assert_eq!(closure.func_id, 42);
+            let got: Vec<i32> = closure
+                .captures
+                .iter()
+                .map(|value| value.as_i32().unwrap_or(i32::MIN))
+                .collect();
+            assert_eq!(
+                got,
+                vec![7, 8, 9],
+                "captures must survive in the order supplied"
+            );
+        });
+    }
+
+    #[test]
+    fn make_closure_helper_fails_closed_without_a_root_set() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let mut bridge = bridge;
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            let captures: Vec<u64> = vec![Value::i32(7).raw()];
+
+            // Native stack maps are empty, so allocating with unprotected captures
+            // could collect them.
+            bridge.ephemeral_gc_roots = std::ptr::null();
+
+            assert_eq!(
+                unsafe { helper_make_closure(42, captures.as_ptr(), 1, ss) },
+                0,
+                "closure allocation must fail closed without a root set"
+            );
+        });
+    }
+
     #[test]
     fn refcell_helpers_roundtrip_and_reject_non_pointers() {
         let (shared, module, code_cache, task) = array_helper_fixture();
