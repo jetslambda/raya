@@ -938,6 +938,14 @@ impl<'a> LoweringContext<'a> {
             }
 
             // ===== Object Field Access (shape-aware helper path) =====
+            // NOTE: currently unreachable. `Throw` is also the block's
+            // `JitTerminator::Throw`, and `lower_terminator` deliberately fails
+            // compilation for it so the function stays interpreted rather than
+            // emitting a compiled trap that could SIGTRAP the process. So this arm
+            // runs, emits its exit return, and then compilation aborts at the
+            // terminator. It is kept because it is the correct lowering for the day
+            // that terminator is changed — but until then it must not be mistaken
+            // for a working native path.
             JitInstr::Throw {
                 value,
                 stack,
@@ -956,6 +964,7 @@ impl<'a> LoweringContext<'a> {
                 }
                 self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
             }
+            // Unreachable for the same reason as `Throw` above.
             JitInstr::Rethrow {
                 stack,
                 bytecode_offset,
