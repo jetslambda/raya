@@ -435,7 +435,7 @@ impl<'a> Interpreter<'a> {
         };
         if let Some(desc_ptr) = unsafe { descriptor.as_ptr::<Object>() } {
             let desc = unsafe { &mut *desc_ptr.as_ptr() };
-            let _ = desc.set_field(value_index, value);
+            let _ = desc.checked_set_field(value_index, value);
         }
     }
 
@@ -798,8 +798,8 @@ impl<'a> Interpreter<'a> {
                         )));
                     }
                 }
-                if let Err(e) = obj.set_field(field_offset, value) {
-                    return OpcodeResult::Error(VmError::RuntimeError(e));
+                if let Err(e) = obj.checked_set_field(field_offset, value) {
+                    return OpcodeResult::Error(VmError::RuntimeError(e.to_string()));
                 }
                 if let Some(field_name) = self.field_name_for_offset(obj, field_offset) {
                     self.sync_descriptor_value(actual_obj, &field_name, value);
@@ -890,8 +890,8 @@ impl<'a> Interpreter<'a> {
                         )));
                     }
                 }
-                if let Err(e) = obj.set_field(field_offset, value) {
-                    return OpcodeResult::Error(VmError::RuntimeError(e));
+                if let Err(e) = obj.checked_set_field(field_offset, value) {
+                    return OpcodeResult::Error(VmError::RuntimeError(e.to_string()));
                 }
                 if let Some(field_name) = self.field_name_for_offset(obj, field_offset) {
                     self.sync_descriptor_value(actual_obj, &field_name, value);
@@ -1086,8 +1086,8 @@ impl<'a> Interpreter<'a> {
 
                 let obj_ptr = unsafe { obj_val.as_ptr::<Object>() };
                 let obj = unsafe { &mut *obj_ptr.unwrap().as_ptr() };
-                if let Err(e) = obj.set_field(field_offset, value) {
-                    return OpcodeResult::Error(VmError::RuntimeError(e));
+                if let Err(e) = obj.checked_set_field(field_offset, value) {
+                    return OpcodeResult::Error(VmError::RuntimeError(e.to_string()));
                 }
                 OpcodeResult::Continue
             }

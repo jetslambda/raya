@@ -1461,3 +1461,59 @@ fn field_access_through_a_proxy_currently_raises_and_that_is_a_defect() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Centralized checked object field mutation (D4.3 scope item 4)
+//
+// `Object::set_field` returned `Result<(), String>`, so every caller had to
+// format or match on a message to tell a bounds failure from a binding failure.
+// `checked_set_field` is the single checked path, mirroring the `checked_set` /
+// `checked_push` family D4.2 introduced for arrays, and `set_field` now delegates
+// to it so the ~48 existing call sites keep byte-identical behaviour.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn checked_set_field_reports_a_typed_bounds_error() {
+    use raya_engine::vm::object::ObjectFieldStoreError;
+
+    let mut object = raya_engine::vm::object::Object::new_nominal(1, 0, 2);
+    assert_eq!(object.field_count(), 2);
+
+    // In bounds: stores, and reports no error.
+    assert!(object.checked_set_field(1, Value::i32(5)).is_ok());
+    assert_eq!(object.get_field(1), Some(Value::i32(5)));
+
+    // Out of bounds: a typed, inspectable variant carrying the numbers, not a
+    // string that has to be matched on.
+    let error = object
+        .checked_set_field(7, Value::i32(9))
+        .expect_err("offset 7 is outside a 2-field object");
+    assert_eq!(
+        error,
+        ObjectFieldStoreError::OutOfBounds {
+            index: 7,
+            field_count: 2
+        }
+    );
+
+    // The failed store must not have mutated anything. Object fields are
+    // null-initialised, so the untouched field reads as null rather than absent.
+    assert_eq!(object.field_count(), 2);
+    assert_eq!(object.get_field(0), Some(Value::null()));
+    assert_eq!(object.get_field(1), Some(Value::i32(5)));
+}
+
+#[test]
+fn set_field_message_is_unchanged_by_the_delegation() {
+    // Regression guard for the ~48 call sites still using `set_field`: the wrapper
+    // must render exactly the message the original implementation produced,
+    // byte for byte. If this drifts, error output changes across the whole VM.
+    let mut object = raya_engine::vm::object::Object::new_nominal(1, 0, 1);
+    assert_eq!(
+        object.set_field(4, Value::i32(1)).unwrap_err(),
+        "Field index 4 out of bounds (object has 1 fields)"
+    );
+    // And the success path is unchanged too.
+    assert!(object.set_field(0, Value::i32(3)).is_ok());
+    assert_eq!(object.get_field(0), Some(Value::i32(3)));
+}
