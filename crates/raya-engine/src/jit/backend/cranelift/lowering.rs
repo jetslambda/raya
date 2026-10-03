@@ -53,6 +53,7 @@ pub struct LoweringContext<'a> {
     /// Imported signature for RuntimeHelperTable.object_get_field
     sig_object_get_field: Option<ir::SigRef>,
     sig_refcell_load: Option<ir::SigRef>,
+    sig_refcell_store: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.object_get_shape_field
     sig_object_get_shape_field: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.object_set_shape_field
@@ -186,6 +187,7 @@ impl<'a> LoweringContext<'a> {
             sig_const_string: None,
             sig_object_get_field: None,
             sig_refcell_load: None,
+            sig_refcell_store: None,
             sig_object_get_shape_field: None,
             sig_object_set_shape_field: None,
             sig_object_implements_shape: None,
@@ -924,6 +926,60 @@ impl<'a> LoweringContext<'a> {
             }
 
             // ===== Object Field Access (shape-aware helper path) =====
+            JitInstr::StoreRefCell {
+                cell,
+                value,
+                stack,
+                bytecode_offset,
+            } => {
+                // Mirrors the shape-field store: null ctx or a helper FALLBACK both
+                // take the interpreter exit. The helper checks the receiver before
+                // writing, so a FALLBACK return means the RefCell was not mutated --
+                // which is what makes re-running the store in the interpreter safe.
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "refcell store fallback stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let success_block = builder.create_block();
+                builder
+                    .ins()
+                    .brif(is_ctx_null, fallback_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_REFCELL_STORE_OFFSET,
+                );
+                let sig = self.refcell_store_sig(builder);
+                let cell_val = self.use_reg(builder, *cell);
+                let value_val = self.use_reg(builder, *value);
+                let call = builder
+                    .ins()
+                    .call_indirect(sig, fn_ptr, &[cell_val, value_val, shared_state]);
+                let result = builder.inst_results(call)[0];
+                let is_success = builder.ins().icmp_imm(condcodes::IntCC::Equal, result, 1);
+                builder
+                    .ins()
+                    .brif(is_success, success_block, &[], fallback_block, &[]);
+                builder.seal_block(fallback_block);
+                builder.seal_block(success_block);
+
+                builder.switch_to_block(fallback_block);
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.switch_to_block(success_block);
+            }
             JitInstr::LoadRefCell {
                 dest,
                 cell,
@@ -2472,6 +2528,20 @@ impl<'a> LoweringContext<'a> {
             .call_indirect(sig, fn_ptr, &[index, module_ptr, shared_state]);
         let string_ptr = builder.inst_results(call)[0];
         self.def_reg(builder, dest, string_ptr);
+    }
+
+    fn refcell_store_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_refcell_store {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I64)); // refcell value
+        sig.params.push(AbiParam::new(types::I64)); // value to store
+        sig.params.push(AbiParam::new(types::I64)); // shared_state ptr
+        sig.returns.push(AbiParam::new(types::I8)); // 1 success / 0 fallback
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_refcell_store = Some(sig_ref);
+        sig_ref
     }
 
     fn refcell_load_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {

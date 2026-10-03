@@ -2122,6 +2122,17 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     unsafe extern "C" fn stub_refcell_load(_refcell: u64, _shared_state: *mut ()) -> u64 {
         raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
+
+    /// Reports failure, which routes the store to the interpreter rather than
+    /// pretending it happened. `StoreRefCell` is still `Rejected`, so no compiled
+    /// test reaches this.
+    unsafe extern "C" fn stub_refcell_store(
+        _refcell: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2216,6 +2227,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             array_pop: stub_array_pop,
             array_len: stub_array_len,
             refcell_load: stub_refcell_load,
+            refcell_store: stub_refcell_store,
         },
     };
 
@@ -2280,6 +2292,17 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     /// value.
     unsafe extern "C" fn stub_refcell_load(_refcell: u64, _shared_state: *mut ()) -> u64 {
         raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter rather than
+    /// pretending it happened. `StoreRefCell` is still `Rejected`, so no compiled
+    /// test reaches this.
+    unsafe extern "C" fn stub_refcell_store(
+        _refcell: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2375,6 +2398,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             array_pop: stub_array_pop,
             array_len: stub_array_len,
             refcell_load: stub_refcell_load,
+            refcell_store: stub_refcell_store,
         },
     };
 
@@ -2440,6 +2464,17 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     /// value.
     unsafe extern "C" fn stub_refcell_load(_refcell: u64, _shared_state: *mut ()) -> u64 {
         raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter rather than
+    /// pretending it happened. `StoreRefCell` is still `Rejected`, so no compiled
+    /// test reaches this.
+    unsafe extern "C" fn stub_refcell_store(
+        _refcell: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2542,6 +2577,7 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             array_pop: stub_array_pop,
             array_len: stub_array_len,
             refcell_load: stub_refcell_load,
+            refcell_store: stub_refcell_store,
         },
     };
 
@@ -2602,6 +2638,17 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     /// value.
     unsafe extern "C" fn stub_refcell_load(_refcell: u64, _shared_state: *mut ()) -> u64 {
         raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter rather than
+    /// pretending it happened. `StoreRefCell` is still `Rejected`, so no compiled
+    /// test reaches this.
+    unsafe extern "C" fn stub_refcell_store(
+        _refcell: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2704,6 +2751,7 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             array_pop: stub_array_pop,
             array_len: stub_array_len,
             refcell_load: stub_refcell_load,
+            refcell_store: stub_refcell_store,
         },
     };
 
@@ -2771,6 +2819,17 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     /// value.
     unsafe extern "C" fn stub_refcell_load(_refcell: u64, _shared_state: *mut ()) -> u64 {
         raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter rather than
+    /// pretending it happened. `StoreRefCell` is still `Rejected`, so no compiled
+    /// test reaches this.
+    unsafe extern "C" fn stub_refcell_store(
+        _refcell: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2881,6 +2940,7 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             array_pop: stub_array_pop,
             array_len: stub_array_len,
             refcell_load: stub_refcell_load,
+            refcell_store: stub_refcell_store,
         },
     };
 

@@ -213,6 +213,7 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         array_pop: helper_array_pop,
         array_len: helper_array_len,
         refcell_load: helper_load_refcell,
+        refcell_store: helper_store_refcell,
     }
 }
 
@@ -1755,7 +1756,6 @@ unsafe extern "C" fn helper_load_refcell(refcell_raw: u64, _shared_state: *mut (
 // Unused until the Cranelift lowering for RefCell exists. Marked rather than left
 // to warn on every build: these are deliberately unreachable, and the alternative
 // -- wiring them now without a differential test -- is the thing D4.3 got wrong.
-#[allow(dead_code)]
 unsafe extern "C" fn helper_store_refcell(
     refcell_raw: u64,
     value_raw: u64,

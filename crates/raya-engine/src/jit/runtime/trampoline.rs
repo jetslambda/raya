@@ -180,6 +180,11 @@ pub const HELPER_ARRAY_LEN_OFFSET: i32 =
 /// because offsets are computed from it, so new fields go at the end.
 pub const HELPER_REFCELL_LOAD_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, refcell_load) as i32;
+/// Byte offset of the RefCell-store helper in [`RuntimeContext`].
+///
+/// 1 = `JIT_STORE_SUCCESS`, 0 = `JIT_STORE_FALLBACK`.
+pub const HELPER_REFCELL_STORE_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, refcell_store) as i32;
 
 const _: () = assert!(std::mem::align_of::<RuntimeContext>() >= 8);
 const _: () = assert!(std::mem::size_of::<RuntimeContext>() >= std::mem::size_of::<RuntimeHelperTable>());
@@ -250,6 +255,8 @@ pub struct RuntimeHelperTable {
     /// RefCell load: (refcell_val, shared_state) -> contained value, or the
     /// interpreter-fallback sentinel for a receiver that is not a pointer.
     pub refcell_load: unsafe extern "C" fn(u64, *mut ()) -> u64,
+    /// RefCell store: (refcell_val, value, shared_state) -> 1 success / 0 fallback
+    pub refcell_store: unsafe extern "C" fn(u64, u64, *mut ()) -> i8,
 }
 
 /// Validate the boxed arguments at a JIT entry boundary against a verified
