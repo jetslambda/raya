@@ -1701,6 +1701,73 @@ unsafe extern "C" fn helper_value_to_string(value_raw: u64, shared_state: *mut (
 // without fixing the interpreter in the same change.
 
 // ---------------------------------------------------------------------------
+// Task helpers (D4.6)
+// ---------------------------------------------------------------------------
+
+/// `Await` one of the paths that do not suspend.
+///
+/// Three paths, and this covers the two that can be leaf operations:
+///
+/// 1. **The value is not a task id** — pushed straight back, execution continues.
+///    This is JS-like `await` normalisation. Note `Value::as_u64` is **tag-gated**
+///    (`is_u64()` then `PAYLOAD_MASK`), so `await` on a boxed `i32 42` returns
+///    `None` and is NOT read as task id 42. The test below pins that.
+/// 2. **The awaited task is already `Completed`** — its result is returned.
+/// 3. **Cancelled or still pending** — returns the interpreter-fallback sentinel, so
+///    the interpreter raises `"Awaited task {:?} cancelled"` or suspends
+///    respectively. A leaf helper cannot raise, and it must not invent a value for
+///    either case.
+///
+/// Path 3 is not an oversight: `JitSuspendReason` has no `AwaitTask` variant, so the
+/// JIT cannot express an await suspension at all. Its only suspension is
+/// `InterpreterBoundary`. See the D4.6 spec.
+///
+/// NOT YET LOWERED. See the note on the RefCell helpers.
+#[allow(dead_code)]
+unsafe extern "C" fn helper_await_task(value_raw: u64, shared_state: *mut ()) -> u64 {
+    let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
+        Some(ptr) => &*ptr.as_ptr(),
+        None => return JIT_INTERPRETER_FALLBACK_SENTINEL,
+    };
+    let value = Value::from_raw(value_raw);
+
+    // Path 1. Deliberately `Value::as_u64()` and not a payload test: the accessor is
+    // tag-gated, and reimplementing it by payload would misread any value whose
+    // payload looks like a plausible task id.
+    let Some(task_id_u64) = value.as_u64() else {
+        return value_raw;
+    };
+
+    if bridge.tasks.is_null() {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+    let task_id = crate::vm::scheduler::TaskId::from_u64(task_id_u64);
+    let tasks = (&*bridge.tasks).read();
+    let Some(awaited) = tasks.get(&task_id).cloned() else {
+        // Unknown task id: let the interpreter produce its own error rather than
+        // guessing at one here.
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    };
+    drop(tasks);
+
+    if awaited.is_cancelled() {
+        // The interpreter raises "Awaited task {:?} cancelled" after marking the
+        // rejection observed. Marking it is a visible side effect we must not
+        // duplicate, so hand back and let the interpreter do it exactly once.
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+
+    if awaited.state() == crate::vm::scheduler::TaskState::Completed {
+        // Path 2. `result()` may be unset on a completed task; the interpreter uses
+        // `unwrap_or(Value::null())`, and so must this.
+        return awaited.result().unwrap_or(Value::null()).raw();
+    }
+
+    // Path 3: still pending. The interpreter suspends; we cannot, so exit.
+    JIT_INTERPRETER_FALLBACK_SENTINEL
+}
+
+// ---------------------------------------------------------------------------
 // Closure helpers (D4.4)
 //
 // NOT YET LOWERED. `lowering.rs` has no `MakeClosure` arm and the opcode stays
@@ -2896,6 +2963,91 @@ mod tests {
     /// The failure cases matter more than the success case here: the interpreter
     /// has four distinct diagnostics for this opcode and every one of them has to
     /// collapse to a zero return so the boundary exit can raise the right thing.
+    /// D4.6 `Await`, paths 1 and 2. NOT lowered yet.
+    ///
+    /// The first test is the one that matters: `Value::as_u64` is **tag-gated**, so
+    /// `await` on a boxed `i32 42` must push that exact value back. A payload-based
+    /// "is this a task id" test would read 42 as a task id, and a guard that rejected
+    /// integer-looking values would break ordinary `await 42`.
+    #[test]
+    fn await_helper_pushes_back_a_non_task_value() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // Path 1, the tagged-integer case: unchanged, not read as task id 42.
+            for value in [
+                Value::i32(42),
+                Value::i64(42),
+                Value::bool(true),
+                Value::null(),
+            ] {
+                assert_eq!(
+                    unsafe { helper_await_task(value.raw(), ss) },
+                    value.raw(),
+                    "a non-task value must be pushed back unchanged: {value:?}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn await_helper_returns_a_completed_task_result_and_refuses_otherwise() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // Path 2: a completed task yields its result.
+            let completed = std::sync::Arc::new(
+                crate::vm::scheduler::Task::new(1, module.clone(), None),
+            );
+            completed.complete(Value::i32(99));
+            let id = completed.id();
+            let as_u64 = {
+                // Task ids are carried as tagged u64 Values, which is exactly what `Await`
+                // reads: `TaskId::as_u64` -> `Value::u64` -> tag-gated `as_u64()` back.
+                crate::vm::value::Value::u64(id.as_u64()).raw()
+            };
+            {
+                let mut tasks = unsafe { (&*bridge.tasks).write() };
+                tasks.insert(id, completed.clone());
+            }
+            assert_eq!(
+                unsafe { helper_await_task(as_u64, ss) },
+                Value::i32(99).raw(),
+                "a completed task must yield its result"
+            );
+
+            // A pending task must fall back rather than inventing a value: the
+            // interpreter suspends, and the JIT has no AwaitTask suspend reason.
+            let pending = std::sync::Arc::new(
+                crate::vm::scheduler::Task::new(2, module.clone(), None),
+            );
+            let pending_id = pending.id();
+            let pending_as_u64 = {
+                crate::vm::value::Value::u64(pending_id.as_u64()).raw()
+            };
+            {
+                let mut tasks = unsafe { (&*bridge.tasks).write() };
+                tasks.insert(pending_id, pending.clone());
+            }
+            assert_eq!(
+                unsafe { helper_await_task(pending_as_u64, ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL,
+                "a pending task must fall back so the interpreter suspends"
+            );
+
+            // An unknown id falls back too, so the interpreter raises its own error.
+            let unknown = {
+                crate::vm::value::Value::u64(u64::MAX >> 4).raw()
+            };
+            assert_eq!(
+                unsafe { helper_await_task(unknown, ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL
+            );
+        });
+    }
+
     #[test]
     fn bind_method_helper_binds_and_rejects() {
         let (shared, module, code_cache, task) = array_helper_fixture();
