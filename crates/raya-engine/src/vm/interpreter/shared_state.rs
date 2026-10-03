@@ -1237,27 +1237,24 @@ mod tests {
         StructuralSlotBinding,
     };
 
-    /// `layout_field_names_for_object` and `structural_layout_names` exist twice —
-    /// once on `Interpreter` (`core.rs`) and once on `SharedVmState` — with
-    /// identical bodies, and **both are live**: the `Interpreter` copies are called
-    /// from `opcodes/objects.rs`, the `SharedVmState` copies from `reflect.rs`,
-    /// `exceptions.rs` and `native.rs`.
+    /// `SharedVmState::layout_field_names_for_object` resolves through
+    /// `structural_layout_shapes`, and that is the only registry it has.
     ///
-    /// They are not consolidated yet: doing so needs the `Interpreter` to reach
-    /// `SharedVmState`, or both to share one set of associated functions over
-    /// `metadata` / `class_metadata` / `layouts` / `structural_shape_names` (the
-    /// D4.7 extraction). Until then this test is the guard: it pins the two
-    /// implementations against the same inputs, so a future edit to one that is not
-    /// mirrored in the other fails here rather than surfacing much later as a
-    /// layout-name lookup that works for classes and silently misses structural
-    /// objects.
+    /// There is a near-identical function on `Interpreter`
+    /// (`core.rs::layout_field_names_for_object`) which falls back to
+    /// **`structural_object_shapes`** — a registry `SharedVmState` does not have.
+    /// I twice mistook the two for duplicated code and nearly "consolidated" them,
+    /// which would have changed which shapes resolve. They are not interchangeable
+    /// and this test exists so that stays true.
     ///
-    /// The failure mode it guards against is the same shape as
-    /// `CfgBlock::start_offset` / `CfgBlock.start_offset` — one field under two
-    /// names — which is also in this codebase and also maintained twice.
+    /// What it pins: a layout registered in `structural_layout_shapes` is found by
+    /// name. That is the behaviour that actually matters — the companion half, that a
+    /// layout *not* registered is not found, is asserted too, since silently
+    /// resolving an unregistered layout to a name would be worse than not
+    /// resolving it.
     #[test]
-    fn layout_name_resolution_is_not_duplicated() {
-        use crate::vm::object::{Object, ShapeId};
+    fn layout_field_names_resolve_through_the_registry_shared_vm_state_actually_has() {
+        use crate::vm::object::{Object, STRUCTURAL_LAYOUT_ID_TAG};
         use rustc_hash::FxHashMap;
         use std::sync::Arc;
 
@@ -1266,26 +1263,29 @@ mod tests {
         let injector = Arc::new(crossbeam_deque::Injector::new());
         let shared = super::SharedVmState::new(safepoint, tasks, injector);
 
-        // An object with an unknown layout, which is the case where the two could
-        // plausibly diverge: one may consult a registry the other does not.
-        let object = Object::new_nominal(1, 99, 0);
+        // A structural layout id, distinct from any nominal one. `ShapeId` is a
+        // `u64` alias, and `STRUCTURAL_LAYOUT_ID_TAG` is the high bit marking a
+        // layout as structural rather than nominal.
+        let layout_id: crate::vm::object::LayoutId = STRUCTURAL_LAYOUT_ID_TAG | 7;
+        let object = Object::new_structural(layout_id, 2);
 
-        // Same input through `SharedVmState`...
-        let via_shared = shared.layout_field_names_for_object(&object);
-        // ...and through the shared-state helper the `Interpreter` copy delegates to.
-        let via_helper = super::SharedVmState::structural_layout_names(&shared, object.layout_id())
-            .or_else(|| crate::vm::object::global_layout_names(object.layout_id()));
-
+        // Unregistered: must not resolve to a name rather than inventing one.
         assert_eq!(
-            via_shared, via_helper,
-            "layout_field_names_for_object must agree with the path it delegates to; \
-             if these diverge, a layout-name lookup works for one kind of object and \
-             silently misses the other"
+            shared.layout_field_names_for_object(&object),
+            None,
+            "an unregistered layout must not resolve to field names"
         );
-        // Nothing registered, so both must agree on "unknown" rather than guessing.
-        assert_eq!(via_shared, None, "unregistered layout must resolve to None");
-        let _: Option<Vec<String>> = via_helper;
-        let _ = ShapeId::default();
+
+        // Registered in the registry SharedVmState actually consults.
+        {
+            let mut shapes = shared.structural_layout_shapes.write();
+            shapes.insert(layout_id, vec!["alpha".to_string(), "beta".to_string()]);
+        }
+        assert_eq!(
+            shared.layout_field_names_for_object(&object),
+            Some(vec!["alpha".to_string(), "beta".to_string()]),
+            "a layout registered in structural_layout_shapes must resolve by name"
+        );
     }
 
     #[cfg(feature = "jit")]
