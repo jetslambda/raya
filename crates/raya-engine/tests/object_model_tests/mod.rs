@@ -1318,3 +1318,146 @@ fn store_field_invokes_a_descriptor_setter() {
         "descriptor setter was not invoked; got {result:?}"
     );
 }
+
+/// `builtin::reflect::CREATE_PROXY` (`vm/builtin.rs:544`). `createProxy` is
+/// dispatched from `CallMethodExact`, so a proxy can be created from bytecode --
+/// no local injection needed.
+const CREATE_PROXY: u32 = 0x0DB0;
+
+/// Builds a module whose `main` creates a target with `x = 42`, wraps it in a
+/// proxy via `createProxy(target, handler)`, then reads field 0 **through the
+/// proxy** and returns it.
+///
+/// `CallMethodExact` pops exactly `arg_count` arguments and leaves the receiver on
+/// the stack, so the bytecode pops the receiver before storing the proxy.
+///
+/// The expected answer is 42, and it can only come through the target: the proxy
+/// object itself has no fields, and `ensure_object_receiver` would reject a proxy
+/// outright if the handler did not unwrap it first. This pins the interpreter
+/// contract the JIT helpers break -- `jit_object_ptr_checked` returns `None` for a
+/// proxy where the interpreter unwraps to the target.
+fn proxy_field_read_module() -> Module {
+    use raya_engine::compiler::bytecode::{
+        ClassReflectionData, FieldReflectionData, ReflectionData,
+    };
+
+    fn push_local(code: &mut Vec<u8>, slot: u16) {
+        code.push(Opcode::LoadLocal as u8);
+        code.extend_from_slice(&slot.to_le_bytes());
+    }
+    fn store_local(code: &mut Vec<u8>, slot: u16) {
+        code.push(Opcode::StoreLocal as u8);
+        code.extend_from_slice(&slot.to_le_bytes());
+    }
+
+    let mut module = Module::new("proxy_field_read".to_string());
+    module.classes.push(class_def("Target", 1, None));
+    module.classes.push(class_def("Handler", 0, None));
+
+    module.reflection = Some(ReflectionData {
+        classes: vec![
+            ClassReflectionData {
+                fields: vec![FieldReflectionData {
+                    name: "x".to_string(),
+                    type_name: "i32".to_string(),
+                    is_readonly: false,
+                    is_static: false,
+                }],
+                method_names: vec![],
+                static_field_names: vec![],
+            },
+            ClassReflectionData {
+                fields: vec![],
+                method_names: vec![],
+                static_field_names: vec![],
+            },
+        ],
+    });
+
+    let mut code: Vec<u8> = Vec::new();
+    // local 0 = target with x = 42
+    code.push(Opcode::NewType as u8);
+    code.extend_from_slice(&0u16.to_le_bytes());
+    store_local(&mut code, 0);
+    push_local(&mut code, 0);
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&42i32.to_le_bytes());
+    code.push(Opcode::InitObject as u8);
+    code.extend_from_slice(&0u16.to_le_bytes());
+    code.push(Opcode::Pop as u8);
+
+    // local 1 = handler, also used as the ignored CallMethodExact receiver
+    code.push(Opcode::NewType as u8);
+    code.extend_from_slice(&1u16.to_le_bytes());
+    store_local(&mut code, 1);
+
+    // createProxy(target, handler)
+    push_local(&mut code, 1);
+    push_local(&mut code, 0);
+    push_local(&mut code, 1);
+    code.push(Opcode::CallMethodExact as u8);
+    code.extend_from_slice(&CREATE_PROXY.to_le_bytes());
+    code.extend_from_slice(&2u16.to_le_bytes());
+    // CallMethodExact pops 2 args and pushes the proxy, so the stack is now
+    // [receiver, proxy]. Store the proxy (top) first, then drop the receiver --
+    // popping first would discard the proxy and leave the 0-field handler in
+    // local 2, which reads back as null.
+    store_local(&mut code, 2);
+    code.push(Opcode::Pop as u8);
+
+    // return proxy.x
+    push_local(&mut code, 2);
+    code.push(Opcode::LoadFieldExact as u8);
+    code.extend_from_slice(&0u16.to_le_bytes());
+    code.push(Opcode::Return as u8);
+
+    module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "main".to_string(),
+        param_count: 0,
+        local_count: 3,
+        code,
+    });
+    module
+}
+
+#[test]
+fn field_access_through_a_proxy_currently_raises_and_that_is_a_defect() {
+    // Characterization test, not an endorsement.
+    //
+    // Field access on a proxy does NOT work today, in either engine:
+    //
+    //   * the interpreter raises `TypeError: Expected Object receiver for field
+    //     access, got UnknownGcType`, because `ensure_object_receiver`
+    //     (objects.rs:459) has no Proxy case and runs BEFORE the handler's
+    //     `unwrap_proxy_target` call. That makes the unwrap unreachable -- the
+    //     eight `unwrap_proxy_target` sites in the field handlers are dead code
+    //     for proxies.
+    //   * the JIT helpers never unwrap at all; `jit_object_ptr_checked` returns
+    //     `None` for a proxy and the load yields null.
+    //
+    // So this is a uniformly unsupported feature rather than an interpreter/JIT
+    // divergence, and it needs a design decision before it can be "fixed":
+    // silently unwrapping bypasses the proxy handler, and `objects.rs:553` carries
+    // a TODO saying full trap support would call `handler.get(target, fieldName)`.
+    // Whether an unwrapped proxy should bypass traps or raise is not this
+    // milestone's call.
+    //
+    // When that decision lands, this test flips: either proxy field access starts
+    // working (expect 42) or the TypeError becomes deliberate and this becomes a
+    // documented error contract.
+    let mut vm = Vm::new();
+    let outcome = vm.execute(&proxy_field_read_module());
+    match outcome {
+        Ok(value) => panic!("expected the current TypeError, got Ok({value:?})"),
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                message.contains("Expected Object receiver for field access"),
+                "expected the proxy receiver TypeError, got: {message}"
+            );
+        }
+    }
+}
