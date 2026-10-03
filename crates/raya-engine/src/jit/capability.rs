@@ -641,6 +641,20 @@ mod tests {
 
     #[test]
     fn concurrency_is_never_selectable() {
+        // The reasons differ per opcode and are structural, not "not written yet":
+        //
+        // * `Sleep` ALWAYS suspends -- the handler computes a `wake_at` and returns
+        //   `Suspend(Sleep { wake_at })` unconditionally -- and `JitSuspendReason` has
+        //   no `Sleep` variant, so the JIT cannot express it. Its lifter arm pushes no
+        //   destination either, leaving the lifted stack one entry short with no exit.
+        // * `MutexLock` consults `mutex_registry` and `try_lock(task.id())`, so its
+        //   result depends on lock state held elsewhere, and it has three outcomes.
+        // * `Spawn`/`SpawnClosure` create tasks the scheduler then runs.
+        // * `NewChannel` is a runtime resource, not a value operation.
+        //
+        // A helper for any of these would only relocate the problem into the
+        // lowering. See the D4.6 spec.
+        //
         // `Await` is no longer here: promoted 2026-10-03, with its coverage
         // recorded as asymmetric in `jit_support` (path 1 has a cross-engine
         // differential, paths 2 and 3 are helper-level only). It is asserted as
