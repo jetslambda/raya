@@ -676,7 +676,15 @@ fn test_load_rbin_file() {
 
     // Write to temp file
     let dir = std::env::temp_dir();
-    let path = dir.join("raya_test_module.ryb");
+    // Unique per process: this path used to be fixed, so two concurrent runs of
+    // this test binary raced — whichever finished first deleted the file the other
+    // was still reading. Observed once as an unexplained `test_load_rbin_file`
+    // failure that passed on both a clean tree and a dirty one.
+    let path = dir.join(format!(
+        "raya_test_module_{}_{}.ryb",
+        std::process::id(),
+        "rbin"
+    ));
     let bytes = module.encode();
     std::fs::write(&path, &bytes).expect("Failed to write temp .ryb file");
 
@@ -892,7 +900,12 @@ fn test_e2e_snapshot_file_round_trip_with_module() {
     let _result = vm1.execute(&module).unwrap();
 
     let dir = std::env::temp_dir();
-    let snap_path = dir.join("raya_e2e_snapshot.snap");
+    // Unique per process, for the same reason as `raya_test_module` above.
+    let snap_path = dir.join(format!(
+        "raya_e2e_snapshot_{}_{}.snap",
+        std::process::id(),
+        "snap"
+    ));
     vm1.snapshot_to_file(&snap_path).unwrap();
 
     let mut vm2 = Vm::new();
