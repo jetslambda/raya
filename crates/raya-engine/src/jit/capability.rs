@@ -445,6 +445,41 @@ mod tests {
     /// `BindMethod` went wrong, so it is pinned explicitly: a future promotion has
     /// to be a visible act with evidence behind it, not a side effect of the
     /// table's default.
+    /// D4.6 baseline: the task and concurrency family, pinned explicitly.
+    ///
+    /// All eight appear in this file only inside *tests*, never in the
+    /// classification table, so every one falls to the `_ => Rejected` catch-all.
+    /// That is the correct starting posture and the same one D4.4 had, so this test
+    /// exists to stop the family widening by accident rather than to record a defect.
+    ///
+    /// The lifter arms for these are real — `Await { dest, task }` pops and pushes,
+    /// `Sleep { duration }` pops, `Yield` is a bare marker, `Spawn` builds its
+    /// argument list — so a future promotion has genuine work to do above the lifter
+    /// rather than a placeholder to replace.
+    #[test]
+    fn task_and_concurrency_family_is_rejected() {
+        for op in [
+            Opcode::Spawn,
+            Opcode::Await,
+            Opcode::Yield,
+            Opcode::NewMutex,
+            Opcode::MutexLock,
+            Opcode::MutexUnlock,
+            Opcode::SpawnClosure,
+            Opcode::Sleep,
+        ] {
+            assert_eq!(jit_support(op), JitSupport::Rejected, "{op:?}");
+            assert!(
+                !opcode_supported_for_jit(op),
+                "{op:?} must not be selectable"
+            );
+            assert!(
+                !produces_incorrect_native_results(op),
+                "{op:?} lifts cleanly, so it must not be on the known-wrong list"
+            );
+        }
+    }
+
     #[test]
     fn exception_family_is_rejected_until_the_throw_path_propagates() {
         for op in [
