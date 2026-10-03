@@ -1029,7 +1029,12 @@ impl<'a> LoweringContext<'a> {
                     crate::jit::runtime::trampoline::HELPER_DYN_GET_KEYED_OFFSET,
                 );
                 let sig = self.dyn_get_keyed_sig(builder);
-                let object_val = self.use_reg(builder, *object);
+                // BOXED, like the key -- not `use_reg`. A heap `Value` lives in a
+                // register as an UNTAGGED raw pointer, and `Value::is_heap_allocated`
+                // (which `js_classify` keys off) reads the NaN-box tag. Passing the
+                // register raw made every string and array look like an unclassified
+                // value, so the helper declined the whole view and the arm fell back.
+                let object_val = self.boxed_reg_value(builder, *object);
                 // Both operands are VM Values, so the key must be boxed rather than
                 // passed as a raw register -- the same NaN-boxing rule as every
                 // other Value-taking helper.
