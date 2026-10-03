@@ -1672,6 +1672,22 @@ unsafe extern "C" fn helper_value_to_string(value_raw: u64, shared_state: *mut (
     result.raw()
 }
 
+/// Exact field load.
+///
+/// This is **not** an implementation of the interpreter's `LoadFieldExact`. It
+/// omits two things the interpreter does, and the omission is why the opcode is
+/// `Rejected` in `jit/capability.rs` rather than `HelperExact`:
+///
+///  * it does not consult `__node_compat_descriptor` accessors, so a field
+///    installed with a `get` descriptor returns the raw slot instead of invoking
+///    the getter;
+///  * it does not unwrap a proxy receiver, so `jit_object_ptr_checked` returns
+///    `None` and the load yields null where the interpreter reads the target.
+///
+/// It also does not pass through `helper_object_get_shape_field`, which resolves
+/// slots through a shape adapter. Do not wire this helper to `LoadFieldExact`
+/// without all three, and do not promote the opcode on the strength of this
+/// comment — see /workspace/specs/2026-10-03-raya-d4-fixed-layout-objects.md.
 unsafe extern "C" fn helper_object_get_field(
     object_raw: u64,
     expected_slot: u32,
@@ -1740,6 +1756,19 @@ unsafe extern "C" fn helper_object_get_field(
     }
 }
 
+/// Exact field store.
+///
+/// Unwired: nothing in `jit/backend/cranelift/lowering.rs` references
+/// `HELPER_OBJECT_SET_FIELD_OFFSET`, which is consistent with `StoreFieldExact`
+/// being `InterpreterBoundary`.
+///
+/// It is also **not** a faithful implementation of that opcode. The interpreter's
+/// `StoreFieldExact` consults `__node_compat_descriptor` and, for a setter-backed
+/// field, invokes the setter as a callable frame plus the writability checks
+/// (`vm/interpreter/opcodes/objects.rs:763-800`). That is not expressible as a
+/// leaf helper returning a value, which is why the classification is correct and
+/// why this helper must never be wired to close the gap. `StoreFieldExact` stays
+/// `InterpreterBoundary` permanently.
 unsafe extern "C" fn helper_object_set_field(
     object_raw: u64,
     expected_slot: u32,
@@ -1909,6 +1938,20 @@ unsafe extern "C" fn helper_object_get_shape_field(
     }
 }
 
+/// Structural shape field store.
+///
+/// Wired at `jit/backend/cranelift/lowering.rs:1325`, but the opcode is
+/// `Rejected` in `jit/capability.rs`, so this arm is not reachable from normal
+/// compilation. Kept wired so the helper stays covered by its lowering test.
+///
+/// Like `helper_object_get_field` it does not consult descriptor accessors or
+/// unwrap a proxy, and unlike `helper_object_get_field` it takes **no layout
+/// generation** — the store lowering bakes none, because the generation the load
+/// path uses comes from `any_layout_generation` on the compiled function. Adding
+/// one would change the helper ABI for a path that cannot currently be reached,
+/// so it is recorded as a precondition for re-promotion rather than done blind.
+/// See Gap 5 in
+/// /workspace/specs/2026-10-03-raya-d4-fixed-layout-objects.md.
 unsafe extern "C" fn helper_object_set_shape_field(
     object_raw: u64,
     required_shape: u64,
