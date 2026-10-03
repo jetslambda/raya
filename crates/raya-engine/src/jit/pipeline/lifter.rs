@@ -264,7 +264,11 @@ pub fn lift_function_with_signature(
     // Create JIT blocks corresponding to CFG blocks
     let mut cfg_to_jit: FxHashMap<BlockId, JitBlockId> = FxHashMap::default();
     for cfg_block in &cfg.blocks {
-        let jit_block = jit_func.add_block();
+        // The lifter does not compute its own partition — it derives one JIT block
+        // per CFG block, so `CfgBlock::start_offset` is the offset-to-block map
+        // `Try` needs, and it already exists. Recording it here is what makes the
+        // lifted partition reconstructable and comparable.
+        let jit_block = jit_func.add_block_at(cfg_block.start_offset);
         cfg_to_jit.insert(cfg_block.id, jit_block);
     }
 
