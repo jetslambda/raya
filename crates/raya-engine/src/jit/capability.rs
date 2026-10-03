@@ -605,6 +605,47 @@ mod tests {
         }
     }
 
+    /// D4.7's two decisions, pinned so neither can be flipped silently.
+    ///
+    /// `DynGetKeyed` is promoted on a **narrowed corpus**: the `Str` view is proven
+    /// by an engine-level differential, the `Arr` view by a helper-level test only,
+    /// and the `Struct` view declines via the fallback sentinel. If someone widens
+    /// that corpus this test is where the claim has to be revisited, not a comment.
+    #[test]
+    fn d4_7_keyed_access_decisions_are_pinned() {
+        assert_eq!(
+            jit_support(Opcode::DynGetKeyed),
+            JitSupport::HelperExact,
+            "DynGetKeyed is promoted for the Str/Arr views, with Struct declining"
+        );
+        assert!(opcode_supported_for_jit(Opcode::DynGetKeyed));
+
+        // DynSetKeyed is DECLINED, and the reason is reachability rather than
+        // difficulty. Its contract has exactly three outcomes:
+        //
+        //   * `Str` is a hard `TypeError` ("DynSetKeyed target must be an object"),
+        //     so unlike the get path there is no string view to own.
+        //   * `Struct` needs `get_field_index_for_value`, `descriptor_accessor`,
+        //     `intern_prop_key` and `sync_descriptor_value` -- all Interpreter-local,
+        //     all reaching `structural_object_shapes`, which the bridge lacks.
+        //   * `Arr` needs only `Array::elements` resize + store, so a helper COULD
+        //     own it. But every array OPCODE is Rejected under the D4.2 posture
+        //     (`array_opcodes_are_rejected_until_exact` below), so no
+        //     natively-compiled bytecode can construct an array to set into. The
+        //     array helpers exist in `jit/runtime/helpers.rs` and are unreachable for
+        //     exactly that reason.
+        //
+        // So the one view it could own cannot be reached, and a helper written for it
+        // would be dead code that reads as live -- the hazard this milestone keeps
+        // meeting. Helper-level evidence alone is what D4.3 proved insufficient.
+        assert_eq!(
+            jit_support(Opcode::DynSetKeyed),
+            JitSupport::Rejected,
+            "DynSetKeyed has no reachable, evidenceable view; see the comment above"
+        );
+        assert!(!opcode_supported_for_jit(Opcode::DynSetKeyed));
+    }
+
     #[test]
     fn array_opcodes_are_rejected_until_exact() {
         // Fail-closed posture (D4.2): no array opcode is JIT-selectable until
