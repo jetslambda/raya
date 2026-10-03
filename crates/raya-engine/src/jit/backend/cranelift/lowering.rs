@@ -938,6 +938,40 @@ impl<'a> LoweringContext<'a> {
             }
 
             // ===== Object Field Access (shape-aware helper path) =====
+            JitInstr::Throw {
+                value,
+                stack,
+                bytecode_offset,
+            } => {
+                // A control transfer with no merged result. `stack` is the snapshot
+                // taken BEFORE the value was popped, so the interpreter resuming at
+                // `bytecode_offset` re-executes this `Throw` and finds the exception
+                // on the stack exactly as it expects.
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "throw exit stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+            }
+            JitInstr::Rethrow {
+                stack,
+                bytecode_offset,
+            } => {
+                // Same shape. Rethrow has no operand, but its snapshot is still the
+                // whole outgoing frame state and must be published, or the DCE would
+                // be free to drop registers the exit needs.
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "rethrow exit stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+            }
             JitInstr::BindMethod {
                 dest,
                 object,
