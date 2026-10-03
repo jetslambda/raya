@@ -219,6 +219,7 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         make_closure: helper_make_closure,
         load_captured: helper_load_captured,
         store_captured: helper_store_captured,
+        bind_method: helper_bind_method,
     }
 }
 
@@ -1739,7 +1740,6 @@ unsafe extern "C" fn helper_value_to_string(value_raw: u64, shared_state: *mut (
 /// `EphemeralRootScope` — native stack maps are empty.
 ///
 /// NOT YET LOWERED. See the note on the RefCell helpers.
-#[allow(dead_code)]
 unsafe extern "C" fn helper_bind_method(
     object_raw: u64,
     method_slot: u32,

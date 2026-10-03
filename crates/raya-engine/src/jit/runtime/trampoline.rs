@@ -221,6 +221,14 @@ pub const HELPER_STORE_CAPTURED_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET
         + std::mem::offset_of!(RuntimeHelperTable, store_captured) as i32;
 
+/// Byte offset of the method-binding helper in [`RuntimeContext`].
+///
+/// Returns the bound method, or null when any of the interpreter's four checks
+/// refuses. A null result becomes the interpreter boundary exit, which raises the
+/// real diagnostic.
+pub const HELPER_BIND_METHOD_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, bind_method) as i32;
+
 const _: () = assert!(std::mem::align_of::<RuntimeContext>() >= 8);
 const _: () = assert!(std::mem::size_of::<RuntimeContext>() >= std::mem::size_of::<RuntimeHelperTable>());
 
@@ -307,6 +315,8 @@ pub struct RuntimeHelperTable {
     /// Captured-value store: (capture_index, value, shared_state)
     /// -> 1 success / 0 fallback
     pub store_captured: unsafe extern "C" fn(u32, u64, *mut ()) -> i8,
+    /// Method binding: (object, method_slot, shared_state) -> BoundMethod, or null
+    pub bind_method: unsafe extern "C" fn(u64, u32, *mut ()) -> u64,
 }
 
 /// Validate the boxed arguments at a JIT entry boundary against a verified

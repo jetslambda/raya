@@ -59,6 +59,7 @@ pub struct LoweringContext<'a> {
     sig_make_closure: Option<ir::SigRef>,
     sig_load_captured: Option<ir::SigRef>,
     sig_store_captured: Option<ir::SigRef>,
+    sig_bind_method: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.object_get_shape_field
     sig_object_get_shape_field: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.object_set_shape_field
@@ -198,6 +199,7 @@ impl<'a> LoweringContext<'a> {
             sig_make_closure: None,
             sig_load_captured: None,
             sig_store_captured: None,
+            sig_bind_method: None,
             sig_object_get_shape_field: None,
             sig_object_set_shape_field: None,
             sig_object_implements_shape: None,
@@ -936,6 +938,77 @@ impl<'a> LoweringContext<'a> {
             }
 
             // ===== Object Field Access (shape-aware helper path) =====
+            JitInstr::BindMethod {
+                dest,
+                object,
+                method_slot,
+                stack,
+                bytecode_offset,
+            } => {
+                // Mirrors the RefCell allocation arms: null ctx to null, otherwise
+                // call the helper and treat a null result as the interpreter exit.
+                // All four of the interpreter's checks (non-object receiver,
+                // structural object, unknown nominal type id, unresolvable slot)
+                // surface as null here, and the boundary exit raises whichever
+                // applies.
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "bind method fallback stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let null_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let done = builder.create_block();
+                builder.append_block_param(done, types::I64);
+                builder
+                    .ins()
+                    .brif(is_ctx_null, null_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+                builder.seal_block(null_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_BIND_METHOD_OFFSET,
+                );
+                let sig = self.bind_method_sig(builder);
+                let object_val = self.use_reg(builder, *object);
+                let slot_val = builder.ins().iconst(types::I32, *method_slot as i64);
+                let call = builder
+                    .ins()
+                    .call_indirect(sig, fn_ptr, &[object_val, slot_val, shared_state]);
+                let result = builder.inst_results(call)[0];
+
+                let is_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, result, 0);
+                builder.ins().brif(
+                    is_null,
+                    fallback_block,
+                    &[],
+                    done,
+                    &[ir::BlockArg::Value(result)],
+                );
+                builder.seal_block(fallback_block);
+
+                builder.switch_to_block(fallback_block);
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.switch_to_block(null_block);
+                let null = abi::emit_null(builder);
+                builder.ins().jump(done, &[ir::BlockArg::Value(null)]);
+
+                builder.seal_block(done);
+                builder.switch_to_block(done);
+                let merged = builder.block_params(done)[0];
+                self.def_reg(builder, *dest, merged);
+            }
             JitInstr::StoreCaptured {
                 index,
                 value,
@@ -2883,6 +2956,20 @@ impl<'a> LoweringContext<'a> {
             .call_indirect(sig, fn_ptr, &[index, module_ptr, shared_state]);
         let string_ptr = builder.inst_results(call)[0];
         self.def_reg(builder, dest, string_ptr);
+    }
+
+    fn bind_method_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_bind_method {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I64)); // receiver
+        sig.params.push(AbiParam::new(types::I32)); // method slot
+        sig.params.push(AbiParam::new(types::I64)); // shared_state ptr
+        sig.returns.push(AbiParam::new(types::I64)); // BoundMethod or null
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_bind_method = Some(sig_ref);
+        sig_ref
     }
 
     fn store_captured_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {

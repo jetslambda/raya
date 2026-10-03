@@ -2177,6 +2177,16 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     ) -> i8 {
         0
     }
+
+    /// Null means the bind did not happen, which routes to the interpreter.
+    /// `BindMethod` is still not selectable, so no compiled test reaches this.
+    unsafe extern "C" fn stub_bind_method(
+        _object: u64,
+        _method_slot: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2277,6 +2287,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             make_closure: stub_make_closure,
             load_captured: stub_load_captured,
             store_captured: stub_store_captured,
+            bind_method: stub_bind_method,
         },
     };
 
@@ -2397,6 +2408,16 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     ) -> i8 {
         0
     }
+
+    /// Null means the bind did not happen, which routes to the interpreter.
+    /// `BindMethod` is still not selectable, so no compiled test reaches this.
+    unsafe extern "C" fn stub_bind_method(
+        _object: u64,
+        _method_slot: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2497,6 +2518,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             make_closure: stub_make_closure,
             load_captured: stub_load_captured,
             store_captured: stub_store_captured,
+            bind_method: stub_bind_method,
         },
     };
 
@@ -2618,6 +2640,16 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     ) -> i8 {
         0
     }
+
+    /// Null means the bind did not happen, which routes to the interpreter.
+    /// `BindMethod` is still not selectable, so no compiled test reaches this.
+    unsafe extern "C" fn stub_bind_method(
+        _object: u64,
+        _method_slot: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2725,6 +2757,7 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             make_closure: stub_make_closure,
             load_captured: stub_load_captured,
             store_captured: stub_store_captured,
+            bind_method: stub_bind_method,
         },
     };
 
@@ -2841,6 +2874,16 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     ) -> i8 {
         0
     }
+
+    /// Null means the bind did not happen, which routes to the interpreter.
+    /// `BindMethod` is still not selectable, so no compiled test reaches this.
+    unsafe extern "C" fn stub_bind_method(
+        _object: u64,
+        _method_slot: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2948,6 +2991,7 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             make_closure: stub_make_closure,
             load_captured: stub_load_captured,
             store_captured: stub_store_captured,
+            bind_method: stub_bind_method,
         },
     };
 
@@ -3071,6 +3115,16 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     ) -> i8 {
         0
     }
+
+    /// Null means the bind did not happen, which routes to the interpreter.
+    /// `BindMethod` is still not selectable, so no compiled test reaches this.
+    unsafe extern "C" fn stub_bind_method(
+        _object: u64,
+        _method_slot: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -3186,6 +3240,7 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             make_closure: stub_make_closure,
             load_captured: stub_load_captured,
             store_captured: stub_store_captured,
+            bind_method: stub_bind_method,
         },
     };
 
