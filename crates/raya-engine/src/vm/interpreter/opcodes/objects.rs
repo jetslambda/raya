@@ -456,6 +456,26 @@ impl<'a> Interpreter<'a> {
         Some(accessor)
     }
 
+    /// Narrow a receiver to something the field accessors can work on.
+    ///
+    /// **This rejects proxies, and that makes every `unwrap_proxy_target` call in
+    /// this file unreachable for them.** The field handlers call this *before*
+    /// their `unwrap_proxy_target`, so a proxy receiver raises
+    /// `TypeError: Expected Object receiver for <context>, got UnknownGcType` and
+    /// the unwrap never runs. Proxy field access does not work in either engine —
+    /// the JIT helpers do not unwrap either, and return null instead of raising.
+    ///
+    /// So treat those eight unwrap sites as aspirational until a proxy receiver is
+    /// admitted here. Whether it should be admitted at all is an open design
+    /// question, not a missing `if`: unwrapping silently bypasses the proxy
+    /// handler, and the TODO at the first unwrap site says full trap support would
+    /// call `handler.get(target, fieldName)`. Adding a Proxy arm here without
+    /// settling that would make a proxy read the target's field and never consult
+    /// the handler, which may be worse than the current honest error.
+    ///
+    /// See /workspace/specs/2026-10-03-raya-d4-fixed-layout-objects.md and the
+    /// characterization test
+    /// `field_access_through_a_proxy_currently_raises_and_that_is_a_defect`.
     pub(in crate::vm::interpreter) fn ensure_object_receiver(
         value: Value,
         context: &'static str,
