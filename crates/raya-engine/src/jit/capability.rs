@@ -158,7 +158,18 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         | Opcode::IsNominal
         | Opcode::CastNominal
         | Opcode::CastShape
-        | Opcode::ImplementsShape => JitSupport::HelperExact,
+        | Opcode::ImplementsShape
+        // RefCell (D4.4). Promoted only after three pieces of evidence existed:
+        // an interpreter baseline for the handlers, direct-lift tests for the
+        // three lowering arms, and a differential running the SAME bytecode
+        // through both engines and comparing the result bits. The helpers
+        // reproduce the interpreter's weak `is_ptr()` check rather than
+        // strengthening it (ALY-54), `NewRefCell` roots its operand across the
+        // allocation and fails closed, and a non-pointer receiver returns the
+        // interpreter-fallback sentinel so the interpreter raises the real error.
+        | Opcode::NewRefCell
+        | Opcode::LoadRefCell
+        | Opcode::StoreRefCell => JitSupport::HelperExact,
         Opcode::StoreFieldExact => JitSupport::InterpreterBoundary,
         Opcode::LoadFieldExact
         | Opcode::OptionalFieldExact
@@ -229,18 +240,17 @@ pub fn produces_incorrect_native_results(opcode: Opcode) -> bool {
 mod tests {
     use super::*;
 
-    /// The gate a promotion actually has to move, tested at the granularity it
-    /// operates on.
+    /// The gate a promotion has to move, tested at the granularity it operates on.
     ///
     /// `opcode_supported_for_jit` is what `function_supported_for_jit`
     /// (`jit/analysis/heuristics.rs:309`) consults, and that is the function a
     /// promotion has to flip. The `jit_compile_and_call_with_locals_exit_and_ctx`
-    /// harness used by the lowering tests does **not** go through it -- it
-    /// compiles whatever it is handed -- so those tests prove the arms work while
-    /// saying nothing about reachability. This is the test that says something
-    /// about reachability.
+    /// harness the lowering tests use does **not** go through it -- it compiles
+    /// whatever it is handed -- so those tests prove the arms work while saying
+    /// nothing about reachability. This is the test that says something about
+    /// reachability, and it is the one that flipped for the D4.4 promotion.
     #[test]
-    fn refcell_opcodes_keep_a_function_out_of_the_jit() {
+    fn refcell_opcodes_make_a_function_jit_eligible() {
         use crate::jit::analysis::heuristics::function_supported_for_jit;
         use crate::compiler::bytecode::Function;
 
@@ -254,9 +264,9 @@ mod tests {
             code,
         };
 
-        // Control: a function built only from promoted opcodes is eligible. If this
-        // ever fails, the gate itself is broken and every other assertion here is
-        // meaningless.
+        // Control: a function built only from long-promoted opcodes must stay
+        // eligible. If this ever fails, the gate is not measuring what we think and
+        // every other assertion here is meaningless.
         assert!(
             function_supported_for_jit(&function_with(vec![
                 Opcode::ConstI32 as u8, 1, 0, 0, 0, Opcode::Return as u8,
@@ -264,38 +274,57 @@ mod tests {
             "control function must be JIT-eligible, or the gate is not measuring what we think"
         );
 
-        // Each RefCell opcode alone must keep the whole function out of the JIT.
+        // Each RefCell opcode now makes its function ELIGIBLE rather than excluded.
+        // This is the flip, and it is the assertion that would fail if a promotion
+        // were made without moving the table.
         for (op, label) in [
             (Opcode::NewRefCell, "NewRefCell"),
             (Opcode::LoadRefCell, "LoadRefCell"),
             (Opcode::StoreRefCell, "StoreRefCell"),
         ] {
             assert!(
+                function_supported_for_jit(&function_with(vec![
+                    op as u8,
+                    Opcode::ConstI32 as u8, 1, 0, 0, 0, Opcode::Return as u8,
+                ])),
+                "{label} must now make its function JIT-eligible"
+            );
+        }
+
+        // The closure opcodes remain excluded: they have no lowering arm at all, so
+        // eligibility would be a crash rather than a fast path. Keep them pinned so
+        // the family cannot widen by accident.
+        for (op, label) in [
+            (Opcode::MakeClosure, "MakeClosure"),
+            (Opcode::LoadCaptured, "LoadCaptured"),
+            (Opcode::StoreCaptured, "StoreCaptured"),
+            (Opcode::SetClosureCapture, "SetClosureCapture"),
+            (Opcode::CloseVar, "CloseVar"),
+        ] {
+            assert!(
                 !function_supported_for_jit(&function_with(vec![
                     op as u8,
                     Opcode::ConstI32 as u8, 1, 0, 0, 0, Opcode::Return as u8,
                 ])),
-                "{label} must keep its function out of the JIT while it is Rejected"
+                "{label} has no lowering arm and must stay out of the JIT"
             );
         }
     }
 
     #[test]
-    fn closure_and_refcell_family_is_fail_closed() {
-        // D4.4 baseline (ALY-46 follow-on). Unlike the object family in D4.3,
-        // which was promoted without evidence and shipped a live miscompilation,
-        // this family has no JIT helper at all and every opcode falls to the
-        // `_ => Rejected` catch-all. This test exists so that cannot change by
-        // accident: any promotion must edit the table, and editing the table
-        // without differential tests should break this.
+    fn closure_and_refcell_family_is_promoted_with_evidence() {
+        // D4.4 promotion. These three were `Rejected` for the whole milestone and
+        // were promoted only once all three pieces of evidence existed:
         //
-        // `BindMethod` is the one member with a stronger classification: the
-        // lifter consults `produces_incorrect_native_results` directly, because
-        // the lifter currently emits nothing for it and a function containing one
-        // would execute natively with a stack model that disagrees with the
-        // interpreter's. That is worse than a wrong value -- it corrupts
-        // everything downstream -- so it must stay rejected until the lifter is
-        // fixed and proven, not merely until a helper exists.
+        //   * interpreter baseline — `refcell_opcodes_roundtrip_through_the_interpreter`
+        //     and `refcell_opcodes_reject_a_non_pointer_receiver`
+        //   * lowering arms — three direct-lift tests asserting exit.kind == Completed
+        //   * differential — `refcell_interpreter_and_jit_agree_on_the_same_bytecode`,
+        //     same bytecode through both engines, result bits compared
+        //
+        // Asserted in both directions on purpose: `jit_support` AND
+        // `opcode_supported_for_jit`. A promotion that changed only the table, or
+        // only the selector, would break this rather than pass quietly.
         for op in [
             Opcode::MakeClosure,
             Opcode::CloseVar,
@@ -306,13 +335,29 @@ mod tests {
             Opcode::LoadRefCell,
             Opcode::StoreRefCell,
         ] {
-            assert_eq!(jit_support(op), JitSupport::Rejected, "{op:?}");
-            assert!(!opcode_supported_for_jit(op), "{op:?} must not be selectable");
+            let promoted = matches!(
+                op,
+                Opcode::NewRefCell | Opcode::LoadRefCell | Opcode::StoreRefCell
+            );
+            let expected = if promoted {
+                JitSupport::HelperExact
+            } else {
+                JitSupport::Rejected
+            };
+            assert_eq!(jit_support(op), expected, "{op:?}");
+            assert_eq!(
+                opcode_supported_for_jit(op),
+                promoted,
+                "{op:?} selectable must track its classification"
+            );
         }
 
+        // `BindMethod` stays out. Its reason is different and stronger: the lifter
+        // emits nothing for it, so a function containing one would execute natively
+        // with a stack model that disagrees with the interpreter's. That corrupts
+        // everything downstream, so it must not be promoted until the lifter is
+        // fixed and proven — not merely until a helper exists.
         assert!(produces_incorrect_native_results(Opcode::BindMethod));
-        // Its classification today is whatever the catch-all gives it, but it must
-        // never become JIT-selectable while the lifter emits nothing for it.
         assert!(!opcode_supported_for_jit(Opcode::BindMethod));
     }
 
