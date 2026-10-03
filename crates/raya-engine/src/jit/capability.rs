@@ -229,6 +229,57 @@ pub fn produces_incorrect_native_results(opcode: Opcode) -> bool {
 mod tests {
     use super::*;
 
+    /// The gate a promotion actually has to move, tested at the granularity it
+    /// operates on.
+    ///
+    /// `opcode_supported_for_jit` is what `function_supported_for_jit`
+    /// (`jit/analysis/heuristics.rs:309`) consults, and that is the function a
+    /// promotion has to flip. The `jit_compile_and_call_with_locals_exit_and_ctx`
+    /// harness used by the lowering tests does **not** go through it -- it
+    /// compiles whatever it is handed -- so those tests prove the arms work while
+    /// saying nothing about reachability. This is the test that says something
+    /// about reachability.
+    #[test]
+    fn refcell_opcodes_keep_a_function_out_of_the_jit() {
+        use crate::jit::analysis::heuristics::function_supported_for_jit;
+        use crate::compiler::bytecode::Function;
+
+        let function_with = |code: Vec<u8>| Function {
+            signature_id: 0,
+            local_types: Vec::new(),
+            abi_version: 1,
+            name: "main".to_string(),
+            param_count: 0,
+            local_count: 0,
+            code,
+        };
+
+        // Control: a function built only from promoted opcodes is eligible. If this
+        // ever fails, the gate itself is broken and every other assertion here is
+        // meaningless.
+        assert!(
+            function_supported_for_jit(&function_with(vec![
+                Opcode::ConstI32 as u8, 1, 0, 0, 0, Opcode::Return as u8,
+            ])),
+            "control function must be JIT-eligible, or the gate is not measuring what we think"
+        );
+
+        // Each RefCell opcode alone must keep the whole function out of the JIT.
+        for (op, label) in [
+            (Opcode::NewRefCell, "NewRefCell"),
+            (Opcode::LoadRefCell, "LoadRefCell"),
+            (Opcode::StoreRefCell, "StoreRefCell"),
+        ] {
+            assert!(
+                !function_supported_for_jit(&function_with(vec![
+                    op as u8,
+                    Opcode::ConstI32 as u8, 1, 0, 0, 0, Opcode::Return as u8,
+                ])),
+                "{label} must keep its function out of the JIT while it is Rejected"
+            );
+        }
+    }
+
     #[test]
     fn closure_and_refcell_family_is_fail_closed() {
         // D4.4 baseline (ALY-46 follow-on). Unlike the object family in D4.3,
