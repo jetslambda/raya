@@ -1814,9 +1814,18 @@ unsafe extern "C" fn helper_dyn_get_keyed(
     match js_classify(Value::from_raw(object_raw)) {
         JSView::Arr(ptr) => {
             let array = unsafe { &*ptr };
-            match array_index {
-                Some(index) => array.get(index).unwrap_or(Value::null()).raw(),
-                None => Value::null().raw(),
+            if let Some(index) = array_index {
+                // Out of range is a legitimate answer (null), not a failure.
+                array.get(index).unwrap_or(Value::null()).raw()
+            } else if key_str.as_deref() == Some("length") {
+                // The interpreter answers "length" on the array view as well. An
+                // earlier version of this helper matched only on `array_index` and
+                // returned null here, which is a silent wrong answer rather than a
+                // fallback.
+                Value::i32(array.len() as i32).raw()
+            } else {
+                // The interpreter's array view has no other keys, so null is correct.
+                Value::null().raw()
             }
         }
         JSView::Str(ptr) => {
@@ -1837,9 +1846,20 @@ unsafe extern "C" fn helper_dyn_get_keyed(
                 let pointer = NonNull::new(allocated.as_ptr()).unwrap();
                 Value::from_ptr(pointer).raw()
             } else if key_str.as_deref() == Some("length") {
-                Value::i32(string.data.chars().count() as i32).raw()
+                // BYTES, not characters. The interpreter uses `str::len`, and for
+                // "héllo" that is 6 while `chars().count()` is 5. This helper was
+                // written with `chars().count()` and the differential caught it on
+                // the first non-ASCII corpus case -- an ASCII-only corpus would
+                // have shipped it, because the two agree on every ASCII string.
+                Value::i32(string.data.len() as i32).raw()
             } else {
-                Value::null().raw()
+                // DECLINE rather than answer null. On a string, any other key goes
+                // through `builtin_handle_native_method_id` in the interpreter, so
+                // `"abc".toUpperCase` yields a bound native method -- not null.
+                // Returning null here would be a silent wrong answer; the sentinel
+                // routes it to the interpreter, which is the only thing that can
+                // resolve a native method id.
+                JIT_INTERPRETER_FALLBACK_SENTINEL
             }
         }
         // `Struct` needs the registry the bridge lacks; everything else is the

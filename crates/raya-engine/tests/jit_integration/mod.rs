@@ -6237,3 +6237,120 @@ fn await_interpreter_and_jit_agree_on_the_same_bytecode() {
         );
     }
 }
+
+
+/// `DynGetKeyed`'s `Str` view: the differential, on the **same bytecode** through
+/// both engines.
+///
+/// Scoped honestly, because the corpus a differential can actually reach is
+/// narrower than the opcode:
+///
+///   * **`Str`** — fully covered here. `ConstStr` is `HelperExact`, so a string
+///     target is constructible in natively-compiled code.
+///   * **`Arr`** — **not** reachable in this test. The entire array family
+///     (`NewArray`, `InitArray`, `LoadElem`, ...) is `Rejected` under the D4.2
+///     fail-closed posture, so a program building an array would have its *whole
+///     function* rejected and silently fall back to the interpreter. A
+///     "differential" written that way passes while proving nothing about the
+///     helper, which is the same vacuity that let D4.3's P0 ship. Engine-level
+///     `Arr` evidence is gated on the array family milestone; the helper-level
+///     test covers `Arr` in the meantime.
+///   * **`Struct`** — declined by design; returns the fallback sentinel.
+///
+/// Two of the three cases exist to catch a specific byte-vs-char divergence,
+/// because this is the one view where the two disagree:
+///
+///   * `"héllo".length` is **6** (Rust `str::len` is bytes), while `"héllo"[1]`
+///     is `"é"` (`chars().nth` is characters). An implementation that used one
+///     for the other would agree with the interpreter on ASCII and diverge on
+///     every non-ASCII string, so the corpus is deliberately non-ASCII.
+#[test]
+fn dyn_get_keyed_string_view_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // (label, key program, expected)
+    let cases: Vec<(&str, Box<dyn Fn(&mut Vec<u8>, u32)>, Option<String>, Option<i32>)> = vec![
+        (
+            "char index 1 of \"héllo\"",
+            Box::new(|c: &mut Vec<u8>, _| emit_i32(c, 1)),
+            Some("é".to_string()),
+            None,
+        ),
+        (
+            "byte length of \"héllo\"",
+            Box::new(|c: &mut Vec<u8>, k: u32| emit_const_str(c, k)),
+            None,
+            Some(6),
+        ),
+        (
+            "out-of-range index 99",
+            Box::new(|c: &mut Vec<u8>, _| emit_i32(c, 99)),
+            None,
+            None,
+        ),
+    ];
+
+    for (label, emit_key, expect_string, expect_i32) in cases {
+        let mut module = make_vm_module(Vec::new(), 0, 0);
+        let target = module.constants.add_string("héllo".to_string());
+        let length_key = module.constants.add_string("length".to_string());
+
+        let mut code = Vec::new();
+        emit_const_str(&mut code, target);
+        emit_key(&mut code, length_key);
+        emit(&mut code, Opcode::DynGetKeyed);
+        emit(&mut code, Opcode::Return);
+        module.functions[0].code = code;
+        let module = finalize_module(module);
+
+        // Engine 1: the interpreter, on the identical module.
+        let interpreted = {
+            let mut vm = Vm::with_worker_count(1);
+            vm.execute(module.as_ref()).expect("interpreter DynGetKeyed")
+        };
+
+        // Engine 2: the JIT, on the same module.
+        let (native, exit, _shared) = execute_module_natively(module, None);
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] the Str view must complete natively, not fall back"
+        );
+
+        match (expect_string, expect_i32) {
+            // A character is a freshly allocated string in BOTH engines, so the
+            // two hold different pointers. Comparing raw bits here would fail on
+            // correct code -- the content is the observable.
+            (Some(want), _) => {
+                assert_eq!(
+                    string_contents(native),
+                    want,
+                    "[{label}] JIT returned the wrong character"
+                );
+                assert_eq!(
+                    string_contents(interpreted),
+                    want,
+                    "[{label}] interpreter baseline disagrees, so the case is wrong"
+                );
+            }
+            // i32 and null are NaN-boxed immediates: identical bits in both engines.
+            (None, Some(want)) => {
+                assert_eq!(
+                    native.as_i32(),
+                    Some(want),
+                    "[{label}] JIT got the wrong value"
+                );
+                assert_eq!(native.raw(), interpreted.raw(), "[{label}] engines disagree");
+            }
+            (None, None) => {
+                assert!(
+                    native.is_null(),
+                    "[{label}] an out-of-range string index must be null, got 0x{:016X}",
+                    native.raw()
+                );
+                assert_eq!(native.raw(), interpreted.raw(), "[{label}] engines disagree");
+            }
+        }
+    }
+}
