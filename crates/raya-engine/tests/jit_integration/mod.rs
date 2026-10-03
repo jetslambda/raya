@@ -5517,3 +5517,98 @@ fn make_closure_emits_a_safepoint_before_allocating() {
          (safepoint at {safepoint_at:?}, MakeClosure at {make_closure_at})"
     );
 }
+
+
+/// The closure differential: **the same bytecode** through both engines.
+///
+/// `MakeClosure` and `SetClosureCapture` now have interpreter coverage
+/// (`3469bb4`) and their lowering arms are wired, but nothing yet asserts the two
+/// engines agree. Same shape as the RefCell differential (`b29f610`): one module,
+/// run through `Vm::execute` and through lift+compile+call, comparing raw bits.
+///
+/// As with the RefCell case this still lifts directly, so it is an engine-agreement
+/// test rather than a reachability one — `MakeClosure` and `SetClosureCapture` are
+/// still `Rejected`. The gate is pinned separately.
+#[test]
+fn closure_interpreter_and_jit_agree_on_the_same_bytecode() {
+    use raya_engine::vm::interpreter::Vm;
+
+    // Two functions: `main` at index 0, closure body at index 1.
+    let mut module = make_module(Vec::new(), 0, 0);
+
+    // The closure body: hand the capture straight back.
+    module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "closure_body".to_string(),
+        param_count: 0,
+        local_count: 0,
+        code: vec![Opcode::LoadCaptured as u8, 0, 0, Opcode::Return as u8],
+    });
+
+    // main: capture 42, patch slot 0 to 7, then call -- so a JIT that skipped the
+    // patch, or called the wrong function, returns 42 instead of 7.
+    let mut main_code: Vec<u8> = Vec::new();
+    main_code.push(Opcode::ConstI32 as u8);
+    main_code.extend_from_slice(&42i32.to_le_bytes());
+    main_code.push(Opcode::MakeClosure as u8);
+    main_code.extend_from_slice(&1u32.to_le_bytes()); // func_index = closure_body
+    main_code.extend_from_slice(&1u16.to_le_bytes()); // capture_count = 1
+    // SetClosureCapture pops value then closure and pushes the closure back, so
+    // Dup the closure BEFORE pushing the value.
+    main_code.push(Opcode::Dup as u8);
+    main_code.push(Opcode::ConstI32 as u8);
+    main_code.extend_from_slice(&7i32.to_le_bytes());
+    main_code.push(Opcode::SetClosureCapture as u8);
+    main_code.extend_from_slice(&0u16.to_le_bytes()); // capture index 0
+    main_code.push(Opcode::Call as u8);
+    main_code.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // closure call
+    main_code.extend_from_slice(&0u16.to_le_bytes()); // arg_count = 0
+    main_code.push(Opcode::Return as u8);
+    module.functions[0] = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "test_func".to_string(),
+        param_count: 0,
+        local_count: 0,
+        code: main_code,
+    };
+
+    let mut raw_module = module;
+    raw_module.functions[0].name = "main".to_string();
+    let module = finalize_module(raw_module);
+
+    // Engine 1: the interpreter.
+    let interpreted = {
+        let mut vm = Vm::new();
+        vm.execute(&module).expect("interpreter must run the closure program")
+    };
+
+    // Engine 2: the JIT, on the identical module.
+    let (safepoint, shared) = new_shared_vm_state();
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = Vec::new();
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+        "JIT must complete natively, not fall back -- otherwise this compares the \
+         interpreter against itself"
+    );
+
+    assert_eq!(
+        raw,
+        interpreted.raw(),
+        "engines disagree on the same closure bytecode: JIT 0x{raw:016X}, interpreter {interpreted}"
+    );
+    assert!(is_i32(raw), "expected a NaN-boxed i32, got 0x{raw:016X}");
+    // 7, not the 42 originally captured — so the SetClosureCapture actually landed.
+    assert_eq!(decode_i32(raw), 7);
+}
