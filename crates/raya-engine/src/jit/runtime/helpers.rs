@@ -1712,6 +1712,45 @@ unsafe extern "C" fn helper_value_to_string(value_raw: u64, shared_state: *mut (
 // `Rejected`. The helpers are written and tested first so the semantics are settled
 // before anything can call them — the same order the RefCell helpers used.
 
+/// Patch one capture slot of an existing closure.
+///
+/// This is how recursive closures are wired up: `MakeClosure` runs first, then
+/// `SetClosureCapture` writes the closure into its own slot.
+///
+/// `JIT_STORE_FALLBACK` means nothing was mutated. That covers a non-pointer
+/// receiver, which the interpreter reports as `TypeError("Expected closure")`, and
+/// a capture index out of range, which `Closure::set_captured` reports as an error
+/// string the interpreter turns into a `RuntimeError`. Both are handed back rather
+/// than raised, because a leaf helper cannot raise a catchable error — the lowering
+/// turns a fallback into the interpreter boundary exit.
+///
+/// NOT YET LOWERED. See the note on the RefCell helpers.
+#[allow(dead_code)]
+unsafe extern "C" fn helper_set_closure_capture(
+    closure_raw: u64,
+    index: u32,
+    value_raw: u64,
+    _shared_state: *mut (),
+) -> i8 {
+    let closure_value = Value::from_raw(closure_raw);
+    // Deliberately the interpreter's weak `is_ptr()` check, not a TypeId
+    // comparison. See ALY-54: strengthening it here would diverge from the
+    // interpreter rather than fix anything.
+    if !closure_value.is_ptr() {
+        return JIT_STORE_FALLBACK;
+    }
+    let Some(ptr) = closure_value.as_ptr::<crate::vm::object::Closure>() else {
+        return JIT_STORE_FALLBACK;
+    };
+    let closure = &mut *ptr.as_ptr();
+    // `set_captured` bounds-checks, so an out-of-range index lands here rather than
+    // writing past the capture vector.
+    match closure.set_captured(index as usize, Value::from_raw(value_raw)) {
+        Ok(()) => JIT_STORE_SUCCESS,
+        Err(_) => JIT_STORE_FALLBACK,
+    }
+}
+
 // Unused until the Cranelift lowering for MakeClosure exists; see the note on the
 // RefCell helpers above for why that is marked rather than left to warn.
 #[allow(dead_code)]
@@ -2687,6 +2726,49 @@ mod tests {
                 got,
                 vec![7, 8, 9],
                 "captures must survive in the order supplied"
+            );
+        });
+    }
+
+    /// `helper_set_closure_capture`, tested before anything can call it.
+    #[test]
+    fn set_closure_capture_helper_patches_a_slot() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // A closure with one capture, holding 7.
+            let mut gc = shared.gc.lock();
+            let closure = crate::vm::object::Closure::new(0, vec![Value::i32(7)]);
+            let ptr = gc.allocate(closure);
+            let closure_raw =
+                unsafe { Value::from_ptr(NonNull::new(ptr.as_ptr()).unwrap()).raw() };
+            drop(gc);
+
+            // Patch the slot, then read it back.
+            assert_eq!(
+                unsafe { helper_set_closure_capture(closure_raw, 0, Value::i32(11).raw(), ss) },
+                JIT_STORE_SUCCESS
+            );
+            assert_eq!(
+                unsafe {
+                    let value = Value::from_raw(closure_raw);
+                    let c = &*value.as_ptr::<crate::vm::object::Closure>().unwrap().as_ptr();
+                    c.get_captured(0).unwrap().as_i32()
+                },
+                Some(11)
+            );
+
+            // Out of range: bounds-checked, so a fallback and no mutation rather
+            // than a write past the capture vector.
+            assert_eq!(
+                unsafe { helper_set_closure_capture(closure_raw, 9, Value::i32(1).raw(), ss) },
+                JIT_STORE_FALLBACK
+            );
+            // Non-pointer receiver: the interpreter's weak check, refused.
+            assert_eq!(
+                unsafe { helper_set_closure_capture(Value::i32(5).raw(), 0, Value::i32(1).raw(), ss) },
+                JIT_STORE_FALLBACK
             );
         });
     }
