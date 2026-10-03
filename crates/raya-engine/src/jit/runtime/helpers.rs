@@ -215,6 +215,7 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         refcell_load: helper_load_refcell,
         refcell_store: helper_store_refcell,
         refcell_new: helper_new_refcell,
+        set_closure_capture: helper_set_closure_capture,
     }
 }
 
@@ -1725,7 +1726,6 @@ unsafe extern "C" fn helper_value_to_string(value_raw: u64, shared_state: *mut (
 /// turns a fallback into the interpreter boundary exit.
 ///
 /// NOT YET LOWERED. See the note on the RefCell helpers.
-#[allow(dead_code)]
 unsafe extern "C" fn helper_set_closure_capture(
     closure_raw: u64,
     index: u32,

@@ -2139,6 +2139,17 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     unsafe extern "C" fn stub_refcell_new(_initial: u64, _shared_state: *mut ()) -> u64 {
         0
     }
+
+    /// Reports failure, which routes the patch to the interpreter.
+    /// `SetClosureCapture` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_set_closure_capture(
+        _closure: u64,
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2235,6 +2246,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             refcell_load: stub_refcell_load,
             refcell_store: stub_refcell_store,
             refcell_new: stub_refcell_new,
+            set_closure_capture: stub_set_closure_capture,
         },
     };
 
@@ -2315,6 +2327,17 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     /// Null means the allocation did not happen, which routes to the interpreter.
     /// `NewRefCell` is still `Rejected`, so no compiled test reaches this.
     unsafe extern "C" fn stub_refcell_new(_initial: u64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+
+    /// Reports failure, which routes the patch to the interpreter.
+    /// `SetClosureCapture` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_set_closure_capture(
+        _closure: u64,
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
         0
     }
     unsafe extern "C" fn stub_alloc_string(
@@ -2413,6 +2436,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             refcell_load: stub_refcell_load,
             refcell_store: stub_refcell_store,
             refcell_new: stub_refcell_new,
+            set_closure_capture: stub_set_closure_capture,
         },
     };
 
@@ -2494,6 +2518,17 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     /// Null means the allocation did not happen, which routes to the interpreter.
     /// `NewRefCell` is still `Rejected`, so no compiled test reaches this.
     unsafe extern "C" fn stub_refcell_new(_initial: u64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+
+    /// Reports failure, which routes the patch to the interpreter.
+    /// `SetClosureCapture` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_set_closure_capture(
+        _closure: u64,
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
         0
     }
     unsafe extern "C" fn stub_alloc_string(
@@ -2599,6 +2634,7 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             refcell_load: stub_refcell_load,
             refcell_store: stub_refcell_store,
             refcell_new: stub_refcell_new,
+            set_closure_capture: stub_set_closure_capture,
         },
     };
 
@@ -2675,6 +2711,17 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     /// Null means the allocation did not happen, which routes to the interpreter.
     /// `NewRefCell` is still `Rejected`, so no compiled test reaches this.
     unsafe extern "C" fn stub_refcell_new(_initial: u64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+
+    /// Reports failure, which routes the patch to the interpreter.
+    /// `SetClosureCapture` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_set_closure_capture(
+        _closure: u64,
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
         0
     }
     unsafe extern "C" fn stub_alloc_string(
@@ -2780,6 +2827,7 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             refcell_load: stub_refcell_load,
             refcell_store: stub_refcell_store,
             refcell_new: stub_refcell_new,
+            set_closure_capture: stub_set_closure_capture,
         },
     };
 
@@ -2863,6 +2911,17 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     /// Null means the allocation did not happen, which routes to the interpreter.
     /// `NewRefCell` is still `Rejected`, so no compiled test reaches this.
     unsafe extern "C" fn stub_refcell_new(_initial: u64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+
+    /// Reports failure, which routes the patch to the interpreter.
+    /// `SetClosureCapture` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_set_closure_capture(
+        _closure: u64,
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
         0
     }
     unsafe extern "C" fn stub_alloc_string(
@@ -2976,6 +3035,7 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             refcell_load: stub_refcell_load,
             refcell_store: stub_refcell_store,
             refcell_new: stub_refcell_new,
+            set_closure_capture: stub_set_closure_capture,
         },
     };
 
