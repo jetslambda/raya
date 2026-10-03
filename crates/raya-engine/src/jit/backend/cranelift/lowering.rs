@@ -968,7 +968,7 @@ impl<'a> LoweringContext<'a> {
                     crate::jit::runtime::trampoline::HELPER_REFCELL_NEW_OFFSET,
                 );
                 let sig = self.refcell_new_sig(builder);
-                let value_val = self.use_reg(builder, *value);
+                let value_val = self.boxed_reg_value(builder, *value);
                 let call = builder
                     .ins()
                     .call_indirect(sig, fn_ptr, &[value_val, shared_state]);
@@ -1032,7 +1032,7 @@ impl<'a> LoweringContext<'a> {
                 );
                 let sig = self.refcell_store_sig(builder);
                 let cell_val = self.use_reg(builder, *cell);
-                let value_val = self.use_reg(builder, *value);
+                let value_val = self.boxed_reg_value(builder, *value);
                 let call = builder
                     .ins()
                     .call_indirect(sig, fn_ptr, &[cell_val, value_val, shared_state]);

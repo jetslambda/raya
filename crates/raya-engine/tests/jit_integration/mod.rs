@@ -5150,3 +5150,123 @@ fn prewarm_candidates_submitted_to_background() {
         "Expected module profile for adaptive compilation"
     );
 }
+
+
+// ---------------------------------------------------------------------------
+// RefCell lowering coverage (D4.4)
+//
+// All three RefCell opcodes are still `Rejected` in the capability table, so
+// these are NOT reachable fast paths. Each lifts and calls the function directly,
+// bypassing candidate selection, which covers the Cranelift arm and the helper in
+// isolation. They must not be read as evidence that compiled code uses them:
+// `closure_and_refcell_family_is_fail_closed` in `jit/capability.rs` is the gate
+// that keeps this unreachable, and it is the gate that must stay until a
+// differential test runs these through candidate selection too.
+//
+// What these do prove is the part that was previously absent: that the lowering
+// arms are reachable, that the trampoline offsets resolve, and that the helpers'
+// fail-closed returns are observable at the machine-code level rather than dead.
+
+/// Allocate a RefCell in the shared GC and return its raw value.
+fn refcell_value(
+    shared: &std::sync::Arc<raya_engine::vm::interpreter::SharedVmState>,
+    initial: i32,
+) -> u64 {
+    let mut gc = shared.gc.lock();
+    let ptr = gc.allocate(raya_engine::vm::object::RefCell::new(
+        raya_engine::vm::value::Value::i32(initial),
+    ));
+    unsafe {
+        raya_engine::vm::value::Value::from_ptr(std::ptr::NonNull::new(ptr.as_ptr()).unwrap())
+            .raw()
+    }
+}
+
+#[test]
+fn load_refcell_lowering_uses_runtime_helper_directly() {
+    let (safepoint, shared) = new_shared_vm_state();
+    let cell = refcell_value(&shared, 11);
+
+    let mut code = Vec::new();
+    emit_load_local(&mut code, 0);
+    code.push(Opcode::LoadRefCell as u8);
+    emit(&mut code, Opcode::Return);
+
+    let module = finalize_module(make_module(code, 0, 1));
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals = vec![cell];
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+        "load must complete natively, not exit to the interpreter"
+    );
+    assert_eq!(decode_i32(raw), 11);
+}
+
+#[test]
+fn store_refcell_lowering_mutates_the_cell_natively() {
+    let (safepoint, shared) = new_shared_vm_state();
+    let cell = refcell_value(&shared, 11);
+
+    let mut code = Vec::new();
+    // StoreRefCell pops the value then the cell.
+    emit_load_local(&mut code, 0);
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&5i32.to_le_bytes());
+    code.push(Opcode::StoreRefCell as u8);
+    // Read it back through the JIT helper.
+    emit_load_local(&mut code, 0);
+    code.push(Opcode::LoadRefCell as u8);
+    emit(&mut code, Opcode::Return);
+
+    let module = finalize_module(make_module(code, 0, 1));
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals = vec![cell];
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+        "store must complete natively, not exit to the interpreter"
+    );
+    // 5 rather than the original 11, so the helper really wrote through.
+    assert_eq!(decode_i32(raw), 5);
+}
+
+#[test]
+fn new_refcell_lowering_allocates_and_reads_back() {
+    let (safepoint, shared) = new_shared_vm_state();
+
+    let mut code = Vec::new();
+    emit_load_local(&mut code, 0);
+    code.push(Opcode::NewRefCell as u8);
+    code.push(Opcode::LoadRefCell as u8);
+    emit(&mut code, Opcode::Return);
+
+    let module = finalize_module(make_module(code, 0, 1));
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    // local 0 is the initial value, not a RefCell.
+    let mut locals = vec![raya_engine::vm::value::Value::i32(7).raw()];
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+        "allocation must complete natively, not exit to the interpreter"
+    );
+    assert_eq!(decode_i32(raw), 7);
+}
