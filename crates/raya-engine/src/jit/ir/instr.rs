@@ -1206,6 +1206,21 @@ pub struct JitBlock {
     pub instrs: Vec<JitInstr>,
     pub terminator: JitTerminator,
     pub predecessors: Vec<JitBlockId>,
+    /// Bytecode offset this block begins at, or [`JitBlock::UNKNOWN_START_OFFSET`]
+    /// when the producer did not know.
+    ///
+    /// The sentinel is deliberately not `0`. Offset 0 is the first instruction of
+    /// a function, so defaulting to it would make an unpopulated block
+    /// indistinguishable from the entry block — and the shared-block-splitting
+    /// work that needs this field compares partitions, where one wrong block
+    /// silently means a jump into the wrong code. `usize::MAX` cannot be a real
+    /// offset, so "unknown" is unambiguous.
+    pub start_offset: usize,
+}
+
+impl JitBlock {
+    /// `start_offset` value meaning "the producer did not record this".
+    pub const UNKNOWN_START_OFFSET: usize = usize::MAX;
 }
 
 /// How a JIT IR block terminates
@@ -1316,8 +1331,30 @@ impl JitFunction {
             instrs: vec![],
             terminator: JitTerminator::None,
             predecessors: vec![],
+            start_offset: JitBlock::UNKNOWN_START_OFFSET,
         });
         id
+    }
+
+    /// Add a new block that begins at a known bytecode offset.
+    ///
+    /// Prefer this over [`JitFunction::add_block`] wherever the offset is known —
+    /// it is what makes a block's partition reconstructable.
+    pub fn add_block_at(&mut self, start_offset: usize) -> JitBlockId {
+        let id = self.add_block();
+        self.blocks[id.0 as usize].start_offset = start_offset;
+        id
+    }
+
+    /// A block's start offset, or `None` when it was never recorded.
+    ///
+    /// Returning `Option` rather than the raw value means a consumer cannot read
+    /// [`JitBlock::UNKNOWN_START_OFFSET`] as if it were an offset.
+    pub fn block_start_offset(&self, id: JitBlockId) -> Option<usize> {
+        match self.blocks[id.0 as usize].start_offset {
+            JitBlock::UNKNOWN_START_OFFSET => None,
+            offset => Some(offset),
+        }
     }
 
     /// Total number of instructions across all blocks

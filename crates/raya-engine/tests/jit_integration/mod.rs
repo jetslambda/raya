@@ -3145,6 +3145,7 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
         param_count: 0,
         local_count: 0,
         blocks: vec![raya_engine::jit::ir::instr::JitBlock {
+            start_offset: raya_engine::jit::ir::instr::JitBlock::UNKNOWN_START_OFFSET,
             id: JitBlockId(0),
             instrs: vec![
                 JitInstr::CheckPreemption {

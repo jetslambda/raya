@@ -1607,6 +1607,7 @@ mod tests {
         jit_func.reg_types.insert(Reg(0), JitType::Value);
         jit_func.reg_types.insert(Reg(1), JitType::Value);
         jit_func.blocks.push(JitBlock {
+            start_offset: JitBlock::UNKNOWN_START_OFFSET,
             id: JitBlockId(0),
             instrs: vec![JitInstr::LoadLocal {
                 dest: Reg(0),
