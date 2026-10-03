@@ -206,6 +206,14 @@ pub const HELPER_SET_CLOSURE_CAPTURE_OFFSET: i32 =
 pub const HELPER_MAKE_CLOSURE_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, make_closure) as i32;
 
+/// Byte offset of the captured-value load helper in [`RuntimeContext`].
+///
+/// Returns the interpreter-fallback sentinel for a missing active closure or an
+/// out-of-range capture index, since a leaf helper cannot raise those.
+pub const HELPER_LOAD_CAPTURED_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET
+        + std::mem::offset_of!(RuntimeHelperTable, load_captured) as i32;
+
 const _: () = assert!(std::mem::align_of::<RuntimeContext>() >= 8);
 const _: () = assert!(std::mem::size_of::<RuntimeContext>() >= std::mem::size_of::<RuntimeHelperTable>());
 
@@ -286,6 +294,9 @@ pub struct RuntimeHelperTable {
     /// Closure allocate: (func_id, captures_ptr, capture_count, shared_state)
     /// -> closure pointer, or null when the root set is unavailable
     pub make_closure: unsafe extern "C" fn(u32, *const u64, u32, *mut ()) -> u64,
+    /// Captured-value load: (capture_index, shared_state) -> value, or the
+    /// interpreter-fallback sentinel.
+    pub load_captured: unsafe extern "C" fn(u32, *mut ()) -> u64,
 }
 
 /// Validate the boxed arguments at a JIT entry boundary against a verified

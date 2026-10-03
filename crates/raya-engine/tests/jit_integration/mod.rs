@@ -2161,6 +2161,12 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     ) -> u64 {
         0
     }
+
+    /// Returns the fallback sentinel, which routes the load to the interpreter.
+    /// `LoadCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_load_captured(_index: u32, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2259,6 +2265,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             refcell_new: stub_refcell_new,
             set_closure_capture: stub_set_closure_capture,
             make_closure: stub_make_closure,
+            load_captured: stub_load_captured,
         },
     };
 
@@ -2363,6 +2370,12 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     ) -> u64 {
         0
     }
+
+    /// Returns the fallback sentinel, which routes the load to the interpreter.
+    /// `LoadCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_load_captured(_index: u32, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2461,6 +2474,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             refcell_new: stub_refcell_new,
             set_closure_capture: stub_set_closure_capture,
             make_closure: stub_make_closure,
+            load_captured: stub_load_captured,
         },
     };
 
@@ -2565,6 +2579,12 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
         _shared_state: *mut (),
     ) -> u64 {
         0
+    }
+
+    /// Returns the fallback sentinel, which routes the load to the interpreter.
+    /// `LoadCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_load_captured(_index: u32, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2671,6 +2691,7 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             refcell_new: stub_refcell_new,
             set_closure_capture: stub_set_closure_capture,
             make_closure: stub_make_closure,
+            load_captured: stub_load_captured,
         },
     };
 
@@ -2770,6 +2791,12 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
         _shared_state: *mut (),
     ) -> u64 {
         0
+    }
+
+    /// Returns the fallback sentinel, which routes the load to the interpreter.
+    /// `LoadCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_load_captured(_index: u32, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2876,6 +2903,7 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             refcell_new: stub_refcell_new,
             set_closure_capture: stub_set_closure_capture,
             make_closure: stub_make_closure,
+            load_captured: stub_load_captured,
         },
     };
 
@@ -2982,6 +3010,12 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
         _shared_state: *mut (),
     ) -> u64 {
         0
+    }
+
+    /// Returns the fallback sentinel, which routes the load to the interpreter.
+    /// `LoadCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_load_captured(_index: u32, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -3096,6 +3130,7 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             refcell_new: stub_refcell_new,
             set_closure_capture: stub_set_closure_capture,
             make_closure: stub_make_closure,
+            load_captured: stub_load_captured,
         },
     };
 
