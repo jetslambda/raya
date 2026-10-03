@@ -5937,3 +5937,95 @@ fn bind_method_lowering_binds_natively() {
 }
 
 
+/// `Try`'s lifting arm resolves its catch target to a real block.
+///
+/// Before `5ee9e17` the arm computed `catch_abs` and `finally_abs` into
+/// underscore-prefixed bindings — computed and never read — and emitted
+/// `SetupTry { catch_block: JitBlockId(0) }`. This asserts the placeholder is gone
+/// and that the emitted block is the one whose recorded `start_offset` equals the
+/// expected catch target.
+///
+/// THE TWO BASES DIFFER, and a wrong expectation here would silently pass against
+/// `BlockId(0)`. `catch_abs` is measured from `instr.offset + 1 + 4` (after
+/// reading only `catch_rel`), `finally_abs` from `+ 1 + 8`. This program uses only
+/// a catch, so it pins the first base.
+#[test]
+fn try_lifter_resolves_the_catch_block() {
+    use raya_engine::jit::ir::instr::{JitInstr, JitTerminator};
+
+    //  Try                           @0        1 byte
+    //  catch_rel  (i32)              @1..5
+    //  finally_rel (i32)             @5..9
+    //  ConstI32 7                    @9..14     body
+    //  Throw                          @14
+    //  ConstI32 99                   @15..20    catch handler
+    //  Return                         @20
+    //
+    // `catch_rel` is measured from offset 5 — `instr.offset + 1` opcode byte + 4
+    // operand bytes — so it must be 15 - 5 = 10. An earlier version of this test
+    // forgot that the two i32 operands occupy eight bytes and expected offset 7.
+    let mut code: Vec<u8> = Vec::new();
+    code.push(Opcode::Try as u8);
+    code.extend_from_slice(&10i32.to_le_bytes()); // catch_rel
+    code.extend_from_slice(&0i32.to_le_bytes()); // finally_rel = 0 -> none
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&7i32.to_le_bytes());
+    code.push(Opcode::Throw as u8);
+    let catch_abs_at = code.len();
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&99i32.to_le_bytes());
+    code.push(Opcode::Return as u8);
+    assert_eq!(catch_abs_at, 15, "catch handler must sit at offset 15");
+
+    let module = finalize_module(make_module(code, 0, 0));
+    let jit_func = lift_function(&module.functions[0], &module, 0)
+        .expect("a Try-containing function must now lift");
+
+    // The catch block must NOT be the entry block any more.
+    let mut setup: Option<(usize, Option<usize>)> = None;
+    for block in &jit_func.blocks {
+        for instr in &block.instrs {
+            if let JitInstr::SetupTry {
+                catch_block,
+                finally_block,
+                ..
+            } = instr
+            {
+                setup = Some((catch_block.0 as usize, finally_block.map(|b| b.0 as usize)));
+            }
+        }
+    }
+    let (catch_block, finally_block) =
+        setup.expect("SetupTry must be emitted — the placeholder arm produced it too");
+
+    assert_ne!(
+        catch_block, 0,
+        "catch_block must no longer be the JitBlockId(0) placeholder"
+    );
+    assert_eq!(finally_block, None, "finally_rel = 0 means no finally block");
+
+    // And it must be the block whose recorded start offset is the catch target.
+    assert_eq!(
+        jit_func.blocks[catch_block].start_offset,
+        15,
+        "catch block must begin at the catch target offset"
+    );
+
+    // Every lifted block carries a real offset, so the partition is reconstructable.
+    assert!(
+        jit_func.blocks.iter().all(|b| b.start_offset
+            != raya_engine::jit::ir::instr::JitBlock::UNKNOWN_START_OFFSET),
+        "no lifted block may have an unknown start offset"
+    );
+
+    // Sanity: the Throw arm is present too, since the body throws.
+    assert!(
+        jit_func
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .any(|i| matches!(i, JitInstr::Throw { .. })),
+        "the Throw arm must lift"
+    );
+    let _ = JitTerminator::None;
+}

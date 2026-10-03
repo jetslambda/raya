@@ -274,7 +274,6 @@ pub fn produces_incorrect_native_results(opcode: Opcode) -> bool {
             | Opcode::Fmod
             | Opcode::GetArgCount
             | Opcode::LoadArgLocal
-            | Opcode::Try
     )
 }
 
@@ -461,19 +460,18 @@ mod tests {
             );
         }
 
-        // `Throw` and `Rethrow` left this list on 2026-10-03: their arms reach the
-        // interpreter through emit_interpreter_boundary_exit and need no helper.
-        // `Try` stays, because its lifter arm is still a placeholder.
-        for op in [Opcode::Throw, Opcode::Rethrow] {
+        // All three left on 2026-10-03. `Throw`/`Rethrow` reach the interpreter
+        // through emit_interpreter_boundary_exit and need no helper. `Try` joins
+        // them now that its arm resolves both targets through
+        // JitFunction::block_at_offset instead of computing and discarding them
+        // (5ee9e17). None of this promotes them: `jit_support` still keeps all three
+        // Rejected, so nothing containing them is a compilation candidate.
+        for op in [Opcode::Throw, Opcode::Rethrow, Opcode::Try] {
             assert!(
                 !produces_incorrect_native_results(op),
                 "{op:?} lifts correctly and must no longer be lifter-rejected"
             );
         }
-        assert!(
-            produces_incorrect_native_results(Opcode::Try),
-            "Try must stay lifter-rejected until its handler installation is modelled"
-        );
 
         assert!(
             !produces_incorrect_native_results(Opcode::EndTry),
@@ -489,7 +487,6 @@ mod tests {
             Opcode::Fmod,
             Opcode::GetArgCount,
             Opcode::LoadArgLocal,
-            Opcode::Try,
         ] {
             assert!(
                 produces_incorrect_native_results(op),
