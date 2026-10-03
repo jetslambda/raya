@@ -1548,6 +1548,7 @@ fn lift_instruction(
                 capture_count,
             } = instr.operands
             {
+                let pre_stack = stack.clone_state();
                 let mut captures = Vec::new();
                 for _ in 0..capture_count {
                     captures.push(stack.pop(instr.offset)?);
@@ -1558,29 +1559,42 @@ fn lift_instruction(
                     dest,
                     func_index: target,
                     captures,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
                 });
                 stack.push(dest);
             }
         }
         Opcode::LoadCaptured => {
             if let Operands::U16(index) = instr.operands {
+                let pre_stack = stack.clone_state();
                 let dest = func.alloc_reg(JitType::Value);
                 func.block_mut(block)
                     .instrs
-                    .push(JitInstr::LoadCaptured { dest, index });
+                    .push(JitInstr::LoadCaptured {
+                        dest,
+                        index,
+                        stack: pre_stack,
+                        bytecode_offset: instr.offset as u32,
+                    });
                 stack.push(dest);
             }
         }
         Opcode::StoreCaptured => {
             if let Operands::U16(index) = instr.operands {
+                let pre_stack = stack.clone_state();
                 let value = stack.pop(instr.offset)?;
-                func.block_mut(block)
-                    .instrs
-                    .push(JitInstr::StoreCaptured { index, value });
+                func.block_mut(block).instrs.push(JitInstr::StoreCaptured {
+                    index,
+                    value,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
+                });
             }
         }
         Opcode::SetClosureCapture => {
             if let Operands::U16(index) = instr.operands {
+                let pre_stack = stack.clone_state();
                 let value = stack.pop(instr.offset)?;
                 let closure = stack.pop(instr.offset)?;
                 func.block_mut(block)
@@ -1589,14 +1603,19 @@ fn lift_instruction(
                         closure,
                         index,
                         value,
+                        stack: pre_stack,
+                        bytecode_offset: instr.offset as u32,
                     });
             }
         }
         Opcode::CloseVar => {
             if let Operands::U16(index) = instr.operands {
-                func.block_mut(block)
-                    .instrs
-                    .push(JitInstr::CloseVar { index });
+                let pre_stack = stack.clone_state();
+                func.block_mut(block).instrs.push(JitInstr::CloseVar {
+                    index,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
+                });
             }
         }
 

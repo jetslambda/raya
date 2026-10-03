@@ -648,26 +648,49 @@ pub enum JitInstr {
     },
 
     // ===== Closures =====
+    //
+    // `stack` and `bytecode_offset` are for the interpreter fallback, as on the
+    // RefCell family: without them a lowering arm cannot call
+    // `emit_interpreter_boundary_exit`, and a capture-index bounds error would have
+    // to be raised from a leaf helper, which cannot raise a catchable error.
+    //
+    // Note what `LoadCaptured`, `StoreCaptured` and `CloseVar` still lack: any
+    // operand identifying the closure they act on. The interpreter resolves them
+    // against `task.current_closure()`, and the JIT has no notion of an active
+    // closure at all (`current_closure` has no occurrence under `jit/`). These
+    // three remain unlowerable for that reason, and no amount of fallback metadata
+    // fixes it -- see the D4.4 spec, "The closures are blocked on something bigger
+    // than helpers".
     MakeClosure {
         dest: Reg,
         func_index: u32,
         captures: Vec<Reg>,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     LoadCaptured {
         dest: Reg,
         index: u16,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     StoreCaptured {
         index: u16,
         value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     SetClosureCapture {
         closure: Reg,
         index: u16,
         value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     CloseVar {
         index: u16,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
 
     // ===== RefCell (closure-captured mutable variables) =====

@@ -507,23 +507,25 @@ impl fmt::Display for JitInstr {
                 dest,
                 func_index,
                 captures,
+                ..
             } => {
                 write!(f, "{} = make.closure @{} [", dest, func_index)?;
                 format_args_list(f, captures)?;
                 write!(f, "]")
             }
-            JitInstr::LoadCaptured { dest, index } => {
+            JitInstr::LoadCaptured { dest, index, .. } => {
                 write!(f, "{} = load.captured {}", dest, index)
             }
-            JitInstr::StoreCaptured { index, value } => {
+            JitInstr::StoreCaptured { index, value, .. } => {
                 write!(f, "store.captured {}, {}", index, value)
             }
             JitInstr::SetClosureCapture {
                 closure,
                 index,
                 value,
+                ..
             } => write!(f, "set.capture {}.{}, {}", closure, index, value),
-            JitInstr::CloseVar { index } => write!(f, "close.var {}", index),
+            JitInstr::CloseVar { index, .. } => write!(f, "close.var {}", index),
 
             // RefCell
             JitInstr::NewRefCell {
