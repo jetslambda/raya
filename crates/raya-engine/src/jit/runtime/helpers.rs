@@ -2412,6 +2412,80 @@ mod tests {
         }};
     }
 
+    /// D4.2 recorded, and D4.3 inherited, that `EphemeralRootScope` was never
+    /// asserted: helpers opened a scope, but nothing checked that the roots were
+    /// actually installed during the window or released afterwards. These two
+    /// tests close that, and both properties are safety-critical rather than
+    /// cosmetic.
+    ///
+    /// The window matters because JIT-compiled native frames publish empty stack
+    /// maps. A collection triggered by an allocation inside a helper cannot see
+    /// operands living only in machine registers, so they must be published as
+    /// ephemeral roots for the duration. A scope that failed to release would
+    /// silently grow the root set across every call.
+
+    #[test]
+    fn ephemeral_root_scope_releases_roots_after_a_scoped_push() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+            let module_ptr = Arc::as_ptr(&module) as *const ();
+
+            // Baseline: nothing rooted.
+            assert!(shared.ephemeral_gc_roots.read().is_empty());
+
+            let arr_ptr = unsafe { helper_alloc_array(6, 2, module_ptr, ss) };
+            let arr_val = unsafe { Value::from_ptr(NonNull::new(arr_ptr.cast::<u8>()).unwrap()) };
+
+            assert_eq!(
+                unsafe { helper_array_push(arr_val.raw(), Value::i32(11).raw(), ss) },
+                JIT_STORE_SUCCESS
+            );
+
+            // The scope must have released exactly what it added, leaving the
+            // shared root list as it found it.
+            assert!(
+                shared.ephemeral_gc_roots.read().is_empty(),
+                "EphemeralRootScope leaked roots: {:?}",
+                shared.ephemeral_gc_roots.read()
+            );
+            // And the push really happened, so this is not passing vacuously.
+            assert_eq!(unsafe { helper_array_len(arr_val.raw(), ss) }, 3);
+        });
+    }
+
+    #[test]
+    fn scoped_helper_fails_closed_and_mutates_nothing_without_a_root_set() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let mut bridge = bridge;
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+            let module_ptr = Arc::as_ptr(&module) as *const ();
+
+            let arr_ptr = unsafe { helper_alloc_array(6, 2, module_ptr, ss) };
+            let arr_val = unsafe { Value::from_ptr(NonNull::new(arr_ptr.cast::<u8>()).unwrap()) };
+            let len_before = unsafe { helper_array_len(arr_val.raw(), ss) };
+
+            // Deny the root set. `EphemeralRootScope::open` returns None here, and
+            // the helper must bail out rather than allocate with unprotected
+            // operands.
+            bridge.ephemeral_gc_roots = std::ptr::null();
+
+            assert_eq!(
+                unsafe { helper_array_push(arr_val.raw(), Value::i32(13).raw(), ss) },
+                JIT_STORE_FALLBACK,
+                "push must fail closed when the root set is unavailable"
+            );
+            // A fallback return has to mean "nothing was mutated", or a caller
+            // falling back to the interpreter could double-apply the operation.
+            assert_eq!(
+                unsafe { helper_array_len(arr_val.raw(), ss) },
+                len_before,
+                "failed-closed push must not mutate the array"
+            );
+        });
+    }
+
     #[test]
     fn jit_array_helpers_roundtrip_and_reject_non_arrays() {
         let (shared, module, code_cache, task) = array_helper_fixture();
