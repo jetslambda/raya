@@ -129,17 +129,42 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         | Opcode::StrictNe => JitSupport::HelperExact,
 
         // ===== Objects (helper-backed) =====
+        //
+        // Only opcodes whose interpreter handler is a pure leaf read of the
+        // object belong here. `NewType` through `ImplementsShape` qualify: they
+        // allocate, test nominality, or resolve a shape, and their helpers do the
+        // same thing.
+        //
+        // The field-access opcodes deliberately do NOT. Their interpreter
+        // handlers do things no leaf helper can do:
+        //
+        //  * `Object.defineProperty` installs a `get`/`set` descriptor as
+        //    `__node_compat_descriptor` metadata, and the field handlers consult
+        //    it. `LoadFieldExact`/`LoadFieldShape` *invoke the getter as a
+        //    callable frame* (`callable_frame_for_value`), and `StoreFieldShape`
+        //    invokes a setter plus the writability checks. A helper that only
+        //    does `object.get_field(slot)` returns the raw field where the
+        //    interpreter returns the accessor's value.
+        //  * every field handler calls `unwrap_proxy_target` first, and can
+        //    produce a `BoundMethod` for a method slot.
+        //
+        // The helpers do neither, so these opcodes are demoted to `Rejected`
+        // until the helpers guard on both conditions and fall back. They were
+        // `HelperExact` and wired into the Cranelift lowering, which made this a
+        // live miscompilation rather than a latent one. See
+        // /workspace/specs/2026-10-03-raya-d4-fixed-layout-objects.md, Gap 4
+        // and Gap 6.
         Opcode::NewType
         | Opcode::IsNominal
         | Opcode::CastNominal
         | Opcode::CastShape
-        | Opcode::ImplementsShape
-        | Opcode::LoadFieldExact
+        | Opcode::ImplementsShape => JitSupport::HelperExact,
+        Opcode::StoreFieldExact => JitSupport::InterpreterBoundary,
+        Opcode::LoadFieldExact
         | Opcode::OptionalFieldExact
         | Opcode::LoadFieldShape
         | Opcode::OptionalFieldShape
-        | Opcode::StoreFieldShape => JitSupport::HelperExact,
-        Opcode::StoreFieldExact => JitSupport::InterpreterBoundary,
+        | Opcode::StoreFieldShape => JitSupport::Rejected,
 
         // ===== Calls (helper-backed) =====
         Opcode::Call
@@ -250,6 +275,44 @@ mod tests {
                 !opcode_supported_for_jit(op),
                 "{op:?} must not be selectable"
             );
+        }
+    }
+
+    #[test]
+    fn accessor_and_proxy_field_opcodes_are_rejected_until_exact() {
+        // Fail-closed posture (D4.3). These five were `HelperExact` and wired
+        // into the Cranelift lowering, but their interpreter handlers unwrap a
+        // proxy receiver and consult `__node_compat_descriptor` accessors,
+        // invoking a user getter or setter as a frame. The field helpers do
+        // neither, so promoting them produced a live divergence between the two
+        // engines. Each stays `Rejected` until the helper can detect both
+        // conditions and return the fallback sentinel so the interpreter handles
+        // the frame.
+        for op in [
+            Opcode::LoadFieldExact,
+            Opcode::OptionalFieldExact,
+            Opcode::LoadFieldShape,
+            Opcode::OptionalFieldShape,
+            Opcode::StoreFieldShape,
+        ] {
+            assert_eq!(jit_support(op), JitSupport::Rejected, "{op:?}");
+            assert!(!opcode_supported_for_jit(op), "{op:?} must not be selectable");
+        }
+    }
+
+    #[test]
+    fn nominal_and_shape_predicates_stay_promoted() {
+        // The complement of the test above: these handlers and helpers agree, so
+        // the demotion must not silently swallow the whole object family.
+        for op in [
+            Opcode::NewType,
+            Opcode::IsNominal,
+            Opcode::CastNominal,
+            Opcode::CastShape,
+            Opcode::ImplementsShape,
+        ] {
+            assert_eq!(jit_support(op), JitSupport::HelperExact, "{op:?}");
+            assert!(opcode_supported_for_jit(op), "{op:?} should stay selectable");
         }
     }
 

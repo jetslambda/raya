@@ -912,8 +912,14 @@ fn jit_call_static_executes_sync_callee_via_runtime_helper() {
     assert_eq!(decode_i32(raw), 18);
 }
 
+// NOTE: `LoadFieldShape` is `Rejected` in the capability table, so this is NOT a
+// reachable fast path. This test lifts and calls the function directly, which
+// bypasses candidate selection, so it covers the lowering and the helper in
+// isolation. It must not be read as evidence that compiled code uses the helper:
+// see `accessor_and_proxy_field_opcodes_are_rejected_until_exact` in
+// `jit/capability.rs` for the gate that keeps this unreachable.
 #[test]
-fn jit_load_field_shape_uses_runtime_helper_fastpath() {
+fn load_field_shape_lowering_uses_runtime_helper_directly() {
     let (safepoint, shared) = new_shared_vm_state();
 
     let layout_names = vec!["b".to_string(), "a".to_string()];
@@ -961,8 +967,12 @@ fn jit_load_field_shape_uses_runtime_helper_fastpath() {
     assert_eq!(decode_i32(raw), 7);
 }
 
+// NOTE: as above, `StoreFieldShape` is `Rejected` in the capability table. The
+// interpreter handler for this opcode can invoke a descriptor setter and check
+// writability; this helper cannot, which is why it was demoted. This test covers
+// the lowering and helper only.
 #[test]
-fn jit_store_field_shape_uses_runtime_helper_fastpath() {
+fn store_field_shape_lowering_uses_runtime_helper_directly() {
     let (safepoint, shared) = new_shared_vm_state();
 
     let layout_names = vec!["b".to_string(), "a".to_string()];
