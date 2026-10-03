@@ -185,6 +185,12 @@ pub const HELPER_REFCELL_LOAD_OFFSET: i32 =
 /// 1 = `JIT_STORE_SUCCESS`, 0 = `JIT_STORE_FALLBACK`.
 pub const HELPER_REFCELL_STORE_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, refcell_store) as i32;
+/// Byte offset of the RefCell-allocate helper in [`RuntimeContext`].
+///
+/// Returns null when the root set is unavailable, matching the convention every
+/// other allocating helper here follows.
+pub const HELPER_REFCELL_NEW_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, refcell_new) as i32;
 
 const _: () = assert!(std::mem::align_of::<RuntimeContext>() >= 8);
 const _: () = assert!(std::mem::size_of::<RuntimeContext>() >= std::mem::size_of::<RuntimeHelperTable>());
@@ -257,6 +263,9 @@ pub struct RuntimeHelperTable {
     pub refcell_load: unsafe extern "C" fn(u64, *mut ()) -> u64,
     /// RefCell store: (refcell_val, value, shared_state) -> 1 success / 0 fallback
     pub refcell_store: unsafe extern "C" fn(u64, u64, *mut ()) -> i8,
+    /// RefCell allocate: (initial_value, shared_state) -> RefCell pointer, or null
+    /// when the root set is unavailable.
+    pub refcell_new: unsafe extern "C" fn(u64, *mut ()) -> u64,
 }
 
 /// Validate the boxed arguments at a JIT entry boundary against a verified

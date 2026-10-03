@@ -214,6 +214,7 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         array_len: helper_array_len,
         refcell_load: helper_load_refcell,
         refcell_store: helper_store_refcell,
+        refcell_new: helper_new_refcell,
     }
 }
 
@@ -1709,23 +1710,29 @@ unsafe extern "C" fn helper_value_to_string(value_raw: u64, shared_state: *mut (
 /// Returns null when the root set is unavailable, so the allocation cannot happen
 /// with an unprotected operand: native stack maps are empty, so a collection during
 /// this allocation would not see `initial_raw`.
+///
+/// Null is the codebase's convention for an allocating helper failing —
+/// `helper_alloc_object` does the same, and the `NewObject` lowering tests
+/// `icmp_imm(Equal, ptr, 0)`. This originally returned `u64::MAX`, a bespoke
+/// sentinel sitting in tagged-pointer space; matching the convention means the
+/// lowering can reuse the established `is_null` test and there is one fewer magic
+/// value to reason about.
 // Unused until the Cranelift lowering for RefCell exists. Marked rather than left
 // to warn on every build: these are deliberately unreachable, and the alternative
 // -- wiring them now without a differential test -- is the thing D4.3 got wrong.
-#[allow(dead_code)]
 unsafe extern "C" fn helper_new_refcell(initial_raw: u64, shared_state: *mut ()) -> u64 {
     let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
         Some(ptr) => &*ptr.as_ptr(),
-        None => return u64::MAX,
+        None => return 0,
     };
     if bridge.gc.is_null() {
-        return u64::MAX;
+        return 0;
     }
     let initial = Value::from_raw(initial_raw);
     // Root the initial value across the allocation, exactly as `helper_alloc_array`
     // roots its operands, and fail closed if that is not possible.
     let Some(_scope) = EphemeralRootScope::open(bridge, &[initial]) else {
-        return u64::MAX;
+        return 0;
     };
     let mut gc = (&*bridge.gc).lock();
     let ptr = gc.allocate(crate::vm::object::RefCell::new(initial));
@@ -2598,7 +2605,7 @@ mod tests {
 
             // allocate a RefCell holding 7, read it back, overwrite, read again.
             let cell = unsafe { helper_new_refcell(Value::i32(7).raw(), ss) };
-            assert_ne!(cell, u64::MAX, "allocation must not fail closed here");
+            assert_ne!(cell, 0, "allocation must not fail closed here");
             // `cell` is the RefCell's address, not its contents; the 7 lives
             // inside it and comes back through the load helper.
             assert_eq!(
@@ -2651,7 +2658,7 @@ mod tests {
 
             assert_eq!(
                 unsafe { helper_new_refcell(Value::i32(7).raw(), ss) },
-                u64::MAX,
+                0,
                 "RefCell allocation must fail closed without a root set"
             );
         });
