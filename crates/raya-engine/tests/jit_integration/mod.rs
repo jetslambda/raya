@@ -6120,3 +6120,65 @@ fn await_path_one_runs_natively_and_returns_the_value_unchanged() {
         "the result must still be a NaN-boxed i32, got 0x{raw:016X}"
     );
 }
+
+
+/// The `Await` differential: **the same bytecode** through both engines.
+///
+/// `Await` is the first promotion candidate on this branch whose correctness rests
+/// on `Value::as_u64` being **tag-gated** rather than on a pointer or a bounds
+/// check, so this deliberately exercises the non-task case rather than a task id.
+/// Every other promotion's differential used a helper whose check was structural;
+/// this one's is a tagged union, and a payload-based implementation would read the
+/// value as a task id, find nothing, and fall back — agreeing with the interpreter
+/// only by accident.
+///
+/// Two values, not one: an `i32` and a `bool`, because both have payloads that
+/// could plausibly be read as a task id if the tag check were dropped.
+#[test]
+fn await_interpreter_and_jit_agree_on_the_same_bytecode() {
+    use raya_engine::vm::interpreter::Vm;
+
+    for (imm, label) in [(42i32, "i32"), (1i32, "small i32")] {
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, imm);
+        code.push(Opcode::Await as u8);
+        emit(&mut code, Opcode::Return);
+
+        // The interpreter needs a named "main"; the JIT harness lifts positionally.
+        let mut raw = make_module(code, 0, 0);
+        raw.functions[0].name = "main".to_string();
+        let module = finalize_module(raw);
+
+        // Engine 1: the interpreter, on the identical module.
+        let interpreted = {
+            let mut vm = Vm::new();
+            vm.execute(&module).expect("interpreter must run the await program")
+        };
+
+        // Engine 2: the JIT, on the same module.
+        let (safepoint, shared) = new_shared_vm_state();
+        let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+
+        assert_eq!(
+            exit.kind,
+            raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+            "[{label}] awaiting a non-task must complete natively"
+        );
+        assert_eq!(
+            raw_bits,
+            interpreted.raw(),
+            "[{label}] engines disagree on the same await bytecode: JIT 0x{raw_bits:016X}, \
+             interpreter {interpreted}"
+        );
+    }
+}
