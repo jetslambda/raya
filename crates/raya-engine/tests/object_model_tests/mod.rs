@@ -1911,3 +1911,56 @@ fn bind_method_on_a_structural_object_is_a_type_error() {
         "expected the handler's structural-object or receiver diagnostic, got: {message}"
     );
 }
+
+
+/// A throw inside a `Try` must reach its catch handler.
+///
+/// `Try` resolves its two operands against *different* bases: `catch_abs` from the
+/// offset after the FIRST operand, `finally_abs` from after BOTH.
+#[test]
+fn throw_inside_a_try_region_is_observed_by_the_catch_handler() {
+    let mut vm = Vm::new();
+
+    let mut code: Vec<u8> = Vec::new();
+    code.push(Opcode::Try as u8);
+    let catch_rel_at = code.len();
+    code.extend_from_slice(&0i32.to_le_bytes());
+    code.extend_from_slice(&0i32.to_le_bytes());
+    // `catch_abs` is measured from the offset AFTER THE FIRST OPERAND ONLY: the
+    // interpreter computes it before reading `finally_rel`. Measuring from after
+    // both operands puts the handler four bytes short, and the throw then escapes
+    // as an uncaught error instead of reaching the catch block.
+    let catch_base = catch_rel_at + 4;
+
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&42i32.to_le_bytes());
+    code.push(Opcode::Throw as u8);
+
+    let catch_abs = code.len();
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&99i32.to_le_bytes());
+    code.push(Opcode::Return as u8);
+
+    let catch_rel = (catch_abs - catch_base) as i32;
+    code[catch_rel_at..catch_rel_at + 4].copy_from_slice(&catch_rel.to_le_bytes());
+
+    let mut module = Module::new("throw_caught".to_string());
+    module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "main".to_string(),
+        param_count: 0,
+        local_count: 0,
+        code,
+    });
+
+    let result = vm
+        .execute(&module)
+        .expect("a throw inside a Try must reach its catch handler, not escape");
+    assert_eq!(
+        result,
+        Value::i32(99),
+        "the catch handler must run after the throw; 42 or an error means it did not"
+    );
+}
