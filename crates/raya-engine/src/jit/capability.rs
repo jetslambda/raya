@@ -190,7 +190,15 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // `interpreter_call`, so lifting `main` and calling a closure would run
         // the body interpreted and prove nothing. See the D4.4 spec.
         | Opcode::LoadCaptured
-        | Opcode::StoreCaptured => JitSupport::HelperExact,
+        | Opcode::StoreCaptured
+        // `BindMethod` (2026-10-03). Its lifter arm was empty — it consumed no
+        // operand and touched no stack — so lifting failed before the arm was even
+        // reached and the lifted `ip` never advanced past the operand. That is
+        // fixed (`689ec78`), and it now has a helper, a lowering arm, an
+        // interpreter baseline covering both the nominal success and the structural
+        // -object failure, and a direct-lift test proving the vtable resolves and
+        // the receiver is carried.
+        | Opcode::BindMethod => JitSupport::HelperExact,
         Opcode::StoreFieldExact => JitSupport::InterpreterBoundary,
         Opcode::LoadFieldExact
         | Opcode::OptionalFieldExact
@@ -241,12 +249,10 @@ pub fn opcode_supported_for_jit(opcode: Opcode) -> bool {
 ///   lifted `ip` un-advanced and every later instruction misaligned. The arm now
 ///   models that effect, so the opcode no longer belongs in this list.
 ///
-///   It is still **not selectable**: there is no `helper_bind_method` and no
-///   Cranelift arm yet, so `jit_support` keeps it `Rejected` and a function
-///   containing it is never a compilation candidate. Lifting now produces a correct
-///   `JitInstr::BindMethod`; lowering it would fail loudly with
-///   `UnsupportedInstruction`, which is the fail-closed shape, rather than
-///   silently mis-executing.
+///   It was promoted to `HelperExact` later the same day, once it had a helper, a
+///   lowering arm and evidence on both sides. The ordering mattered: while the arm
+///   was empty the opcode was rejected here AND unselectable, so neither gate could
+///   be relied on alone.
 /// - `GetArgCount`/`LoadArgLocal`: no-op / constant zero (S2)
 /// - `Try`/`Rethrow`/`Throw`: placeholder handler installation; throw and
 ///   deopt helpers panic instead of propagating
@@ -316,6 +322,7 @@ mod tests {
             (Opcode::SetClosureCapture, "SetClosureCapture"),
             (Opcode::LoadCaptured, "LoadCaptured"),
             (Opcode::StoreCaptured, "StoreCaptured"),
+            (Opcode::BindMethod, "BindMethod"),
         ] {
             assert!(
                 function_supported_for_jit(&function_with(vec![
@@ -395,18 +402,19 @@ mod tests {
         }
 
         // `BindMethod` left `produces_incorrect_native_results` when its lifter arm
-        // was fixed (2026-10-03). It is still NOT selectable, for a different
-        // reason: no helper and no Cranelift arm exist yet, so lifting it would
-        // produce a correct instruction that lowering cannot compile. That is the
-        // fail-closed shape — a loud UnsupportedInstruction rather than a silently
-        // miscompiled function — so both facts are asserted separately.
+        // was fixed, and was promoted once it had a helper, a lowering arm and
+        // evidence on both sides. Both facts are asserted separately because they
+        // are independent: a promotion that forgot the list entry would leave the
+        // lifter still rejecting it, and one that forgot the classification would
+        // leave the list entry claiming a defect that no longer exists.
         assert!(
             !produces_incorrect_native_results(Opcode::BindMethod),
             "BindMethod must no longer be lifter-rejected; its arm now models the stack effect"
         );
-        assert!(
-            !opcode_supported_for_jit(Opcode::BindMethod),
-            "BindMethod must stay unselectable until a helper and a lowering arm exist"
+        assert_eq!(
+            jit_support(Opcode::BindMethod),
+            JitSupport::HelperExact,
+            "BindMethod is promoted and must be selectable"
         );
     }
 
