@@ -671,17 +671,30 @@ pub enum JitInstr {
     },
 
     // ===== RefCell (closure-captured mutable variables) =====
+    //
+    // `stack` and `bytecode_offset` exist so a lowering arm can call
+    // `emit_interpreter_boundary_exit` and hand control back. Without them these
+    // instructions cannot express a fallback at all: the RefCell helpers return
+    // `JIT_INTERPRETER_FALLBACK_SENTINEL` / `JIT_STORE_FALLBACK` for a receiver
+    // that is not a pointer, and there would be no way to observe that and exit.
+    // `LoadFieldExact` and friends have carried both for exactly this reason.
     NewRefCell {
         dest: Reg,
         value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     LoadRefCell {
         dest: Reg,
         cell: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     StoreRefCell {
         cell: Reg,
         value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
 
     // ===== Concurrency (always exit to runtime) =====

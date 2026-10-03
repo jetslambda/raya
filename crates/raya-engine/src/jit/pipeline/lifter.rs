@@ -1602,27 +1602,41 @@ fn lift_instruction(
 
         // ===== RefCell =====
         Opcode::NewRefCell => {
+            // Snapshot before the pops: a fallback needs the interpreter's stack as
+            // it was on entry, not after this instruction consumed its operands.
+            let pre_stack = stack.clone_state();
             let value = stack.pop(instr.offset)?;
             let dest = func.alloc_reg(JitType::Ptr);
-            func.block_mut(block)
-                .instrs
-                .push(JitInstr::NewRefCell { dest, value });
+            func.block_mut(block).instrs.push(JitInstr::NewRefCell {
+                dest,
+                value,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
             stack.push(dest);
         }
         Opcode::LoadRefCell => {
+            let pre_stack = stack.clone_state();
             let cell = stack.pop(instr.offset)?;
             let dest = func.alloc_reg(JitType::Value);
-            func.block_mut(block)
-                .instrs
-                .push(JitInstr::LoadRefCell { dest, cell });
+            func.block_mut(block).instrs.push(JitInstr::LoadRefCell {
+                dest,
+                cell,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
             stack.push(dest);
         }
         Opcode::StoreRefCell => {
+            let pre_stack = stack.clone_state();
             let value = stack.pop(instr.offset)?;
             let cell = stack.pop(instr.offset)?;
-            func.block_mut(block)
-                .instrs
-                .push(JitInstr::StoreRefCell { cell, value });
+            func.block_mut(block).instrs.push(JitInstr::StoreRefCell {
+                cell,
+                value,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
         }
 
         // ===== Concurrency =====

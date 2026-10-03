@@ -526,9 +526,38 @@ impl fmt::Display for JitInstr {
             JitInstr::CloseVar { index } => write!(f, "close.var {}", index),
 
             // RefCell
-            JitInstr::NewRefCell { dest, value } => write!(f, "{} = new.refcell {}", dest, value),
-            JitInstr::LoadRefCell { dest, cell } => write!(f, "{} = load.refcell {}", dest, cell),
-            JitInstr::StoreRefCell { cell, value } => {
+            JitInstr::NewRefCell {
+                dest,
+                value,
+                stack,
+                bytecode_offset,
+            } => write!(
+                f,
+                "{} = new.refcell {} @{} {:?}",
+                dest,
+                value,
+                bytecode_offset,
+                stack
+            ),
+            JitInstr::LoadRefCell {
+                dest,
+                cell,
+                stack,
+                bytecode_offset,
+            } => write!(
+                f,
+                "{} = load.refcell {} @{} {:?}",
+                dest,
+                cell,
+                bytecode_offset,
+                stack
+            ),
+            JitInstr::StoreRefCell {
+                cell,
+                value,
+                stack,
+                ..
+            } => {
                 write!(f, "store.refcell {}, {}", cell, value)
             }
 

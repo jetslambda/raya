@@ -757,12 +757,23 @@ fn collect_used_regs(instr: &JitInstr, used: &mut FxHashSet<Reg>) {
             used.insert(*array);
             used.insert(*value);
         }
-        JitInstr::StoreRefCell { cell, value } => {
+        JitInstr::StoreRefCell {
+            cell,
+            value,
+            stack,
+            ..
+        } => {
             used.insert(*cell);
             used.insert(*value);
+            used.extend(stack.iter().copied());
         }
-        JitInstr::NewRefCell { value, .. } => {
+        JitInstr::NewRefCell {
+            value,
+            stack,
+            ..
+        } => {
             used.insert(*value);
+            used.extend(stack.iter().copied());
         }
         JitInstr::StoreCaptured { value, .. } => {
             used.insert(*value);
