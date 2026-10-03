@@ -885,10 +885,22 @@ pub enum JitInstr {
         finally_block: Option<JitBlockId>,
     },
     EndTry,
+    // ===== Exceptions =====
+    //
+    // `stack` and `bytecode_offset` are what let these reach the interpreter. An
+    // exception is a control transfer with no return value, so unlike every other
+    // arm there is no merged result: the arm writes the outgoing stack into
+    // `exit_info_ptr` and returns through `emit_interpreter_boundary_exit`, and the
+    // interpreter resumes at `bytecode_offset` to find the handler.
     Throw {
         value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
-    Rethrow,
+    Rethrow {
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
+    },
 
     // ===== Optional Field =====
     OptionalFieldExact {
@@ -1084,7 +1096,7 @@ impl JitInstr {
             | JitInstr::SetupTry { .. }
             | JitInstr::EndTry
             | JitInstr::Throw { .. }
-            | JitInstr::Rethrow
+            | JitInstr::Rethrow { .. }
             | JitInstr::DynDelete { .. }
             | JitInstr::DynSetKeyed { .. }
             | JitInstr::DynArrayPush { .. } => None,

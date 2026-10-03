@@ -1900,11 +1900,20 @@ fn lift_instruction(
             func.block_mut(block).instrs.push(JitInstr::EndTry);
         }
         Opcode::Throw => {
+            let pre_stack = stack.clone_state();
             let value = stack.pop(instr.offset)?;
-            func.block_mut(block).instrs.push(JitInstr::Throw { value });
+            func.block_mut(block).instrs.push(JitInstr::Throw {
+                value,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
         }
         Opcode::Rethrow => {
-            func.block_mut(block).instrs.push(JitInstr::Rethrow);
+            let pre_stack = stack.clone_state();
+            func.block_mut(block).instrs.push(JitInstr::Rethrow {
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
         }
 
         // ===== Dynamic keyed operations =====

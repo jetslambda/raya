@@ -734,8 +734,12 @@ fn collect_used_regs(instr: &JitInstr, used: &mut FxHashSet<Reg>) {
             }
         }
 
-        JitInstr::Throw { value } => {
+        JitInstr::Throw { value, stack, .. } => {
             used.insert(*value);
+            used.extend(stack.iter().copied());
+        }
+        JitInstr::Rethrow { stack, .. } => {
+            used.extend(stack.iter().copied());
         }
         JitInstr::Await { task, .. } => {
             used.insert(*task);

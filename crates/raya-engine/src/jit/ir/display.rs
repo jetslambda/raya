@@ -702,8 +702,8 @@ impl fmt::Display for JitInstr {
                 Ok(())
             }
             JitInstr::EndTry => write!(f, "end.try"),
-            JitInstr::Throw { value } => write!(f, "throw {}", value),
-            JitInstr::Rethrow => write!(f, "rethrow"),
+            JitInstr::Throw { value, .. } => write!(f, "throw {}", value),
+            JitInstr::Rethrow { .. } => write!(f, "rethrow"),
         }
     }
 }
