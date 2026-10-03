@@ -1122,7 +1122,20 @@ impl JitInstr {
             | JitInstr::Phi { .. }
             | JitInstr::Move { .. } => false,
 
-            // Everything else has side effects
+            // Everything else has side effects.
+            //
+            // This default is load-bearing, and deliberately conservative. The DCE
+            // in `jit/pipeline/optimize.rs` skips any instruction this returns
+            // true for, so an instruction missing from the list above is kept
+            // rather than deleted. That is what protects allocating and writing
+            // instructions that nobody has enumerated here yet -- `NewRefCell`
+            // (an allocation), `StoreRefCell` (a heap write) and `StoreCaptured`
+            // are all absent from the list above and are safe only because of
+            // this arm.
+            //
+            // Do not "optimise" this to `_ => false`. Doing so would let the DCE
+            // delete any allocation or store whose destination is unused, which
+            // is silent miscompilation rather than a missed optimisation.
             _ => true,
         }
     }
