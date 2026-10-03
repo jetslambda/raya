@@ -174,7 +174,7 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // interpreter baseline, direct-lift tests for each arm, and a
         // differential running the SAME bytecode through both engines. The two
         // here are the only closure opcodes that can be promoted at all --
-        // `LoadCaptured`, `StoreCaptured` and `CloseVar` still have no operand
+        // `LoadCaptured` and `StoreCaptured` still have no operand
         // naming the closure they act on, because the interpreter resolves them
         // against `task.current_closure()` and the JIT has no active-closure
         // model. See the D4.4 spec.
@@ -338,25 +338,6 @@ mod tests {
             );
         }
 
-        // The closure opcodes remain excluded: they have no lowering arm at all, so
-        // eligibility would be a crash rather than a fast path. Keep them pinned so
-        // the family cannot widen by accident.
-        // Only `CloseVar` remains excluded in this family, and NOT for a JIT
-        // reason. There is no interpreter handler for it at all, and its encoder
-        // method has no caller, so nothing can produce the opcode. "Matching the
-        // interpreter" is undefined for it, so it is excluded until it is either
-        // finished (emission, handler, helper) or deleted. That is a different
-        // situation from its siblings above, which had handlers and were merely
-        // unreachable from native code.
-        for (op, label) in [(Opcode::CloseVar, "CloseVar")] {
-            assert!(
-                !function_supported_for_jit(&function_with(vec![
-                    op as u8,
-                    Opcode::ConstI32 as u8, 1, 0, 0, 0, Opcode::Return as u8,
-                ])),
-                "{label} has no lowering arm and must stay out of the JIT"
-            );
-        }
     }
 
     #[test]
@@ -375,7 +356,6 @@ mod tests {
         // only the selector, would break this rather than pass quietly.
         for op in [
             Opcode::MakeClosure,
-            Opcode::CloseVar,
             Opcode::LoadCaptured,
             Opcode::StoreCaptured,
             Opcode::SetClosureCapture,

@@ -1616,16 +1616,6 @@ fn lift_instruction(
                     });
             }
         }
-        Opcode::CloseVar => {
-            if let Operands::U16(index) = instr.operands {
-                let pre_stack = stack.clone_state();
-                func.block_mut(block).instrs.push(JitInstr::CloseVar {
-                    index,
-                    stack: pre_stack,
-                    bytecode_offset: instr.offset as u32,
-                });
-            }
-        }
 
         // ===== RefCell =====
         Opcode::NewRefCell => {

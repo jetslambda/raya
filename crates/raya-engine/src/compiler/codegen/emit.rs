@@ -111,7 +111,6 @@ pub fn opcode_size(opcode: Opcode) -> usize {
         | Opcode::LoadFieldExact
         | Opcode::StoreFieldExact
         | Opcode::OptionalFieldExact
-        | Opcode::CloseVar
         | Opcode::LoadCaptured
         | Opcode::StoreCaptured
         | Opcode::SetClosureCapture

@@ -654,7 +654,7 @@ pub enum JitInstr {
     // `emit_interpreter_boundary_exit`, and a capture-index bounds error would have
     // to be raised from a leaf helper, which cannot raise a catchable error.
     //
-    // Note what `LoadCaptured`, `StoreCaptured` and `CloseVar` still lack: any
+    // Note what `LoadCaptured` and `StoreCaptured` still lack: any
     // operand identifying the closure they act on. The interpreter resolves them
     // against `task.current_closure()`, and the JIT has no notion of an active
     // closure at all (`current_closure` has no occurrence under `jit/`). These
@@ -687,12 +687,6 @@ pub enum JitInstr {
         stack: Vec<Reg>,
         bytecode_offset: u32,
     },
-    CloseVar {
-        index: u16,
-        stack: Vec<Reg>,
-        bytecode_offset: u32,
-    },
-
     // ===== Bound methods =====
     //
     // Pops the receiver, pushes a `BoundMethod`. The stack effect is net zero but
@@ -1081,7 +1075,6 @@ impl JitInstr {
             | JitInstr::InitArray { .. }
             | JitInstr::StoreCaptured { .. }
             | JitInstr::SetClosureCapture { .. }
-            | JitInstr::CloseVar { .. }
             | JitInstr::StoreRefCell { .. }
             | JitInstr::Yield
             | JitInstr::Sleep { .. }

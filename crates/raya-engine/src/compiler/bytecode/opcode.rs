@@ -373,7 +373,6 @@ pub enum Opcode {
     /// Create closure object (operands: u32 funcIndex, u16 captureCount)
     MakeClosure = 0xF0,
     /// Capture local variable (operand: u16 localIndex)
-    CloseVar = 0xF1,
     /// Load captured variable (operand: u16 index)
     LoadCaptured = 0xF2,
     /// Store to captured variable (operand: u16 index)
@@ -594,7 +593,6 @@ impl Opcode {
             0xEE => Some(Self::IsNominal),
             // Closures & modules
             0xF0 => Some(Self::MakeClosure),
-            0xF1 => Some(Self::CloseVar),
             0xF2 => Some(Self::LoadCaptured),
             0xF3 => Some(Self::StoreCaptured),
             0xF4 => Some(Self::LoadModule),
@@ -759,7 +757,6 @@ impl Opcode {
             Self::CastNominal => "CAST_NOMINAL",
             Self::CastShape => "CAST_SHAPE",
             Self::MakeClosure => "MAKE_CLOSURE",
-            Self::CloseVar => "CLOSE_VAR",
             Self::LoadCaptured => "LOAD_CAPTURED",
             Self::StoreCaptured => "STORE_CAPTURED",
             Self::LoadModule => "LOAD_MODULE",
@@ -1102,7 +1099,6 @@ mod tests {
             Opcode::CastNominal,
             Opcode::TaskCancel,
             Opcode::MakeClosure,
-            Opcode::CloseVar,
             Opcode::LoadCaptured,
             Opcode::StoreCaptured,
             Opcode::LoadModule,

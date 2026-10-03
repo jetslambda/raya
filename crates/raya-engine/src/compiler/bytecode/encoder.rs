@@ -509,12 +509,6 @@ impl BytecodeWriter {
         self.emit_u16(capture_count);
     }
 
-    /// Emit CLOSE_VAR instruction
-    pub fn emit_close_var(&mut self, local_index: u16) {
-        self.emit_opcode(Opcode::CloseVar);
-        self.emit_u16(local_index);
-    }
-
     /// Emit LOAD_CAPTURED instruction
     pub fn emit_load_captured(&mut self, index: u16) {
         self.emit_opcode(Opcode::LoadCaptured);
