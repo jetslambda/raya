@@ -256,7 +256,9 @@ pub enum Opcode {
     StoreFieldShape = 0xB4,
     /// Create object literal (operands: u32 typeIndex, u16 fieldCount)
     ObjectLiteral = 0xB5,
-    /// Initialize object fields: pop N values (operand: u16 count)
+    /// Initialize one object field: pop value, peek object, store at the field
+    /// offset, leave the object on the stack (operand: u16 fieldOffset).
+    /// One opcode initializes one field; an N-field literal emits N of these.
     InitObject = 0xB6,
     /// Optional chaining field access (operand: u16 offset)
     OptionalFieldExact = 0xB7,

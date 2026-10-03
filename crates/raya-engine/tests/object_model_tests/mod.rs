@@ -888,3 +888,73 @@ fn test_call_super() {
     let result = vm.execute(&module).unwrap();
     assert_eq!(result, Value::i32(5)); // radius
 }
+
+#[test]
+fn init_object_operand_is_a_field_offset_not_a_value_count() {
+    // InitObject's u16 operand is the field offset to store into, not a count of
+    // values to consume. Two ops with operands 0 and 1 must therefore land in
+    // fields 0 and 1, and each op must consume exactly one value and leave the
+    // object on the stack.
+    //
+    // This discriminates against the old "pop N values" contract: read as a
+    // count, operand 0 would consume nothing and operand 1 would consume the
+    // single value into a running cursor, so field 1 would not be 20.
+    let mut vm = Vm::new();
+
+    let mut module = Module::new("test".to_string());
+    module.classes.push(class_def("Point", 2, None));
+    let main_fn = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "main".to_string(),
+        param_count: 0,
+        local_count: 1,
+        code: vec![
+            // new Point() -> local 0
+            Opcode::NewType as u8,
+            0,
+            0, // class index 0
+            Opcode::StoreLocal as u8,
+            0,
+            0,
+            // obj.x = 10 via InitObject(field 0)
+            Opcode::LoadLocal as u8,
+            0,
+            0,
+            Opcode::ConstI32 as u8,
+            10,
+            0,
+            0,
+            0,
+            Opcode::InitObject as u8,
+            0,
+            0, // field offset 0
+            // obj.y = 20 via InitObject(field 1)
+            Opcode::LoadLocal as u8,
+            0,
+            0,
+            Opcode::ConstI32 as u8,
+            20,
+            0,
+            0,
+            0,
+            Opcode::InitObject as u8,
+            1,
+            0, // field offset 1
+            // return obj.y; InitObject must have left the object on the stack
+            // each time, so local 0 is still the receiver here.
+            Opcode::LoadLocal as u8,
+            0,
+            0,
+            Opcode::LoadFieldExact as u8,
+            1,
+            0, // field offset 1
+            Opcode::Return as u8,
+        ],
+    };
+    module.functions.push(main_fn);
+
+    let result = vm.execute(&module).unwrap();
+    assert_eq!(result, Value::i32(20));
+}
