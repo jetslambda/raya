@@ -1672,6 +1672,110 @@ unsafe extern "C" fn helper_value_to_string(value_raw: u64, shared_state: *mut (
     result.raw()
 }
 
+// ---------------------------------------------------------------------------
+// RefCell helpers (D4.4)
+//
+// NOT YET REACHABLE, but for a narrower reason than `BindMethod`.
+//
+// The lifter already handles all three opcodes correctly (`lifter.rs:1604-1626`),
+// emitting `JitInstr::NewRefCell` / `LoadRefCell` / `StoreRefCell` with the right
+// stack effects — including `StoreRefCell`'s net -2, which pushes nothing. What is
+// missing is the *native* half: `jit/backend/cranelift/lowering.rs` has no RefCell
+// arm at all, so nothing reaches these helpers, and they are deliberately absent
+// from the trampoline table as well. `BindMethod` is the opposite problem — the
+// lifter emits nothing for it at all.
+//
+// So RefCell is lifter-ready and only needs a Cranelift arm plus a differential
+// test. Do not read this as "the whole path is absent". That is stated here because unwired helpers are exactly what I
+// misread during the D4.3 audit — I trusted a capability classification and
+// assumed reachability, and three of the object helpers turned out to be wired
+// while a fourth was referenced nowhere.
+//
+// They are written and tested now so the semantics are settled before anything can
+// call them. Wiring is the next slice, and `NewRefCell`/`LoadRefCell`/`StoreRefCell`
+// stay `Rejected` until it is done.
+//
+// **The receiver check is deliberately weak.** The interpreter's RefCell handlers
+// test `is_ptr()` only — never the GC-header TypeId — and will reinterpret any heap
+// value as a RefCell (ALY-54). These helpers reproduce that exactly rather than
+// "fixing" it, because a helper that type-checks properly would diverge from the
+// interpreter, which is the opposite of the goal. Do not strengthen these checks
+// without fixing the interpreter in the same change.
+
+/// Allocate a RefCell holding `initial_raw`.
+///
+/// Returns null when the root set is unavailable, so the allocation cannot happen
+/// with an unprotected operand: native stack maps are empty, so a collection during
+/// this allocation would not see `initial_raw`.
+// Unused until the Cranelift lowering for RefCell exists. Marked rather than left
+// to warn on every build: these are deliberately unreachable, and the alternative
+// -- wiring them now without a differential test -- is the thing D4.3 got wrong.
+#[allow(dead_code)]
+unsafe extern "C" fn helper_new_refcell(initial_raw: u64, shared_state: *mut ()) -> u64 {
+    let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
+        Some(ptr) => &*ptr.as_ptr(),
+        None => return u64::MAX,
+    };
+    if bridge.gc.is_null() {
+        return u64::MAX;
+    }
+    let initial = Value::from_raw(initial_raw);
+    // Root the initial value across the allocation, exactly as `helper_alloc_array`
+    // roots its operands, and fail closed if that is not possible.
+    let Some(_scope) = EphemeralRootScope::open(bridge, &[initial]) else {
+        return u64::MAX;
+    };
+    let mut gc = (&*bridge.gc).lock();
+    let ptr = gc.allocate(crate::vm::object::RefCell::new(initial));
+    Value::from_ptr(NonNull::new(ptr.as_ptr()).unwrap()).raw()
+}
+
+/// Read a RefCell's value.
+///
+/// Returns the interpreter-fallback sentinel for a non-pointer receiver, matching
+/// the interpreter's `TypeError("Expected RefCell")` by handing the error back
+/// rather than raising it: a leaf helper cannot raise a catchable error.
+// Unused until the Cranelift lowering for RefCell exists. Marked rather than left
+// to warn on every build: these are deliberately unreachable, and the alternative
+// -- wiring them now without a differential test -- is the thing D4.3 got wrong.
+#[allow(dead_code)]
+unsafe extern "C" fn helper_load_refcell(refcell_raw: u64, _shared_state: *mut ()) -> u64 {
+    let refcell_value = Value::from_raw(refcell_raw);
+    if !refcell_value.is_ptr() {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+    let ptr = refcell_value.as_ptr::<crate::vm::object::RefCell>();
+    match ptr {
+        Some(ptr) => (&*ptr.as_ptr()).get().raw(),
+        None => JIT_INTERPRETER_FALLBACK_SENTINEL,
+    }
+}
+
+/// Write `value_raw` into a RefCell.
+///
+/// `JIT_STORE_FALLBACK` is returned for a non-pointer receiver. The check happens
+/// before the write, so a fallback return means nothing was mutated.
+// Unused until the Cranelift lowering for RefCell exists. Marked rather than left
+// to warn on every build: these are deliberately unreachable, and the alternative
+// -- wiring them now without a differential test -- is the thing D4.3 got wrong.
+#[allow(dead_code)]
+unsafe extern "C" fn helper_store_refcell(
+    refcell_raw: u64,
+    value_raw: u64,
+    _shared_state: *mut (),
+) -> i8 {
+    let refcell_value = Value::from_raw(refcell_raw);
+    if !refcell_value.is_ptr() {
+        return JIT_STORE_FALLBACK;
+    }
+    let value = Value::from_raw(value_raw);
+    let Some(ptr) = refcell_value.as_ptr::<crate::vm::object::RefCell>() else {
+        return JIT_STORE_FALLBACK;
+    };
+    (&mut *ptr.as_ptr()).set(value);
+    JIT_STORE_SUCCESS
+}
+
 /// Exact field load.
 ///
 /// This is **not** an implementation of the interpreter's `LoadFieldExact`. It
@@ -2482,6 +2586,76 @@ mod tests {
                 unsafe { helper_array_len(arr_val.raw(), ss) },
                 len_before,
                 "failed-closed push must not mutate the array"
+            );
+        });
+    }
+
+    /// D4.4: the RefCell helpers exist and are tested before anything can call
+    /// them. They are NOT wired into the lowering, and `NewRefCell`,
+    /// `LoadRefCell` and `StoreRefCell` stay `Rejected` until it is.
+    #[test]
+    fn refcell_helpers_roundtrip_and_reject_non_pointers() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // allocate a RefCell holding 7, read it back, overwrite, read again.
+            let cell = unsafe { helper_new_refcell(Value::i32(7).raw(), ss) };
+            assert_ne!(cell, u64::MAX, "allocation must not fail closed here");
+            // `cell` is the RefCell's address, not its contents; the 7 lives
+            // inside it and comes back through the load helper.
+            assert_eq!(
+                unsafe { helper_load_refcell(cell, ss) },
+                Value::i32(7).raw()
+            );
+            assert_eq!(
+                unsafe { helper_store_refcell(cell, Value::i32(9).raw(), ss) },
+                JIT_STORE_SUCCESS
+            );
+            assert_eq!(
+                unsafe { Value::from_raw(helper_load_refcell(cell, ss)).as_i32() },
+                Some(9)
+            );
+        });
+    }
+
+    #[test]
+    fn refcell_helpers_reject_non_pointers() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // An immediate is not a pointer, so both must refuse. This is the
+            // interpreter's weak `is_ptr()` check reproduced exactly -- a heap
+            // value of the wrong type is still accepted, as it is in the
+            // interpreter today (ALY-54).
+            let immediate = Value::i32(5).raw();
+            assert_eq!(
+                unsafe { helper_load_refcell(immediate, ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL
+            );
+            assert_eq!(
+                unsafe { helper_store_refcell(immediate, Value::i32(1).raw(), ss) },
+                JIT_STORE_FALLBACK
+            );
+        });
+    }
+
+    #[test]
+    fn new_refcell_fails_closed_without_a_root_set() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let mut bridge = bridge;
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // Deny the root set. Native stack maps are empty, so allocating here
+            // with an unprotected operand could collect the initial value.
+            bridge.ephemeral_gc_roots = std::ptr::null();
+
+            assert_eq!(
+                unsafe { helper_new_refcell(Value::i32(7).raw(), ss) },
+                u64::MAX,
+                "RefCell allocation must fail closed without a root set"
             );
         });
     }
