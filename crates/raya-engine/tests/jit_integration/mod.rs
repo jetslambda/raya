@@ -2114,6 +2114,14 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     unsafe extern "C" fn stub_array_len(_array: u64, _shared_state: *mut ()) -> i32 {
         0
     }
+    /// RefCell load has no stub behaviour: any RefCell opcode is `Rejected`, so no
+    /// compiled test can reach it. Returning the interpreter-fallback sentinel is
+    /// the honest stub — it is what the real helper returns for a receiver that is
+    /// not a pointer, and it routes to the interpreter rather than inventing a
+    /// value.
+    unsafe extern "C" fn stub_refcell_load(_refcell: u64, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2207,6 +2215,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             array_push: stub_array_push,
             array_pop: stub_array_pop,
             array_len: stub_array_len,
+            refcell_load: stub_refcell_load,
         },
     };
 
@@ -2263,6 +2272,14 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     }
     unsafe extern "C" fn stub_array_len(_array: u64, _shared_state: *mut ()) -> i32 {
         0
+    }
+    /// RefCell load has no stub behaviour: any RefCell opcode is `Rejected`, so no
+    /// compiled test can reach it. Returning the interpreter-fallback sentinel is
+    /// the honest stub — it is what the real helper returns for a receiver that is
+    /// not a pointer, and it routes to the interpreter rather than inventing a
+    /// value.
+    unsafe extern "C" fn stub_refcell_load(_refcell: u64, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2357,6 +2374,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             array_push: stub_array_push,
             array_pop: stub_array_pop,
             array_len: stub_array_len,
+            refcell_load: stub_refcell_load,
         },
     };
 
@@ -2414,6 +2432,14 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     }
     unsafe extern "C" fn stub_array_len(_array: u64, _shared_state: *mut ()) -> i32 {
         0
+    }
+    /// RefCell load has no stub behaviour: any RefCell opcode is `Rejected`, so no
+    /// compiled test can reach it. Returning the interpreter-fallback sentinel is
+    /// the honest stub — it is what the real helper returns for a receiver that is
+    /// not a pointer, and it routes to the interpreter rather than inventing a
+    /// value.
+    unsafe extern "C" fn stub_refcell_load(_refcell: u64, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2515,6 +2541,7 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             array_push: stub_array_push,
             array_pop: stub_array_pop,
             array_len: stub_array_len,
+            refcell_load: stub_refcell_load,
         },
     };
 
@@ -2567,6 +2594,14 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     }
     unsafe extern "C" fn stub_array_len(_array: u64, _shared_state: *mut ()) -> i32 {
         0
+    }
+    /// RefCell load has no stub behaviour: any RefCell opcode is `Rejected`, so no
+    /// compiled test can reach it. Returning the interpreter-fallback sentinel is
+    /// the honest stub — it is what the real helper returns for a receiver that is
+    /// not a pointer, and it routes to the interpreter rather than inventing a
+    /// value.
+    unsafe extern "C" fn stub_refcell_load(_refcell: u64, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2668,6 +2703,7 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             array_push: stub_array_push,
             array_pop: stub_array_pop,
             array_len: stub_array_len,
+            refcell_load: stub_refcell_load,
         },
     };
 
@@ -2727,6 +2763,14 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     }
     unsafe extern "C" fn stub_array_len(_array: u64, _shared_state: *mut ()) -> i32 {
         0
+    }
+    /// RefCell load has no stub behaviour: any RefCell opcode is `Rejected`, so no
+    /// compiled test can reach it. Returning the interpreter-fallback sentinel is
+    /// the honest stub — it is what the real helper returns for a receiver that is
+    /// not a pointer, and it routes to the interpreter rather than inventing a
+    /// value.
+    unsafe extern "C" fn stub_refcell_load(_refcell: u64, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2836,6 +2880,7 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             array_push: stub_array_push,
             array_pop: stub_array_pop,
             array_len: stub_array_len,
+            refcell_load: stub_refcell_load,
         },
     };
 

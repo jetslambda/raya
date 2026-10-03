@@ -174,6 +174,13 @@ pub const HELPER_ARRAY_POP_OFFSET: i32 =
 pub const HELPER_ARRAY_LEN_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, array_len) as i32;
 
+/// Byte offset of the RefCell-load helper in [`RuntimeContext`].
+///
+/// Appended after the array helpers: `RuntimeHelperTable` is layout-sensitive
+/// because offsets are computed from it, so new fields go at the end.
+pub const HELPER_REFCELL_LOAD_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, refcell_load) as i32;
+
 const _: () = assert!(std::mem::align_of::<RuntimeContext>() >= 8);
 const _: () = assert!(std::mem::size_of::<RuntimeContext>() >= std::mem::size_of::<RuntimeHelperTable>());
 
@@ -240,6 +247,9 @@ pub struct RuntimeHelperTable {
     pub array_pop: unsafe extern "C" fn(u64, *mut ()) -> u64,
     /// Array length: (array_val, shared_state) -> len or i32::MIN fallback sentinel
     pub array_len: unsafe extern "C" fn(u64, *mut ()) -> i32,
+    /// RefCell load: (refcell_val, shared_state) -> contained value, or the
+    /// interpreter-fallback sentinel for a receiver that is not a pointer.
+    pub refcell_load: unsafe extern "C" fn(u64, *mut ()) -> u64,
 }
 
 /// Validate the boxed arguments at a JIT entry boundary against a verified

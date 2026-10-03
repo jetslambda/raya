@@ -212,6 +212,7 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         array_push: helper_array_push,
         array_pop: helper_array_pop,
         array_len: helper_array_len,
+        refcell_load: helper_load_refcell,
     }
 }
 
@@ -1735,10 +1736,6 @@ unsafe extern "C" fn helper_new_refcell(initial_raw: u64, shared_state: *mut ())
 /// Returns the interpreter-fallback sentinel for a non-pointer receiver, matching
 /// the interpreter's `TypeError("Expected RefCell")` by handing the error back
 /// rather than raising it: a leaf helper cannot raise a catchable error.
-// Unused until the Cranelift lowering for RefCell exists. Marked rather than left
-// to warn on every build: these are deliberately unreachable, and the alternative
-// -- wiring them now without a differential test -- is the thing D4.3 got wrong.
-#[allow(dead_code)]
 unsafe extern "C" fn helper_load_refcell(refcell_raw: u64, _shared_state: *mut ()) -> u64 {
     let refcell_value = Value::from_raw(refcell_raw);
     if !refcell_value.is_ptr() {
