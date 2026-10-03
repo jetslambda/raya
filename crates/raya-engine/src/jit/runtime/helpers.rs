@@ -1766,7 +1766,17 @@ unsafe extern "C" fn helper_object_set_field(
             object.set_field(slot, Value::from_raw(value_raw)).is_ok()
         }
         StructuralSlotBinding::Dynamic(key) => {
-            object.ensure_dyn_map().insert(key, Value::from_raw(value_raw));
+            // `ensure_dyn_map` allocates, and native stack maps are empty, so a
+            // collection here would not see these operands. Root the receiver and
+            // the incoming value across the window, and fail closed if the root
+            // set is unavailable: the caller must be able to treat a false
+            // return as "nothing was mutated".
+            let value = Value::from_raw(value_raw);
+            let Some(_scope) = EphemeralRootScope::open(bridge, &[object_val, value])
+            else {
+                return false;
+            };
+            object.ensure_dyn_map().insert(key, value);
             true
         }
         StructuralSlotBinding::Method(_) | StructuralSlotBinding::Missing => false,
@@ -1926,7 +1936,18 @@ unsafe extern "C" fn helper_object_set_shape_field(
             .map(|_| JIT_STORE_SUCCESS)
             .unwrap_or(JIT_STORE_FALLBACK),
         StructuralSlotBinding::Dynamic(key) => {
-            object.ensure_dyn_map().insert(key, Value::from_raw(value_raw));
+            // See `helper_object_set_field`: `ensure_dyn_map` allocates inside a
+            // JIT helper with empty native stack maps. Root the operands across
+            // the allocation window before touching the map. Opening the scope
+            // first is what keeps the FALLBACK contract: if roots are
+            // unavailable we return before any mutation, so a caller falling back
+            // to the interpreter cannot double-apply the store.
+            let value = Value::from_raw(value_raw);
+            let Some(_scope) = EphemeralRootScope::open(bridge, &[object_val, value])
+            else {
+                return JIT_STORE_FALLBACK;
+            };
+            object.ensure_dyn_map().insert(key, value);
             JIT_STORE_SUCCESS
         }
         StructuralSlotBinding::Method(_) | StructuralSlotBinding::Missing => JIT_STORE_FALLBACK,
