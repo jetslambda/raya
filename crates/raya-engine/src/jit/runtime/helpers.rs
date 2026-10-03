@@ -1768,6 +1768,87 @@ unsafe extern "C" fn helper_await_task(value_raw: u64, shared_state: *mut ()) ->
 }
 
 // ---------------------------------------------------------------------------
+// Dynamic NodeCompat helpers (D4.7)
+// ---------------------------------------------------------------------------
+
+/// `DynGetKeyed` for the views that do not need field-index resolution.
+///
+/// `JSView::Str` and `JSView::Arr` are ordinary leaf reads and are handled here.
+/// **`JSView::Struct` and everything else return the interpreter-fallback
+/// sentinel**, deliberately: `Struct` field lookup goes through
+/// `field_index_for_value`, which falls back to `structural_object_shapes` — a
+/// registry `JitRuntimeBridgeContext` does not carry and `SharedVmState` does not
+/// have either (it has `structural_layout_shapes` instead). Reproducing that
+/// resolution here would diverge from the interpreter rather than match it, so the
+/// interpreter keeps that part. See the D4.7 spec.
+///
+/// Key parsing calls the interpreter's own `dyn_key_parts`, and the view split
+/// uses its own `js_classify`. Neither is reimplemented here: a hand-rolled key
+/// parser or view dispatch is exactly the shape of divergence that ships.
+///
+/// NOT YET LOWERED. See the note on the RefCell helpers.
+#[allow(dead_code)]
+unsafe extern "C" fn helper_dyn_get_keyed(
+    object_raw: u64,
+    key_raw: u64,
+    shared_state: *mut (),
+) -> u64 {
+    use crate::vm::json::view::{js_classify, JSView};
+
+    let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
+        Some(ptr) => &*ptr.as_ptr(),
+        None => return JIT_INTERPRETER_FALLBACK_SENTINEL,
+    };
+    if bridge.gc.is_null() {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+
+    // The interpreter raises on a malformed key, so a helper cannot invent an answer
+    // for one.
+    let (key_str, array_index) =
+        match crate::vm::interpreter::opcodes::types::dyn_key_parts(Value::from_raw(key_raw)) {
+            Ok(parts) => parts,
+            Err(_) => return JIT_INTERPRETER_FALLBACK_SENTINEL,
+        };
+
+    match js_classify(Value::from_raw(object_raw)) {
+        JSView::Arr(ptr) => {
+            let array = unsafe { &*ptr };
+            match array_index {
+                Some(index) => array.get(index).unwrap_or(Value::null()).raw(),
+                None => Value::null().raw(),
+            }
+        }
+        JSView::Str(ptr) => {
+            let string = unsafe { &*ptr };
+            if let Some(index) = array_index {
+                // Each character is a freshly allocated `RayaString`, with `string`
+                // held live across the allocation, so root it.
+                let Some(character) = string.data.chars().nth(index) else {
+                    // Out of range is a legitimate answer, not a failure.
+                    return Value::null().raw();
+                };
+                let string_value = Value::from_raw(object_raw);
+                let Some(_scope) = EphemeralRootScope::open(bridge, &[string_value]) else {
+                    return JIT_INTERPRETER_FALLBACK_SENTINEL;
+                };
+                let mut gc = (&*bridge.gc).lock();
+                let allocated = gc.allocate(crate::vm::object::RayaString::new(character.to_string()));
+                let pointer = NonNull::new(allocated.as_ptr()).unwrap();
+                Value::from_ptr(pointer).raw()
+            } else if key_str.as_deref() == Some("length") {
+                Value::i32(string.data.chars().count() as i32).raw()
+            } else {
+                Value::null().raw()
+            }
+        }
+        // `Struct` needs the registry the bridge lacks; everything else is the
+        // interpreter's business.
+        _ => JIT_INTERPRETER_FALLBACK_SENTINEL,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Closure helpers (D4.4)
 //
 // NOT YET LOWERED. `lowering.rs` has no `MakeClosure` arm and the opcode stays
@@ -3043,6 +3124,101 @@ mod tests {
             };
             assert_eq!(
                 unsafe { helper_await_task(unknown, ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL
+            );
+        });
+    }
+
+    /// D4.7 `DynGetKeyed`: the two views a helper can honestly reproduce, and the
+    /// one it must decline.
+    ///
+    /// The `Struct` case is the important half. Its field lookup falls back to
+    /// `structural_object_shapes`, a registry the bridge does not carry, so the
+    /// helper must return the fallback sentinel rather than approximate the
+    /// resolution. A test that only exercised `Arr` would pass while that
+    /// fallback silently regressed into a wrong answer.
+    #[test]
+    fn dyn_get_keyed_helper_handles_arr_and_str_and_defers_the_rest() {
+        use crate::vm::object::{Array, Object, RayaString};
+        use std::sync::Arc;
+
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // Arrange an array and a string in the shared GC.
+            let (arr_raw, str_raw, obj_raw) = {
+                let mut gc = shared.gc.lock();
+
+                let mut array = Array::new(0, 2);
+                array.set(0, Value::i32(7)).unwrap();
+                array.set(1, Value::i32(8)).unwrap();
+                let array_ptr = gc.allocate(array);
+                let arr_raw = unsafe {
+                    Value::from_ptr(NonNull::new(array_ptr.as_ptr()).unwrap()).raw()
+                };
+
+                let string_ptr = gc.allocate(RayaString::new("hello".to_string()));
+                let str_raw =
+                    unsafe { Value::from_ptr(NonNull::new(string_ptr.as_ptr()).unwrap()).raw() };
+
+                // A nominal object: a `Struct` view for the keyed path.
+                let obj_ptr = gc.allocate(Object::new_nominal(1, 5, 1));
+                let obj_raw =
+                    unsafe { Value::from_ptr(NonNull::new(obj_ptr.as_ptr()).unwrap()).raw() };
+
+                (arr_raw, str_raw, obj_raw)
+            };
+            let _ = Arc::strong_count(&shared);
+
+            // Arr, in range.
+            let arr_key = Value::i32(1);
+            assert_eq!(
+                unsafe { helper_dyn_get_keyed(arr_raw, arr_key.raw(), ss) },
+                Value::i32(8).raw(),
+                "an in-range array index must read the element"
+            );
+            // Arr, out of range: a legitimate null, not a fallback.
+            let oob = Value::i32(99);
+            assert_eq!(
+                unsafe { helper_dyn_get_keyed(arr_raw, oob.raw(), ss) },
+                Value::null().raw(),
+                "an out-of-range array index is null, not a fallback"
+            );
+
+            // Str, char index — each char is a freshly allocated RayaString.
+            let idx = Value::i32(1);
+            let char_value =
+                unsafe { Value::from_raw(helper_dyn_get_keyed(str_raw, idx.raw(), ss)) };
+            let Some(char_ptr) = (unsafe { char_value.as_ptr::<RayaString>() }) else {
+                panic!("expected an allocated RayaString for the character");
+            };
+            assert_eq!(unsafe { char_ptr.as_ref().data.as_str() }, "e");
+
+            // Str, "length".
+            let length_key = unsafe {
+                let mut gc = shared.gc.lock();
+                let k = gc.allocate(RayaString::new("length".to_string()));
+                Value::from_raw(Value::from_ptr(NonNull::new(k.as_ptr()).unwrap()).raw())
+            };
+            assert_eq!(
+                unsafe { helper_dyn_get_keyed(str_raw, length_key.raw(), ss) },
+                Value::i32(5).raw()
+            );
+
+            // Struct: MUST decline. This is the whole reason the helper is shaped
+            // this way.
+            let zero = Value::i32(0);
+            assert_eq!(
+                unsafe { helper_dyn_get_keyed(obj_raw, zero.raw(), ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL,
+                "a Struct lookup needs structural_object_shapes, which the bridge \
+                 lacks, so the helper must defer to the interpreter"
+            );
+
+            // Non-node target also defers.
+            assert_eq!(
+                unsafe { helper_dyn_get_keyed(Value::i32(5).raw(), Value::i32(0).raw(), ss) },
                 JIT_INTERPRETER_FALLBACK_SENTINEL
             );
         });
