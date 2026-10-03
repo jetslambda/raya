@@ -6064,3 +6064,59 @@ fn try_lifter_resolves_the_catch_block() {
     );
     let _ = JitTerminator::None;
 }
+
+
+/// `Await` path 1 executes natively: a non-task value comes back **unchanged**.
+///
+/// This is the first promotion candidate on this branch whose correctness rests on
+/// `Value::as_u64` being **tag-gated** rather than on a pointer or bounds check, so
+/// the test asserts the *value*, not merely that execution completed. A
+/// payload-based "is this a task id" test would read 42 as task id 42, find no such
+/// task, and fall back — so a version of this test asserting only
+/// `exit.kind == Completed` would have passed against a wrong implementation that
+/// silently fell back instead.
+#[test]
+fn await_path_one_runs_natively_and_returns_the_value_unchanged() {
+    use raya_engine::jit::runtime::trampoline::{JitExitKind, JitSuspendReason};
+    use raya_engine::vm::value::Value;
+
+    let mut code: Vec<u8> = Vec::new();
+    emit_i32(&mut code, 42);
+    code.push(Opcode::Await as u8);
+    emit(&mut code, Opcode::Return);
+
+    let module = finalize_module(make_module(code, 0, 0));
+    let (safepoint, shared) = new_shared_vm_state();
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = Vec::new();
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+
+    // A non-task value takes the MERGED path: the helper returns it and execution
+    // completes normally. Only the sentinel path exits `Suspended` -- asserting
+    // `Suspended` here was wrong, and it is the same distinction every promoted arm
+    // makes: `Completed` is success, `Suspended` is a fallback to the interpreter.
+    assert_eq!(
+        exit.kind,
+        JitExitKind::Completed as u32,
+        "awaiting a non-task must complete natively, not fall back to the interpreter"
+    );
+    assert_eq!(
+        exit.suspend_reason,
+        JitSuspendReason::None as u32,
+        "a normal completion carries no suspend reason"
+    );
+    assert_eq!(
+        raw,
+        Value::i32(42).raw(),
+        "a non-task value must be returned unchanged by the helper"
+    );
+    assert!(
+        is_i32(raw),
+        "the result must still be a NaN-boxed i32, got 0x{raw:016X}"
+    );
+}

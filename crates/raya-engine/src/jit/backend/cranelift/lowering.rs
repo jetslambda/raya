@@ -1026,7 +1026,11 @@ impl<'a> LoweringContext<'a> {
                     crate::jit::runtime::trampoline::HELPER_AWAIT_TASK_OFFSET,
                 );
                 let sig = self.await_task_sig(builder);
-                let value_val = self.use_reg(builder, *task);
+                // `boxed_reg_value`, not `use_reg`: the helper takes a raw VM `Value`
+                // and a `Value` holding an i32 is NaN-boxed, so an I32 register must
+                // be boxed rather than passed through. Same requirement as the
+                // RefCell store and SetClosureCapture arms.
+                let value_val = self.boxed_reg_value(builder, *task);
                 let call =
                     builder
                         .ins()
