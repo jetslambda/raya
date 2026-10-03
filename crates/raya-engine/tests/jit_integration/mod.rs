@@ -5906,3 +5906,71 @@ fn bind_method_lifter_keeps_the_stack_model_in_step() {
         &instrs[at + 1..]
     );
 }
+
+
+/// `BindMethod` executes natively: the lowering arm resolves the vtable slot and
+/// allocates a `BoundMethod`.
+///
+/// The class is registered into the bridge's registry directly rather than through
+/// module loading, because that is the only route available to a test — and it
+/// exercises the same code the helper reads, so the vtable resolution under test is
+/// real rather than a stub.
+#[test]
+fn bind_method_lowering_binds_natively() {
+    use raya_engine::vm::object::Class;
+    use raya_engine::vm::value::Value;
+
+    let (safepoint, shared) = new_shared_vm_state();
+
+    // LoadLocal 0; BindMethod slot 0; Return
+    let mut code: Vec<u8> = Vec::new();
+    emit_load_local(&mut code, 0);
+    code.push(Opcode::BindMethod as u8);
+    code.extend_from_slice(&0u16.to_le_bytes());
+    emit(&mut code, Opcode::Return);
+    let module = finalize_module(make_module(code, 0, 1));
+
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+
+    // Register a class with one method, then make an object carrying that id.
+    let object_raw = {
+        let mut classes = unsafe { (&*bridge.classes).write() };
+        let mut class = Class::new(0, "Point".to_string(), 2);
+        class.module = Some(module.clone());
+        class.vtable.add_method(42);
+        let nominal_type_id = classes.register_class(class);
+        drop(classes);
+
+        let mut gc = shared.gc.lock();
+        let mut object =
+            raya_engine::vm::object::Object::new_nominal(1, nominal_type_id as u32, 2);
+        object.set_field(0, Value::i32(99)).unwrap();
+        let ptr = gc.allocate(object);
+        unsafe { Value::from_ptr(std::ptr::NonNull::new(ptr.as_ptr()).unwrap()).raw() }
+    };
+
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = vec![object_raw];
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+        "BindMethod must complete natively, not exit to the interpreter"
+    );
+    assert_ne!(raw, 0, "a bound method must not be null");
+
+    // It must be a BoundMethod carrying the receiver and the resolved func id.
+    let value = unsafe { Value::from_raw(raw) };
+    let bound = unsafe {
+        let ptr = value
+            .as_ptr::<raya_engine::vm::object::BoundMethod>()
+            .expect("result must be a BoundMethod");
+        &*ptr.as_ptr()
+    };
+    assert_eq!(bound.func_id, 42, "vtable slot must resolve to the func id");
+    assert_eq!(bound.receiver.raw(), object_raw, "receiver must be carried");
+}
