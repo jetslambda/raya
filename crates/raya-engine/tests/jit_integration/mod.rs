@@ -2150,6 +2150,17 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     ) -> i8 {
         0
     }
+
+    /// Null means no allocation happened, which routes to the interpreter.
+    /// `MakeClosure` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_make_closure(
+        _func_id: u32,
+        _captures_ptr: *const u64,
+        _capture_count: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2247,6 +2258,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             refcell_store: stub_refcell_store,
             refcell_new: stub_refcell_new,
             set_closure_capture: stub_set_closure_capture,
+            make_closure: stub_make_closure,
         },
     };
 
@@ -2338,6 +2350,17 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
         _value: u64,
         _shared_state: *mut (),
     ) -> i8 {
+        0
+    }
+
+    /// Null means no allocation happened, which routes to the interpreter.
+    /// `MakeClosure` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_make_closure(
+        _func_id: u32,
+        _captures_ptr: *const u64,
+        _capture_count: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
         0
     }
     unsafe extern "C" fn stub_alloc_string(
@@ -2437,6 +2460,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             refcell_store: stub_refcell_store,
             refcell_new: stub_refcell_new,
             set_closure_capture: stub_set_closure_capture,
+            make_closure: stub_make_closure,
         },
     };
 
@@ -2529,6 +2553,17 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
         _value: u64,
         _shared_state: *mut (),
     ) -> i8 {
+        0
+    }
+
+    /// Null means no allocation happened, which routes to the interpreter.
+    /// `MakeClosure` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_make_closure(
+        _func_id: u32,
+        _captures_ptr: *const u64,
+        _capture_count: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
         0
     }
     unsafe extern "C" fn stub_alloc_string(
@@ -2635,6 +2670,7 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             refcell_store: stub_refcell_store,
             refcell_new: stub_refcell_new,
             set_closure_capture: stub_set_closure_capture,
+            make_closure: stub_make_closure,
         },
     };
 
@@ -2722,6 +2758,17 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
         _value: u64,
         _shared_state: *mut (),
     ) -> i8 {
+        0
+    }
+
+    /// Null means no allocation happened, which routes to the interpreter.
+    /// `MakeClosure` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_make_closure(
+        _func_id: u32,
+        _captures_ptr: *const u64,
+        _capture_count: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
         0
     }
     unsafe extern "C" fn stub_alloc_string(
@@ -2828,6 +2875,7 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             refcell_store: stub_refcell_store,
             refcell_new: stub_refcell_new,
             set_closure_capture: stub_set_closure_capture,
+            make_closure: stub_make_closure,
         },
     };
 
@@ -2922,6 +2970,17 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
         _value: u64,
         _shared_state: *mut (),
     ) -> i8 {
+        0
+    }
+
+    /// Null means no allocation happened, which routes to the interpreter.
+    /// `MakeClosure` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_make_closure(
+        _func_id: u32,
+        _captures_ptr: *const u64,
+        _capture_count: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
         0
     }
     unsafe extern "C" fn stub_alloc_string(
@@ -3036,6 +3095,7 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             refcell_store: stub_refcell_store,
             refcell_new: stub_refcell_new,
             set_closure_capture: stub_set_closure_capture,
+            make_closure: stub_make_closure,
         },
     };
 

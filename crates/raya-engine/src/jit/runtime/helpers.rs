@@ -216,6 +216,7 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         refcell_store: helper_store_refcell,
         refcell_new: helper_new_refcell,
         set_closure_capture: helper_set_closure_capture,
+        make_closure: helper_make_closure,
     }
 }
 
@@ -1753,7 +1754,6 @@ unsafe extern "C" fn helper_set_closure_capture(
 
 // Unused until the Cranelift lowering for MakeClosure exists; see the note on the
 // RefCell helpers above for why that is marked rather than left to warn.
-#[allow(dead_code)]
 unsafe extern "C" fn helper_make_closure(
     func_id: u32,
     captures_ptr: *const u64,

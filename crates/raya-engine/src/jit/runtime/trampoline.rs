@@ -199,6 +199,13 @@ pub const HELPER_SET_CLOSURE_CAPTURE_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET
         + std::mem::offset_of!(RuntimeHelperTable, set_closure_capture) as i32;
 
+/// Byte offset of the closure-allocate helper in [`RuntimeContext`].
+///
+/// Captures are passed as a pointer plus a count because a `Vec` cannot cross the
+/// trampoline function-pointer ABI. Returns null when the root set is unavailable.
+pub const HELPER_MAKE_CLOSURE_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, make_closure) as i32;
+
 const _: () = assert!(std::mem::align_of::<RuntimeContext>() >= 8);
 const _: () = assert!(std::mem::size_of::<RuntimeContext>() >= std::mem::size_of::<RuntimeHelperTable>());
 
@@ -276,6 +283,9 @@ pub struct RuntimeHelperTable {
     /// Patch one capture slot of an existing closure:
     /// (closure, capture_index, value, shared_state) -> 1 success / 0 fallback
     pub set_closure_capture: unsafe extern "C" fn(u64, u32, u64, *mut ()) -> i8,
+    /// Closure allocate: (func_id, captures_ptr, capture_count, shared_state)
+    /// -> closure pointer, or null when the root set is unavailable
+    pub make_closure: unsafe extern "C" fn(u32, *const u64, u32, *mut ()) -> u64,
 }
 
 /// Validate the boxed arguments at a JIT entry boundary against a verified

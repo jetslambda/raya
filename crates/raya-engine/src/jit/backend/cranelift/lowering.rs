@@ -56,6 +56,7 @@ pub struct LoweringContext<'a> {
     sig_refcell_store: Option<ir::SigRef>,
     sig_refcell_new: Option<ir::SigRef>,
     sig_set_closure_capture: Option<ir::SigRef>,
+    sig_make_closure: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.object_get_shape_field
     sig_object_get_shape_field: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.object_set_shape_field
@@ -192,6 +193,7 @@ impl<'a> LoweringContext<'a> {
             sig_refcell_store: None,
             sig_refcell_new: None,
             sig_set_closure_capture: None,
+            sig_make_closure: None,
             sig_object_get_shape_field: None,
             sig_object_set_shape_field: None,
             sig_object_implements_shape: None,
@@ -930,6 +932,100 @@ impl<'a> LoweringContext<'a> {
             }
 
             // ===== Object Field Access (shape-aware helper path) =====
+            JitInstr::MakeClosure {
+                dest,
+                func_index,
+                captures,
+                stack,
+                bytecode_offset,
+            } => {
+                // Captures have to cross the trampoline ABI as a contiguous buffer,
+                // so they are spilled to a stack slot first — the same shape as the
+                // interpreter-call argument slot at `lowering.rs:1644`. Each capture
+                // goes through boxed_reg_value: a VM Value holding an i32 is
+                // NaN-boxed, and the raw register is I32 at the machine level.
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "make closure fallback stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let null_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let done = builder.create_block();
+                builder.append_block_param(done, types::I64);
+                builder
+                    .ins()
+                    .brif(is_ctx_null, null_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+                builder.seal_block(null_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_MAKE_CLOSURE_OFFSET,
+                );
+
+                let capture_count = captures.len();
+                let captures_ptr = if capture_count == 0 {
+                    // A zero-sized stack slot is not valid, and the helper treats a
+                    // null pointer with a zero count as no captures anyway.
+                    abi::emit_null(builder)
+                } else {
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        (capture_count * 8) as u32,
+                        3,
+                    ));
+                    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    for (index, capture) in captures.iter().enumerate() {
+                        let boxed = self.boxed_reg_value(builder, *capture);
+                        builder
+                            .ins()
+                            .store(MemFlags::trusted(), boxed, ptr, (index as i32) * 8);
+                    }
+                    ptr
+                };
+
+                let sig = self.make_closure_sig(builder);
+                let func_id_val = builder.ins().iconst(types::I32, *func_index as i64);
+                let count_val = builder.ins().iconst(types::I32, capture_count as i64);
+                let call = builder.ins().call_indirect(
+                    sig,
+                    fn_ptr,
+                    &[func_id_val, captures_ptr, count_val, shared_state],
+                );
+                let result = builder.inst_results(call)[0];
+
+                let is_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, result, 0);
+                builder.ins().brif(
+                    is_null,
+                    fallback_block,
+                    &[],
+                    done,
+                    &[ir::BlockArg::Value(result)],
+                );
+                builder.seal_block(fallback_block);
+
+                builder.switch_to_block(fallback_block);
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.switch_to_block(null_block);
+                let null = abi::emit_null(builder);
+                builder.ins().jump(done, &[ir::BlockArg::Value(null)]);
+
+                builder.seal_block(done);
+                builder.switch_to_block(done);
+                let merged = builder.block_params(done)[0];
+                self.def_reg(builder, *dest, merged);
+            }
             JitInstr::SetClosureCapture {
                 closure,
                 index,
@@ -2658,6 +2754,21 @@ impl<'a> LoweringContext<'a> {
             .call_indirect(sig, fn_ptr, &[index, module_ptr, shared_state]);
         let string_ptr = builder.inst_results(call)[0];
         self.def_reg(builder, dest, string_ptr);
+    }
+
+    fn make_closure_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_make_closure {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I32)); // func_id
+        sig.params.push(AbiParam::new(types::I64)); // captures pointer
+        sig.params.push(AbiParam::new(types::I32)); // capture count
+        sig.params.push(AbiParam::new(types::I64)); // shared_state ptr
+        sig.returns.push(AbiParam::new(types::I64)); // closure or null
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_make_closure = Some(sig_ref);
+        sig_ref
     }
 
     fn set_closure_capture_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
