@@ -5270,3 +5270,80 @@ fn new_refcell_lowering_allocates_and_reads_back() {
     );
     assert_eq!(decode_i32(raw), 7);
 }
+
+
+/// The RefCell differential: **the same bytecode** through both engines, compared.
+///
+/// This is the piece the promotion actually needs. The three direct-lift tests
+/// prove the JIT arms work; `object_model_tests` proves the interpreter handlers
+/// work; but until now they were separate programs, so nothing asserted the two
+/// engines agree. A promotion justified by comparing the JIT only against itself is
+/// not evidence, and neither is comparing two independently-written programs.
+///
+/// Limitation, stated so it is not over-read: this still lifts directly, so it does
+/// NOT go through `function_supported_for_jit`. It is an engine-agreement test, not
+/// a reachability test. The gate remains pinned by
+/// `refcell_opcodes_keep_a_function_out_of_the_jit`.
+#[test]
+fn refcell_interpreter_and_jit_agree_on_the_same_bytecode() {
+    use raya_engine::vm::interpreter::Vm;
+
+    // cell = new RefCell(11); cell.x = 99; return cell's contents.
+    // Dup before the value: it duplicates the top of stack, which is the cell.
+    let mut code = Vec::new();
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&11i32.to_le_bytes());
+    code.push(Opcode::NewRefCell as u8);
+    code.push(Opcode::Dup as u8);
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&99i32.to_le_bytes());
+    code.push(Opcode::StoreRefCell as u8);
+    code.push(Opcode::LoadRefCell as u8);
+    code.push(Opcode::Return as u8);
+
+    // `make_module` names the function "test_func"; `Vm::execute` looks the entry
+    // point up as "main", so rename before finalizing -- `finalize_module` wraps
+    // the module in an `Arc`, which cannot be mutated through. The JIT harness
+    // lifts `functions[0]` positionally, so the same module then serves both
+    // engines. Every other test in this file skips this because none of them run
+    // the interpreter.
+    let mut raw_module = make_module(code, 0, 0);
+    raw_module.functions[0].name = "main".to_string();
+    let module = finalize_module(raw_module);
+
+    // Engine 1: the interpreter.
+    let interpreted = {
+        let mut vm = Vm::new();
+        vm.execute(&module).expect("interpreter must run the RefCell program")
+    };
+
+    // Engine 2: the JIT, on the identical module.
+    let (safepoint, shared) = new_shared_vm_state();
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = Vec::new();
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+        "JIT must complete natively, not fall back to the interpreter -- otherwise this \
+         compares the interpreter against itself"
+    );
+
+    assert_eq!(
+        raw,
+        interpreted.raw(),
+        "engines disagree on the same RefCell bytecode: JIT 0x{raw:016X}, \
+         interpreter {}",
+        interpreted
+    );
+    assert!(
+        is_i32(raw),
+        "result should be a NaN-boxed i32, got 0x{raw:016X}"
+    );
+    assert_eq!(decode_i32(raw), 99, "both engines should have produced 99");
+}
