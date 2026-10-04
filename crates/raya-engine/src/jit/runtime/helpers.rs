@@ -221,6 +221,7 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         await_task: helper_await_task,
         dyn_get_keyed: helper_dyn_get_keyed,
         dyn_set_keyed: helper_dyn_set_keyed,
+        alloc_struct_object: helper_alloc_struct_object,
     }
 }
 
@@ -1817,6 +1818,37 @@ unsafe extern "C" fn helper_await_task(value_raw: u64, shared_state: *mut ()) ->
 /// parser or view dispatch is exactly the shape of divergence that ships.
 ///
 /// NOT YET LOWERED. See the note on the RefCell helpers.
+/// Allocate a structural object for `ObjectLiteral`, the way the interpreter's
+/// handler does: `Object::new_structural(layout_id, field_count)`.
+///
+/// Deliberately needs **no** layout registry and **no** module, unlike
+/// `helper_alloc_array` -- an object literal names a layout id it already carries, so
+/// there is nothing to resolve. Returns null on failure, matching
+/// `helper_alloc_object`'s convention rather than the sentinel convention.
+unsafe extern "C" fn helper_alloc_struct_object(
+    type_index: u32,
+    field_count: u32,
+    shared_state: *mut (),
+) -> *mut () {
+    if shared_state.is_null() {
+        return std::ptr::null_mut();
+    }
+    let bridge = &*(shared_state.cast::<JitRuntimeBridgeContext>());
+    if bridge.gc.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mut gc = (&*bridge.gc).lock();
+    // `LayoutId` is a `u32` alias, so `type_index` passes through unchanged. The
+    // compiler already emits a TAGGED structural layout id
+    // (`STRUCTURAL_LAYOUT_ID_TAG | n`), exactly as the interpreter's handler receives
+    // it, so nothing is added or stripped here.
+    let allocated = gc.allocate(crate::vm::object::Object::new_structural(
+        type_index,
+        field_count as usize,
+    ));
+    NonNull::new(allocated.as_ptr()).map_or(std::ptr::null_mut(), |p| p.as_ptr().cast())
+}
+
 unsafe extern "C" fn helper_dyn_get_keyed(
     object_raw: u64,
     key_raw: u64,

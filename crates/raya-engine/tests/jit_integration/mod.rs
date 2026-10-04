@@ -2214,6 +2214,16 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     ) -> i8 {
         0 // JIT_STORE_FALLBACK
     }
+
+    /// Null, so a failure to allocate falls back rather than yielding a bogus object.
+    /// `ObjectLiteral` is still `Rejected`, so no compiled test reaches this yet.
+    unsafe extern "C" fn stub_alloc_struct_object(
+        _type_index: u32,
+        _field_count: u32,
+        _shared_state: *mut (),
+    ) -> *mut () {
+        std::ptr::null_mut()
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2310,6 +2320,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             await_task: stub_await_task,
             dyn_get_keyed: stub_dyn_get_keyed,
             dyn_set_keyed: stub_dyn_set_keyed,
+            alloc_struct_object: stub_alloc_struct_object,
         },
     };
 
@@ -2467,6 +2478,16 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     ) -> i8 {
         0 // JIT_STORE_FALLBACK
     }
+
+    /// Null, so a failure to allocate falls back rather than yielding a bogus object.
+    /// `ObjectLiteral` is still `Rejected`, so no compiled test reaches this yet.
+    unsafe extern "C" fn stub_alloc_struct_object(
+        _type_index: u32,
+        _field_count: u32,
+        _shared_state: *mut (),
+    ) -> *mut () {
+        std::ptr::null_mut()
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2563,6 +2584,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             await_task: stub_await_task,
             dyn_get_keyed: stub_dyn_get_keyed,
             dyn_set_keyed: stub_dyn_set_keyed,
+            alloc_struct_object: stub_alloc_struct_object,
         },
     };
 
@@ -2721,6 +2743,16 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     ) -> i8 {
         0 // JIT_STORE_FALLBACK
     }
+
+    /// Null, so a failure to allocate falls back rather than yielding a bogus object.
+    /// `ObjectLiteral` is still `Rejected`, so no compiled test reaches this yet.
+    unsafe extern "C" fn stub_alloc_struct_object(
+        _type_index: u32,
+        _field_count: u32,
+        _shared_state: *mut (),
+    ) -> *mut () {
+        std::ptr::null_mut()
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2824,6 +2856,7 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             await_task: stub_await_task,
             dyn_get_keyed: stub_dyn_get_keyed,
             dyn_set_keyed: stub_dyn_set_keyed,
+            alloc_struct_object: stub_alloc_struct_object,
         },
     };
 
@@ -2977,6 +3010,16 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     ) -> i8 {
         0 // JIT_STORE_FALLBACK
     }
+
+    /// Null, so a failure to allocate falls back rather than yielding a bogus object.
+    /// `ObjectLiteral` is still `Rejected`, so no compiled test reaches this yet.
+    unsafe extern "C" fn stub_alloc_struct_object(
+        _type_index: u32,
+        _field_count: u32,
+        _shared_state: *mut (),
+    ) -> *mut () {
+        std::ptr::null_mut()
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -3080,6 +3123,7 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             await_task: stub_await_task,
             dyn_get_keyed: stub_dyn_get_keyed,
             dyn_set_keyed: stub_dyn_set_keyed,
+            alloc_struct_object: stub_alloc_struct_object,
         },
     };
 
@@ -3240,6 +3284,16 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     ) -> i8 {
         0 // JIT_STORE_FALLBACK
     }
+
+    /// Null, so a failure to allocate falls back rather than yielding a bogus object.
+    /// `ObjectLiteral` is still `Rejected`, so no compiled test reaches this yet.
+    unsafe extern "C" fn stub_alloc_struct_object(
+        _type_index: u32,
+        _field_count: u32,
+        _shared_state: *mut (),
+    ) -> *mut () {
+        std::ptr::null_mut()
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -3352,6 +3406,7 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             await_task: stub_await_task,
             dyn_get_keyed: stub_dyn_get_keyed,
             dyn_set_keyed: stub_dyn_set_keyed,
+            alloc_struct_object: stub_alloc_struct_object,
         },
     };
 
