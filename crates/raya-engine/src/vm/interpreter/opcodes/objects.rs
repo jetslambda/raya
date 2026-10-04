@@ -173,28 +173,6 @@ impl<'a> Interpreter<'a> {
         (field_offset < field_count).then(|| name.to_string())
     }
 
-    fn legacy_field_index_for_layout(field_name: &str, field_count: usize) -> Option<usize> {
-        let idx = match field_name {
-            "message" => 0,
-            "name" => 1,
-            "stack" => 2,
-            "cause" => 3,
-            "code" => 4,
-            "errno" => 5,
-            "syscall" => 6,
-            "path" => 7,
-            "errors" => 8,
-            "value" => 0,
-            "writable" => 1,
-            "configurable" => 2,
-            "enumerable" => 3,
-            "get" => 4,
-            "set" => 5,
-            _ => return None,
-        };
-        (idx < field_count).then_some(idx)
-    }
-
     fn field_name_for_offset(&self, obj: &Object, field_offset: usize) -> Option<String> {
         let nominal_type_id = obj.nominal_type_id_usize();
         let class_metadata = self.class_metadata.read();
@@ -218,23 +196,28 @@ impl<'a> Interpreter<'a> {
     }
 
     fn field_index_for_value(&self, obj_val: Value, field_name: &str) -> Option<usize> {
+        // Delegates to the shared resolver. This body was a SECOND, inline copy of the
+        // same three-step resolution that `get_field_index_for_value` had -- 24 callers
+        // on this one, 20 on that -- so the interpreter had two code paths that could
+        // drift. It is now one.
+        //
+        // It also used a differently-NAMED backstop, `legacy_field_index_for_layout`,
+        // which read as though it must behave differently from
+        // `legacy_object_literal_field_index`. Having compared both bodies they are
+        // the same name->index table and the same `(idx < field_count)` bound, so
+        // routing through the shared function is behaviour-preserving. **The name
+        // difference was the only warning sign, and it pointed the wrong way** -- a
+        // plausible-looking difference that would have made consolidating these two
+        // look like a P0.
         let obj_ptr = unsafe { obj_val.as_ptr::<Object>() }?;
         let obj = unsafe { &*obj_ptr.as_ptr() };
-        let nominal_type_id = obj.nominal_type_id_usize();
-        let class_metadata = self.class_metadata.read();
-        let from_metadata = nominal_type_id
-            .and_then(|nominal_type_id| class_metadata.get(nominal_type_id))
-            .and_then(|meta| meta.get_field_index(field_name));
-        if from_metadata.is_some() {
-            return from_metadata;
-        }
-        if let Some(index) = self
-            .layout_field_names_for_object(obj)
-            .and_then(|names| names.iter().position(|name| name == field_name))
-        {
-            return Some(index);
-        }
-        Self::legacy_field_index_for_layout(field_name, obj.field_count())
+        crate::vm::interpreter::opcodes::native::object_field_index(
+            obj,
+            field_name,
+            &self.class_metadata,
+            &self.layouts,
+            self.structural_object_shapes,
+        )
     }
 
     pub(in crate::vm::interpreter) fn build_shape_slot_map_for_object(
