@@ -851,18 +851,13 @@ impl SharedVmState {
 
     /// Resolve canonical member names for a physical structural layout.
     pub fn structural_layout_names(&self, layout_id: LayoutId) -> Option<Vec<String>> {
-        if let Some(names) = self
-            .layouts
-            .read()
-            .layout_field_names(layout_id)
-            .map(|names| names.to_vec())
-        {
-            return Some(names);
-        }
-        self.structural_layout_shapes
-            .read()
-            .get(&layout_id)
-            .cloned()
+        // Delegates to the shared resolver; this body was byte-identical to
+        // `Interpreter::structural_layout_names`.
+        crate::vm::interpreter::opcodes::native::structural_layout_names_from(
+            layout_id,
+            &self.layouts,
+            &self.structural_layout_shapes,
+        )
     }
 
     /// Resolve canonical layout member names for an object, lazily seeding

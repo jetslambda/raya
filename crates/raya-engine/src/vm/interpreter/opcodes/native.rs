@@ -3298,6 +3298,37 @@ impl<'a> Interpreter<'a> {
 }
 
 
+/// Resolve the canonical field names for `layout_id`.
+///
+/// One implementation, three callers: `Interpreter::structural_layout_names`,
+/// `SharedVmState::structural_layout_names` (these two were byte-identical duplicates)
+/// and `object_field_index`. Extracting it is what stops the field-index work from
+/// adding a *third* copy of the same three-step fallback.
+///
+/// The order is the contract, for the same reason as in `object_field_index`: the
+/// registry first, then the structural-shape table, then the process-wide table.
+pub(crate) fn structural_layout_names_from(
+    layout_id: crate::vm::object::LayoutId,
+    layouts: &parking_lot::RwLock<
+        crate::vm::interpreter::class_registry::RuntimeLayoutRegistry,
+    >,
+    structural_layout_shapes: &parking_lot::RwLock<
+        rustc_hash::FxHashMap<crate::vm::object::LayoutId, Vec<String>>,
+    >,
+) -> Option<Vec<String>> {
+    if let Some(names) = layouts
+        .read()
+        .layout_field_names(layout_id)
+        .map(|names| names.to_vec())
+    {
+        return Some(names);
+    }
+    if let Some(names) = structural_layout_shapes.read().get(&layout_id).cloned() {
+        return Some(names);
+    }
+    crate::vm::object::global_layout_names(layout_id)
+}
+
 /// Resolve `field_name` to a field index on `obj`.
 ///
 /// `pub(crate)` and free-standing so a JIT helper and the interpreter share **one**
@@ -3334,15 +3365,7 @@ pub(crate) fn object_field_index(
         return metadata_index;
     }
     drop(class_metadata);
-    // Layout names: the registry first, then the structural-shape table, then the
-    // process-wide table. Same three steps as `SharedVmState::structural_layout_names`.
-    let layout_id = obj.layout_id();
-    let names: Option<Vec<String>> = layouts
-        .read()
-        .layout_field_names(layout_id)
-        .map(|n| n.to_vec())
-        .or_else(|| structural_layout_shapes.read().get(&layout_id).cloned())
-        .or_else(|| crate::vm::object::global_layout_names(layout_id));
+    let names = structural_layout_names_from(obj.layout_id(), layouts, structural_layout_shapes);
     if let Some(index) = names.and_then(|names| names.iter().position(|n| n == field_name)) {
         return Some(index);
     }
