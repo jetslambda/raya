@@ -2642,47 +2642,58 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    fn lower_return(&mut self, ret: &ast::ReturnStatement) {
-        // ALY-97: the enclosing function's declared return type is already
-        // reachable here via `current_function`, and an integer literal lowered
-        // as `i32` disagrees with a signature recorded as `f64`. `verify_module`'s
-        // typed-signature check requires exact identity, so `return 1;` in a
-        // number-returning function made the WHOLE module report invalid and
-        // `Bytecode.validate` return false for it.
-        //
-        // Scoped deliberately to a literal in RETURN position only. Widening every
-        // int literal in a number-returning function would turn loop counters
-        // (`for (let i = 0; i < 10; i++)`) into floats, which the verifier would
-        // then reject where int is expected — trading one rejection for another.
-        //
-        // The reverse direction is untouched: an `int`-declared function still gets
-        // `i32`, and a float where `int` is declared is still emitted as a float
-        // and still rejected, because truncation is not something the runtime
-        // performs (`Opcode::Return` returns the popped value verbatim).
-        let value = match ret.value.as_ref() {
-            Some(ast::Expression::IntLiteral(lit)) => {
-                let returns_number = self.current_function.as_ref().is_some_and(|f| {
-                    matches!(
-                        self.type_ctx.get(f.return_ty),
-                        Some(crate::parser::types::Type::Primitive(
-                            crate::parser::types::PrimitiveType::Number
-                        ))
-                    )
-                });
-                if returns_number {
-                    let ty = TypeId::new(crate::parser::types::context::TypeContext::NUMBER_TYPE_ID);
-                    let dest = self.alloc_register(ty);
-                    self.emit(IrInstr::Assign {
-                        dest: dest.clone(),
-                        value: IrValue::Constant(IrConstant::F64(lit.value as f64)),
-                    });
-                    Some(dest)
-                } else {
-                    ret.value.as_ref().map(|e| self.lower_expr(e))
-                }
-            }
-            other => other.map(|e| self.lower_expr(e)),
+    /// ALY-97: lower a value being RETURNED, widening an integer literal so it
+    /// matches a `number`-declared function.
+    ///
+    /// With no widening, `return 1;` emitted `i32` while the recorded signature said
+    /// `f64`, and `check_cfg::check_assignable` — which requires exact identity —
+    /// rejected the module, so `Bytecode.validate` reported every integer-returning
+    /// function invalid.
+    ///
+    /// Scoped to an integer literal in RETURN position. Widening every int literal in a
+    /// number-returning function would turn loop counters (`for (let i = 0; i < 10;
+    /// i++)`) into floats, which the verifier then rejects where int is expected.
+    ///
+    /// The reverse direction is untouched: an `int`-declared function still gets `i32`,
+    /// and a float where `int` is declared is still emitted as a float and still
+    /// rejected, because the runtime performs no coercion (`Opcode::Return` pops the
+    /// value and returns it verbatim).
+    ///
+    /// Used by BOTH return paths: `ReturnStatement` (block bodies) and an
+    /// expression-bodied arrow, which has no `ReturnStatement` at all and would
+    /// otherwise bypass this entirely.
+    pub(crate) fn emit_return_value(
+        &mut self,
+        value: Option<&ast::Expression>,
+    ) -> Option<Register> {
+        let literal = match value {
+            Some(ast::Expression::IntLiteral(lit)) => Some(lit),
+            _ => None,
         };
+        let returns_number = self.current_function.as_ref().is_some_and(|f| {
+            matches!(
+                self.type_ctx.get(f.return_ty),
+                Some(crate::parser::types::Type::Primitive(
+                    crate::parser::types::PrimitiveType::Number
+                ))
+            )
+        });
+        match (literal, returns_number) {
+            (Some(lit), true) => {
+                let ty = TypeId::new(crate::parser::types::context::TypeContext::NUMBER_TYPE_ID);
+                let dest = self.alloc_register(ty);
+                self.emit(IrInstr::Assign {
+                    dest: dest.clone(),
+                    value: IrValue::Constant(IrConstant::F64(lit.value as f64)),
+                });
+                Some(dest)
+            }
+            _ => value.map(|e| self.lower_expr(e)),
+        }
+    }
+
+    fn lower_return(&mut self, ret: &ast::ReturnStatement) {
+        let value = self.emit_return_value(ret.value.as_ref());
 
         // Inline finally blocks from innermost to outermost.
         // Drain the stack to prevent recursive re-inlining: if a finally block
