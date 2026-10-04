@@ -273,22 +273,16 @@ impl<'a> Interpreter<'a> {
     ) -> Option<usize> {
         let obj_ptr = unsafe { obj_val.as_ptr::<Object>() }?;
         let obj = unsafe { &*obj_ptr.as_ptr() };
-        let nominal_type_id = obj.nominal_type_id_usize();
-        let class_metadata = self.class_metadata.read();
-        let metadata_index = nominal_type_id
-            .and_then(|nominal_type_id| class_metadata.get(nominal_type_id))
-            .and_then(|meta| meta.get_field_index(field_name));
-        if metadata_index.is_some() {
-            return metadata_index;
-        }
-        if let Some(index) = self
-            .layout_field_names_for_object(obj)
-            .and_then(|names| names.iter().position(|name| name == field_name))
-        {
-            return Some(index);
-        }
-        // Backstop for builtin values still emitted as generic object literals.
-        Self::legacy_object_literal_field_index(field_name, obj.field_count())
+        object_field_index(
+            obj,
+            field_name,
+            &self.class_metadata,
+            &self.layouts,
+            // NB: the field is `structural_object_shapes` on `Interpreter` but
+            // `structural_layout_shapes` on `SharedVmState` -- same registry, two
+            // names. Worth knowing before grepping for it.
+            &self.structural_object_shapes,
+        )
     }
 
     fn get_field_value_by_name(&self, obj_val: Value, field_name: &str) -> Option<Value> {
@@ -3301,4 +3295,57 @@ impl<'a> Interpreter<'a> {
             ))),
         }
     }
+}
+
+
+/// Resolve `field_name` to a field index on `obj`.
+///
+/// `pub(crate)` and free-standing so a JIT helper and the interpreter share **one**
+/// implementation. The registries are passed explicitly precisely so that: an
+/// `Interpreter` hands over its own `&'a` refs, and `helper_dyn_get_keyed` hands over
+/// the bridge's raw pointers. That is the same reasoning that made `dyn_key_parts`
+/// shared, and for the same reason — a second copy of this resolution order is how a
+/// JIT silently disagrees with the interpreter about which field index wins.
+///
+/// **The order is the contract.** `class_metadata` first, then the layout names, then the
+/// legacy backstop. Reordering it changes which index wins for a name present in more
+/// than one place, and would be a divergence rather than a cleanup.
+pub(crate) fn object_field_index(
+    obj: &Object,
+    field_name: &str,
+    class_metadata: &parking_lot::RwLock<
+        crate::vm::reflect::ClassMetadataRegistry,
+    >,
+    layouts: &parking_lot::RwLock<crate::vm::interpreter::class_registry::RuntimeLayoutRegistry>,
+    // Named `structural_object_shapes` on `Interpreter`, `structural_layout_shapes` on
+    // `SharedVmState`. Same registry.
+    structural_layout_shapes: &parking_lot::RwLock<
+        rustc_hash::FxHashMap<crate::vm::object::LayoutId, Vec<String>>,
+    >,
+) -> Option<usize> {
+    let nominal_type_id = obj.nominal_type_id_usize();
+    // The guard must be held across the lookup: `get` returns a reference into the
+    // registry, so `.read().get(..)` inline would borrow a temporary.
+    let class_metadata = class_metadata.read();
+    let metadata_index = nominal_type_id
+        .and_then(|id| class_metadata.get(id))
+        .and_then(|meta| meta.get_field_index(field_name));
+    if metadata_index.is_some() {
+        return metadata_index;
+    }
+    drop(class_metadata);
+    // Layout names: the registry first, then the structural-shape table, then the
+    // process-wide table. Same three steps as `SharedVmState::structural_layout_names`.
+    let layout_id = obj.layout_id();
+    let names: Option<Vec<String>> = layouts
+        .read()
+        .layout_field_names(layout_id)
+        .map(|n| n.to_vec())
+        .or_else(|| structural_layout_shapes.read().get(&layout_id).cloned())
+        .or_else(|| crate::vm::object::global_layout_names(layout_id));
+    if let Some(index) = names.and_then(|names| names.iter().position(|n| n == field_name)) {
+        return Some(index);
+    }
+    // Backstop for builtin values still emitted as generic object literals.
+    Interpreter::legacy_object_literal_field_index(field_name, obj.field_count())
 }
