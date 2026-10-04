@@ -2224,6 +2224,17 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     ) -> *mut () {
         std::ptr::null_mut()
     }
+
+    /// Declines, so a slot write routes to the interpreter rather than silently
+    /// succeeding or writing out of bounds. `InitObject` is still `Rejected`.
+    unsafe extern "C" fn stub_init_object_field(
+        _object: u64,
+        _offset: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2321,6 +2332,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             dyn_get_keyed: stub_dyn_get_keyed,
             dyn_set_keyed: stub_dyn_set_keyed,
             alloc_struct_object: stub_alloc_struct_object,
+            init_object_field: stub_init_object_field,
         },
     };
 
@@ -2488,6 +2500,17 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     ) -> *mut () {
         std::ptr::null_mut()
     }
+
+    /// Declines, so a slot write routes to the interpreter rather than silently
+    /// succeeding or writing out of bounds. `InitObject` is still `Rejected`.
+    unsafe extern "C" fn stub_init_object_field(
+        _object: u64,
+        _offset: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2585,6 +2608,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             dyn_get_keyed: stub_dyn_get_keyed,
             dyn_set_keyed: stub_dyn_set_keyed,
             alloc_struct_object: stub_alloc_struct_object,
+            init_object_field: stub_init_object_field,
         },
     };
 
@@ -2753,6 +2777,17 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     ) -> *mut () {
         std::ptr::null_mut()
     }
+
+    /// Declines, so a slot write routes to the interpreter rather than silently
+    /// succeeding or writing out of bounds. `InitObject` is still `Rejected`.
+    unsafe extern "C" fn stub_init_object_field(
+        _object: u64,
+        _offset: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2857,6 +2892,7 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             dyn_get_keyed: stub_dyn_get_keyed,
             dyn_set_keyed: stub_dyn_set_keyed,
             alloc_struct_object: stub_alloc_struct_object,
+            init_object_field: stub_init_object_field,
         },
     };
 
@@ -3020,6 +3056,17 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     ) -> *mut () {
         std::ptr::null_mut()
     }
+
+    /// Declines, so a slot write routes to the interpreter rather than silently
+    /// succeeding or writing out of bounds. `InitObject` is still `Rejected`.
+    unsafe extern "C" fn stub_init_object_field(
+        _object: u64,
+        _offset: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -3124,6 +3171,7 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             dyn_get_keyed: stub_dyn_get_keyed,
             dyn_set_keyed: stub_dyn_set_keyed,
             alloc_struct_object: stub_alloc_struct_object,
+            init_object_field: stub_init_object_field,
         },
     };
 
@@ -3294,6 +3342,17 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     ) -> *mut () {
         std::ptr::null_mut()
     }
+
+    /// Declines, so a slot write routes to the interpreter rather than silently
+    /// succeeding or writing out of bounds. `InitObject` is still `Rejected`.
+    unsafe extern "C" fn stub_init_object_field(
+        _object: u64,
+        _offset: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -3407,6 +3466,7 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             dyn_get_keyed: stub_dyn_get_keyed,
             dyn_set_keyed: stub_dyn_set_keyed,
             alloc_struct_object: stub_alloc_struct_object,
+            init_object_field: stub_init_object_field,
         },
     };
 

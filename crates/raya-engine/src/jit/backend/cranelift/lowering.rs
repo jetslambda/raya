@@ -62,6 +62,7 @@ pub struct LoweringContext<'a> {
     sig_bind_method: Option<ir::SigRef>,
     sig_await_task: Option<ir::SigRef>,
     sig_dyn_get_keyed: Option<ir::SigRef>,
+    sig_init_object_field: Option<ir::SigRef>,
     sig_alloc_struct_object: Option<ir::SigRef>,
     sig_array_len: Option<ir::SigRef>,
     sig_array_store: Option<ir::SigRef>,
@@ -212,6 +213,7 @@ impl<'a> LoweringContext<'a> {
             sig_bind_method: None,
             sig_await_task: None,
             sig_dyn_get_keyed: None,
+            sig_init_object_field: None,
             sig_alloc_struct_object: None,
             sig_array_len: None,
             sig_array_store: None,
@@ -1551,6 +1553,80 @@ impl<'a> LoweringContext<'a> {
                 builder.switch_to_block(done);
                 let merged = builder.block_params(done)[0];
                 self.def_reg(builder, *dest, merged);
+            }
+            JitInstr::InitObjectField {
+                object,
+                offset,
+                value,
+                stack,
+                bytecode_offset,
+            } => {
+                // No `dest`: `InitObject` pops the value and PEEKS the object, so the
+                // object stays on the stack.
+                //
+                // The out-of-range case must DECLINE, not clamp and not ignore. The
+                // interpreter's `checked_set_field` turns it into a RuntimeError, and a
+                // leaf helper cannot raise -- so the only correct response is to hand
+                // back and let it raise the real message with the real index.
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "init object field exit stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let null_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let done = builder.create_block();
+                builder
+                    .ins()
+                    .brif(is_ctx_null, null_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+                builder.seal_block(null_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_INIT_OBJECT_FIELD_OFFSET,
+                );
+                let sig = self.init_object_field_sig(builder);
+                // BOXED object and value. A heap `Value` lives in a register UNTAGGED
+                // while `is_ptr()` reads the NaN-box tag, so passing either raw makes
+                // `jit_object_ptr_checked` decline -- the same class of bug as
+                // `DynGetKeyed`'s object operand.
+                let object_val = self.boxed_reg_value(builder, *object);
+                let value_val = self.boxed_reg_value(builder, *value);
+                let offset_val = builder.ins().iconst(types::I64, *offset as i64);
+                let call = builder.ins().call_indirect(
+                    sig,
+                    fn_ptr,
+                    &[object_val, offset_val, value_val, shared_state],
+                );
+                let status = builder.inst_results(call)[0];
+                let ok = builder.ins().icmp_imm(
+                    condcodes::IntCC::Equal,
+                    status,
+                    crate::jit::runtime::helpers::JIT_STORE_SUCCESS as i64,
+                );
+                builder.ins().brif(ok, done, &[], fallback_block, &[]);
+                builder.seal_block(fallback_block);
+
+                builder.switch_to_block(fallback_block);
+                // Either the receiver is not an object, or the offset is out of range.
+                // Both are interpreter errors.
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.switch_to_block(null_block);
+                builder.ins().jump(done, &[]);
+
+                builder.seal_block(done);
+                builder.switch_to_block(done);
             }
             JitInstr::LoadElem {
                 dest,
@@ -4136,6 +4212,21 @@ impl<'a> LoweringContext<'a> {
         sig.returns.push(AbiParam::new(types::I64)); // object ptr, or null
         let sig_ref = builder.func.import_signature(sig);
         self.sig_alloc_struct_object = Some(sig_ref);
+        sig_ref
+    }
+
+    fn init_object_field_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_init_object_field {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I64)); // object (boxed Value)
+        sig.params.push(AbiParam::new(types::I64)); // offset
+        sig.params.push(AbiParam::new(types::I64)); // value (boxed Value)
+        sig.params.push(AbiParam::new(types::I64)); // shared_state ptr
+        sig.returns.push(AbiParam::new(types::I8)); // status
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_init_object_field = Some(sig_ref);
         sig_ref
     }
 

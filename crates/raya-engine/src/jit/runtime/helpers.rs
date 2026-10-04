@@ -222,6 +222,7 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         dyn_get_keyed: helper_dyn_get_keyed,
         dyn_set_keyed: helper_dyn_set_keyed,
         alloc_struct_object: helper_alloc_struct_object,
+        init_object_field: helper_init_object_field,
     }
 }
 
@@ -1856,6 +1857,47 @@ unsafe extern "C" fn helper_alloc_struct_object(
         field_count as usize,
     ));
     NonNull::new(allocated.as_ptr()).map_or(std::ptr::null_mut(), |p| p.as_ptr().cast())
+}
+
+/// One `InitObject` slot write: a bounds-checked store into an object that is still
+/// BEING CONSTRUCTED. Returns [`JIT_STORE_SUCCESS`] or [`JIT_STORE_FALLBACK`].
+///
+/// The bounds check is the whole reason this is a helper and not a raw store: the
+/// interpreter's `checked_set_field` turns an out-of-range offset into a
+/// `RuntimeError`, which a leaf helper cannot raise, so the only correct response is
+/// to decline and let the interpreter raise the real message.
+///
+/// Distinct from `helper_object_set_field`, which belongs to `StoreFieldExact` and
+/// stays unwired: that one targets an EXISTING object, where a descriptor setter may
+/// apply. This one targets a brand-new object, where no property can have been defined
+/// yet — so there is no accessor to run and the raw slot write is the whole operation.
+unsafe extern "C" fn helper_init_object_field(
+    object_raw: u64,
+    offset: u64,
+    value_raw: u64,
+    shared_state: *mut (),
+) -> i8 {
+    if shared_state.is_null() {
+        return JIT_STORE_FALLBACK;
+    }
+    let bridge = &*(shared_state.cast::<JitRuntimeBridgeContext>());
+    if bridge.gc.is_null() {
+        return JIT_STORE_FALLBACK;
+    }
+    let object_value = Value::from_raw(object_raw);
+    let Some(object_ptr) = jit_object_ptr_checked(object_value) else {
+        return JIT_STORE_FALLBACK;
+    };
+    // The value is a plain immediate or pointer held across nothing -- a slot write
+    // allocates no GC objects, so unlike the array growing paths nothing needs a root
+    // scope here.
+    let value = Value::from_raw(value_raw);
+    let object = &mut *object_ptr.as_ptr();
+    match object.checked_set_field(offset as usize, value) {
+        Ok(()) => JIT_STORE_SUCCESS,
+        // Out of bounds. The interpreter raises; decline so it does.
+        Err(_) => JIT_STORE_FALLBACK,
+    }
 }
 
 unsafe extern "C" fn helper_dyn_get_keyed(

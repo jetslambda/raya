@@ -188,6 +188,12 @@ pub const HELPER_AWAIT_TASK_OFFSET: i32 =
 pub const HELPER_DYN_SET_KEYED_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, dyn_set_keyed) as i32;
 
+/// Byte offset of the `InitObject` slot-write helper in [`RuntimeContext`].
+///
+/// Returns [`JIT_STORE_SUCCESS`] or [`JIT_STORE_FALLBACK`].
+pub const HELPER_INIT_OBJECT_FIELD_OFFSET: i32 = RUNTIME_CONTEXT_HELPERS_OFFSET
+    + std::mem::offset_of!(RuntimeHelperTable, init_object_field) as i32;
+
 /// Byte offset of the structural-object allocator in [`RuntimeContext`].
 ///
 /// Returns the object pointer, or null on failure.
@@ -358,6 +364,9 @@ pub struct RuntimeHelperTable {
     pub dyn_set_keyed: unsafe extern "C" fn(u64, u64, u64, *mut ()) -> i8,
     /// Structural-object allocator: (type_index, field_count, shared_state) -> ptr or null.
     pub alloc_struct_object: unsafe extern "C" fn(u32, u32, *mut ()) -> *mut (),
+    /// One `InitObject` slot write: (object, offset, value, shared_state) -> status.
+    /// Declines when the offset is out of range so the interpreter can raise.
+    pub init_object_field: unsafe extern "C" fn(u64, u64, u64, *mut ()) -> i8,
 }
 
 /// Validate the boxed arguments at a JIT entry boundary against a verified
