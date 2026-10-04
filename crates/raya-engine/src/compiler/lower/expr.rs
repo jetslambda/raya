@@ -4089,6 +4089,23 @@ impl<'a> Lowerer<'a> {
             checker_ty
         };
 
+        // The DECLARED element type, resolved once and shared by both paths below.
+        //
+        // The non-spread path needs it because an empty array literal has no first
+        // element to infer from, and defaulting that to NUMBER silently gave every
+        // empty annotated array -- `let xs: string[] = []` -- an f64 element
+        // constraint, so the first push of anything else raised
+        // "Cannot store value: array element type is f64" (ALY-84).
+        //
+        // The SPREAD path needs it for the same reason and was not fixed by ALY-84:
+        // it hardcoded NUMBER unconditionally, so `let ys: string[] = [...xs]` raised
+        // the identical error on its first non-number push (ALY-89). Guessing a
+        // primitive for an unknown element type is the whole defect.
+        let declared_elem_ty = match self.type_ctx.get(array_ty) {
+            Some(Type::Array(at)) => Some(at.element),
+            _ => None,
+        };
+
         if has_spread {
             // Spread present: build array imperatively with NewArray + push/loop
             let zero = self.emit_i32_const(0);
@@ -4096,7 +4113,13 @@ impl<'a> Lowerer<'a> {
             self.emit(IrInstr::NewArray {
                 dest: dest.clone(),
                 len: zero,
-                elem_ty: TypeId::new(NUMBER_TYPE_ID),
+                // ALY-89: this was hardcoded to NUMBER, ignoring the annotation and
+                // the spread source's element type. With no annotation we fall back to
+                // `never` (unconstrained), matching the non-spread path: an
+                // unannotated spread must not inherit a numeric constraint.
+                elem_ty: declared_elem_ty.unwrap_or_else(|| {
+                    TypeId::new(crate::parser::types::context::TypeContext::NEVER_TYPE_ID)
+                }),
             });
 
             for elem in array.elements.iter().flatten() {
@@ -4183,19 +4206,9 @@ impl<'a> Lowerer<'a> {
                     ast::ArrayElement::Spread(_) => unreachable!(),
                 }
             }
-            // The DECLARED element type wins. An empty array literal has no first
-            // element to infer from, and defaulting that to NUMBER silently gave every
-            // empty annotated array -- `let xs: string[] = []` -- an f64 element
-            // constraint, so the first push of anything else raised
-            // "Cannot store value: array element type is f64" (ALY-84).
-            //
-            // Only when there is neither an annotation nor an element do we fall back,
-            // and then to `never` (unconstrained) rather than to a float: guessing a
-            // primitive for an unknown element type is what caused this.
-            let declared_elem_ty = match self.type_ctx.get(array_ty) {
-                Some(Type::Array(at)) => Some(at.element),
-                _ => None,
-            };
+            // `declared_elem_ty` is hoisted above the spread branch so both paths
+            // share one resolution. When there is neither an annotation nor an element
+            // we fall back to `never` (unconstrained), not to a float.
             let elem_ty = declared_elem_ty
                 .or_else(|| elements.first().map(|r| r.ty))
                 .unwrap_or_else(|| TypeId::new(crate::parser::types::context::TypeContext::NEVER_TYPE_ID));
