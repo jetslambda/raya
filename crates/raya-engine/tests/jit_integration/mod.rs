@@ -6959,3 +6959,127 @@ fn array_error_paths_fall_back_to_the_interpreter() {
         );
     }
 }
+
+
+/// D4.8 slice 4, differentially: `ArrayLiteral`, and with it the whole family.
+///
+/// **Every case uses DISTINCT elements per slot** (11, 22, 33), never a repeated
+/// value. That is the whole point of this test. The handler pops elements and then
+/// reverses them — "first pushed = first element" — and the lifter reverses too, so
+/// the two could disagree, or agree and both be wrong. With a uniform element
+/// (`[7, 7, 7]`) a reversal is **invisible**. With distinct elements, a reversal
+/// returns 33 where 11 belongs and the test fails immediately.
+///
+/// The arm is `helper_alloc_array` plus one `helper_array_store` per element with a
+/// constant index, mirroring the interpreter's own `build_array` + `checked_set`
+/// loop. So this also proves the element-constraint check is inherited rather than
+/// bypassed.
+#[test]
+fn array_literal_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::{JitExitKind, JitSuspendReason};
+    use raya_engine::vm::interpreter::Vm;
+
+    // (label, element values, slot to read back, expected)
+    let cases: Vec<(&str, Vec<i32>, usize, i32)> = vec![
+        ("first element is the first pushed", vec![11, 22, 33], 0, 11),
+        ("middle element", vec![11, 22, 33], 1, 22),
+        ("last element", vec![11, 22, 33], 2, 33),
+        ("two elements", vec![11, 22], 1, 22),
+    ];
+
+    for (label, elems, slot, expected) in cases {
+        let mut code: Vec<u8> = Vec::new();
+        for e in &elems {
+            emit_i32(&mut code, *e);
+        }
+        emit(&mut code, Opcode::ArrayLiteral);
+        code.extend_from_slice(&6u32.to_le_bytes()); // type_index: AnyValue
+        code.extend_from_slice(&(elems.len() as u32).to_le_bytes()); // length
+        emit_i32(&mut code, slot as i32);
+        emit(&mut code, Opcode::LoadElem);
+        emit(&mut code, Opcode::Return);
+
+        let mut raw = make_module(code, 0, 0);
+        raw.functions[0].name = "main".to_string();
+        let module = finalize_module(raw);
+
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref()).expect(label);
+
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] ArrayLiteral must complete natively"
+        );
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert_eq!(
+            native.as_i32(),
+            Some(expected),
+            "[{label}] wrong element — a reversed literal would land here"
+        );
+        assert_eq!(native.raw(), interpreted.raw(), "[{label}] engines disagree");
+    }
+}
+
+/// `ArrayLiteral`'s element-constraint violation, differentially. Element id 0
+/// resolves to an `I32` constraint, so a literal containing a string must be
+/// rejected — and the rejection has to come from the interpreter, because the JIT
+/// cannot raise.
+#[test]
+fn array_literal_constraint_violation_falls_back() {
+    use raya_engine::jit::runtime::trampoline::{JitExitKind, JitSuspendReason};
+    use raya_engine::vm::interpreter::Vm;
+
+    let mut module = make_vm_module(Vec::new(), 0, 0);
+    let str_idx = module.constants.add_string("nope".to_string());
+    let mut code: Vec<u8> = Vec::new();
+    emit_const_str(&mut code, str_idx);
+    emit(&mut code, Opcode::ArrayLiteral);
+    code.extend_from_slice(&0u32.to_le_bytes()); // element id 0 == I32
+    code.extend_from_slice(&1u32.to_le_bytes()); // length 1
+    emit(&mut code, Opcode::Return);
+    module.functions[0].code = code;
+    module.functions[0].name = "main".to_string();
+    let module = finalize_module(module);
+
+    let mut vm = Vm::with_worker_count(1);
+    assert!(
+        vm.execute(module.as_ref()).is_err(),
+        "the interpreter must reject a string in an I32 array"
+    );
+
+    let (safepoint, shared) = new_shared_vm_state();
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx =
+        raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = Vec::new();
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+    let (_raw_bits, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+
+    assert_eq!(
+        exit.kind,
+        JitExitKind::Suspended as u32,
+        "the JIT must hand back rather than build the array anyway"
+    );
+    assert_eq!(
+        exit.suspend_reason,
+        JitSuspendReason::InterpreterBoundary as u32,
+        "the exit must be an interpreter boundary"
+    );
+}

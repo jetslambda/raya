@@ -246,7 +246,15 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // every empty pop would exit to the interpreter.
         | Opcode::ArrayPush
         | Opcode::ArrayPop
-        | Opcode::InitArray => JitSupport::HelperExact,
+        | Opcode::InitArray
+        // D4.8, slice 4: the whole family. `ArrayLiteral` needs NO new helper -- its
+        // arm mirrors the interpreter's own sequence (`build_array`, then
+        // `checked_set` per element) as `helper_alloc_array` plus N
+        // `helper_array_store` calls with constant indices. That is safe because the
+        // GC is mark-sweep with no compaction, so the array cannot move between the
+        // calls, and `checked_set` does not allocate, so nothing needs rooting across
+        // them. See the arm for why a variadic helper was rejected instead.
+        | Opcode::ArrayLiteral => JitSupport::HelperExact,
         Opcode::StoreFieldExact => JitSupport::InterpreterBoundary,
         Opcode::LoadFieldExact
         | Opcode::OptionalFieldExact
@@ -683,13 +691,6 @@ mod tests {
         // The promoted pair is asserted explicitly below rather than being quietly
         // dropped from this list: a guard that silently shrinks is how `BindMethod`
         // and `EndTry` were excluded by accident.
-        // Slice 4 of D4.8: `ArrayLiteral` is the only opcode in the family with NO
-        // helper at all, so it needs one written before it can have an arm.
-        for op in [Opcode::ArrayLiteral] {
-            assert_eq!(jit_support(op), JitSupport::Rejected, "{op:?}");
-            assert!(!opcode_supported_for_jit(op), "{op:?} must not be selectable");
-        }
-
         // What D4.8 has promoted so far, pinned explicitly with the reason each is
         // safe to pin rather than quietly dropped from the list above.
         for op in [
@@ -700,6 +701,7 @@ mod tests {
             Opcode::ArrayPush,
             Opcode::ArrayPop,
             Opcode::InitArray,
+            Opcode::ArrayLiteral,
         ] {
             assert_eq!(
                 jit_support(op),

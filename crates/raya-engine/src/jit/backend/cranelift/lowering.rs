@@ -1071,6 +1071,193 @@ impl<'a> LoweringContext<'a> {
                 let merged = builder.block_params(done)[0];
                 self.def_reg(builder, *dest, merged);
             }
+            JitInstr::ArrayLiteral {
+                dest,
+                type_index,
+                elements,
+                stack,
+                bytecode_offset,
+            } => {
+                // Deliberately NOT a variadic helper. `ArrayLiteral` is the only
+                // opcode needing a variable-length element list, and `extern "C"` has
+                // no variadic form, so the obvious alternatives were a fixed-max-arity
+                // helper or materialising the elements into a stack slot. The stack
+                // slot is the dangerous one: JIT frames publish empty stack maps, so
+                // a GC during the allocation could not see it.
+                //
+                // Instead this mirrors the interpreter's own sequence step for step:
+                //
+                //     let mut arr = build_array(module, type_index, length);
+                //     for (i, elem) in elements { arr.checked_set(i, elem)?; }
+                //     let gc_ptr = gc.allocate(arr);
+                //
+                // which is `helper_alloc_array` followed by N `helper_array_store`
+                // calls with CONSTANT indices. Two reasons this is safe:
+                //
+                //   * the GC is mark-sweep with a free list and no compaction phase,
+                //     so the array's address is stable and the later stores cannot be
+                //     left pointing at a moved object;
+                //   * `checked_set` does not allocate, so no GC can run between the
+                //     stores and no operand needs rooting across them.
+                //
+                // `elements` is already in final array order -- the lifter reverses it,
+                // matching the interpreter's "first pushed = first element". Storing
+                // element i at index i makes the ordering explicit, so a reversal bug
+                // shows up as wrong values rather than as a mysteriously sorted array.
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "array literal exit stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let null_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let done = builder.create_block();
+                builder.append_block_param(done, types::I64);
+                builder
+                    .ins()
+                    .brif(is_ctx_null, null_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+                builder.seal_block(null_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let module_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::RUNTIME_CONTEXT_MODULE_OFFSET,
+                );
+                let alloc_fn = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_ALLOC_ARRAY_OFFSET,
+                );
+                let alloc_sig = self.alloc_array_sig(builder);
+                let type_index_val = builder.ins().iconst(types::I64, *type_index as i64);
+                // The count is a compile-time constant here, so it is boxed as an
+                // immediate rather than coerced: `array_index_operand(i32(n)) == n`.
+                let count_const =
+                    builder
+                        .ins()
+                        .iconst(types::I32, elements.len() as i64);
+                let count_val = abi::emit_box_i32(builder, count_const);
+                let alloc_call = builder.ins().call_indirect(
+                    alloc_sig,
+                    alloc_fn,
+                    &[type_index_val, count_val, module_ptr, shared_state],
+                );
+                let arr = builder.inst_results(alloc_call)[0];
+
+                // Fill the array with one `helper_array_store` per element, each with a
+                // constant index, short-circuiting to the fallback on the FIRST
+                // failure.
+                //
+                // An earlier version accumulated failure with a `select` across the
+                // per-store `i8` status. That is a Cranelift type error -- the `i8`
+                // status and the `i64` accumulator do not unify -- and short-circuiting
+                // is both correct and cheaper. No store after a failure has any
+                // observable effect, because the whole literal is abandoned.
+                let store_fn = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_ARRAY_STORE_OFFSET,
+                );
+                let store_sig = self.array_store_sig(builder);
+                // `helper_alloc_array` returns an UNTAGGED pointer, and
+                // `helper_array_store` takes a boxed `Value` whose `is_ptr()` reads
+                // the NaN-box tag. Passing the raw pointer made every store decline,
+                // so the whole literal fell back to the interpreter. `arr` itself
+                // stays untagged for `dest`, matching `NewArray`.
+                let arr_tagged = abi::emit_box_ptr(builder, arr);
+                let store_blocks: Vec<_> = (0..elements.len().max(1))
+                    .map(|_| builder.create_block())
+                    .collect();
+
+                // `store_blocks[i]` performs store `i`; the last one continues to
+                // `done`. With zero elements the single placeholder block falls
+                // straight through.
+                // Enter the chain ONCE, before the loop. An earlier version emitted
+                // the leading `jump` inside the loop, which put a jump into a block
+                // that already ended with the previous iteration's `brif` -- a
+                // Cranelift verifier error ("a terminator instruction was encountered
+                // before the end of block"), not a silently ignored extra
+                // instruction.
+                builder.ins().jump(store_blocks[0], &[]);
+                for i in 0..store_blocks.len() {
+                    let block = store_blocks[i];
+                    builder.seal_block(block);
+                    builder.switch_to_block(block);
+
+                    if let Some(elem) = elements.get(i) {
+                        let idx_const = builder.ins().iconst(types::I32, i as i64);
+                        let idx_val = abi::emit_box_i32(builder, idx_const);
+                        let elem_val = self.boxed_reg_value(builder, *elem);
+                        let call = builder.ins().call_indirect(
+                            store_sig,
+                            store_fn,
+                            &[arr_tagged, idx_val, elem_val, shared_state],
+                        );
+                        let status = builder.inst_results(call)[0];
+                        let ok = builder.ins().icmp_imm(
+                            condcodes::IntCC::Equal,
+                            status,
+                            crate::jit::runtime::helpers::JIT_STORE_SUCCESS as i64,
+                        );
+                        let next = store_blocks.get(i + 1).copied();
+                        match next {
+                            Some(next_block) => {
+                                builder.ins().brif(ok, next_block, &[], fallback_block, &[]);
+                            }
+                            None => {
+                                builder.ins().brif(
+                                    ok,
+                                    done,
+                                    &[ir::BlockArg::Value(arr)],
+                                    fallback_block,
+                                    &[],
+                                );
+                            }
+                        }
+                    } else {
+                        // No elements: the array is already fully built.
+                        let next = store_blocks.get(i + 1).copied();
+                        match next {
+                            Some(next_block) => {
+                                builder.ins().jump(next_block, &[]);
+                            }
+                            None => {
+                                builder
+                                    .ins()
+                                    .jump(done, &[ir::BlockArg::Value(arr)]);
+                            }
+                        }
+                    }
+                }
+                builder.seal_block(fallback_block);
+
+                builder.switch_to_block(fallback_block);
+                // Either the allocation failed or an element violated the array's
+                // element constraint. Both are interpreter errors.
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.switch_to_block(null_block);
+                let null = abi::emit_null(builder);
+                builder
+                    .ins()
+                    .jump(done, &[ir::BlockArg::Value(null)]);
+
+                builder.seal_block(done);
+                builder.switch_to_block(done);
+                let merged = builder.block_params(done)[0];
+                self.def_reg(builder, *dest, merged);
+            }
             JitInstr::ArrayPush {
                 array,
                 value,
