@@ -23,6 +23,50 @@ fn test_array_literal_single() {
     expect_i32("let arr = [42]; return arr[0];", 42);
 }
 
+// ---------------------------------------------------------------------------
+// ALY-84: the element type of an EMPTY annotated array
+// ---------------------------------------------------------------------------
+
+/// An empty array literal has no first element to infer its element type from, and
+/// the lowering used to default that to `number`. So `let xs: string[] = []` came out
+/// **f64-constrained**, and the first `push` of anything else raised
+/// "Cannot store value: array element type is f64". That broke all eight
+/// `test_runner` tests, because the harness registers a test by name and is built
+/// almost entirely out of empty annotated arrays.
+///
+/// `test_array_literal_empty` above did NOT catch it: it reads `length` and never
+/// pushes, so the wrong element type was invisible.
+///
+/// NOTE on the harness choice: these use `compile_and_run_runtime`, **not**
+/// `expect_i32` / `compile_and_run_isolated`. A first attempt used `expect_i32` and
+/// the test PASSED WITH THE FIX REVERTED — because it runs a different execution
+/// path than the one that raised the error. A regression test that cannot fail on the
+/// bug it exists to catch is worse than none, so these use the path that reproduces.
+#[test]
+fn test_empty_annotated_string_array_accepts_a_push() {
+    // The ALY-84 case: the declared element type must reach the runtime.
+    let pushed = compile_and_run_runtime(
+        "let a: string[] = []; a.push(\"x\"); a.push(\"y\"); return a.length;",
+    );
+    match pushed {
+        Ok(v) => assert_eq!(v.as_i32(), Some(2), "an empty annotated string[] must accept pushes — ALY-84"),
+        Err(e) => panic!("an empty annotated string[] must accept pushes — ALY-84: {e}"),
+    }
+}
+
+/// The other direction: a genuinely-`number[]` array must STILL reject a string.
+/// Without this, "make every array unconstrained" would pass every test above and
+/// delete the guarantee the constraint exists to provide.
+#[test]
+fn test_number_array_still_rejects_a_string() {
+    let result = compile_and_run_runtime("let a: number[] = []; a.push(\"nope\"); return a.length;");
+    assert!(
+        result.is_err(),
+        "a number[] array must reject a string push — the ALY-84 fix must not have \
+         widened array element constraints generally"
+    );
+}
+
 // ============================================================================
 // Array Access
 // ============================================================================

@@ -4183,10 +4183,22 @@ impl<'a> Lowerer<'a> {
                     ast::ArrayElement::Spread(_) => unreachable!(),
                 }
             }
-            let elem_ty = elements
-                .first()
-                .map(|r| r.ty)
-                .unwrap_or(TypeId::new(NUMBER_TYPE_ID));
+            // The DECLARED element type wins. An empty array literal has no first
+            // element to infer from, and defaulting that to NUMBER silently gave every
+            // empty annotated array -- `let xs: string[] = []` -- an f64 element
+            // constraint, so the first push of anything else raised
+            // "Cannot store value: array element type is f64" (ALY-84).
+            //
+            // Only when there is neither an annotation nor an element do we fall back,
+            // and then to `never` (unconstrained) rather than to a float: guessing a
+            // primitive for an unknown element type is what caused this.
+            let declared_elem_ty = match self.type_ctx.get(array_ty) {
+                Some(Type::Array(at)) => Some(at.element),
+                _ => None,
+            };
+            let elem_ty = declared_elem_ty
+                .or_else(|| elements.first().map(|r| r.ty))
+                .unwrap_or_else(|| TypeId::new(crate::parser::types::context::TypeContext::NEVER_TYPE_ID));
             let element_layout = if elements.is_empty() {
                 None
             } else {
