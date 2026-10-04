@@ -67,6 +67,40 @@ fn test_number_array_still_rejects_a_string() {
     );
 }
 
+/// ALY-89: the SPREAD path hardcoded `elem_ty` to NUMBER, ignoring the annotation.
+/// An array built by spread is therefore f64-constrained and the first push of a
+/// string raises the exact ALY-84 error on a path ALY-84's fix never touched.
+#[test]
+fn test_spread_annotated_string_array_accepts_a_push() {
+    let result = compile_and_run_runtime(
+        "let a: string[] = [\"x\"]; let b: string[] = [...a]; b.push(\"y\"); return b.length;",
+    );
+    match result {
+        Ok(v) => assert_eq!(
+            v.as_i32(),
+            Some(2),
+            "a spread-constructed annotated string[] must accept pushes — ALY-89"
+        ),
+        Err(e) => panic!("a spread-constructed annotated string[] must accept pushes — ALY-89: {e}"),
+    }
+}
+
+/// The control for the test above, and the reason this fix is not just a widening:
+/// a genuinely-`number[]` array built by SPREAD must still reject a string. Without
+/// this, `elem_ty: NEVER` on the spread path would pass the string case by deleting
+/// the guarantee the constraint exists to provide.
+#[test]
+fn test_spread_number_array_still_rejects_a_string() {
+    let result = compile_and_run_runtime(
+        "let a: number[] = [1]; let b: number[] = [...a]; b.push(\"nope\"); return b.length;",
+    );
+    assert!(
+        result.is_err(),
+        "a spread-constructed number[] array must reject a string push — the ALY-89 \
+         fix must not have widened array element constraints generally"
+    );
+}
+
 // ============================================================================
 // Array Access
 // ============================================================================
