@@ -7083,3 +7083,120 @@ fn array_literal_constraint_violation_falls_back() {
         "the exit must be an interpreter boundary"
     );
 }
+
+
+/// D4.7's deferred evidence, now collectable: `DynGetKeyed`'s **`Arr` view**,
+/// differentially.
+///
+/// This is the corpus D4.7 could not have. With the whole array family `Rejected`,
+/// no natively-compiled bytecode could construct an array, so this test would have
+/// had its entire function rejected and silently run interpreted — passing while
+/// proving nothing about the helper, which is the exact vacuity that let D4.3's P0
+/// ship. D4.8 promoted `NewArray`/`InitArray`/`LoadElem`, and the dependency is
+/// gone.
+///
+/// Four cases, because the keyed path has a trap the positional one does not:
+/// `dyn_key_parts` parses a **string** key with `key.parse::<usize>()`, so `"1"`
+/// and `1` are the SAME index. A helper that only handled integer keys, or that
+/// treated a string key as a property name, would agree with the interpreter on
+/// neither.
+#[test]
+fn dyn_get_keyed_array_view_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // Takes the MODULE, not the code: these cases index into the constant pool for
+    // their string keys, and an earlier version built its own module with
+    // `make_module`, whose pool is empty -- so the string key indices pointed at
+    // nothing.
+    fn both_engines(
+        module: std::sync::Arc<Module>,
+        label: &str,
+    ) -> raya_engine::vm::value::Value {
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref()).expect(label);
+
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] the Arr view must complete natively, not fall back"
+        );
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert_eq!(
+            native.raw(),
+            interpreted.raw(),
+            "[{label}] engines disagree on the same bytecode"
+        );
+        native
+    }
+
+    // Builds a module whose function is `array[11, 22, null]` with `key_ops`
+    // pushing exactly one key, then a `DynGetKeyed`.
+    // `str_key` is added to THIS module's pool, so the index is valid in the module
+    // the code actually lives in. An earlier version added the strings to a separate
+    // throwaway module and the interpreter rejected the program with
+    // `Invalid string constant index: 0`.
+    fn keyed_array_module(
+        int_key: Option<i32>,
+        str_key: Option<&str>,
+    ) -> std::sync::Arc<Module> {
+        let mut module = make_vm_module(Vec::new(), 0, 0);
+        let str_idx = str_key.map(|s| module.constants.add_string(s.to_string()));
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, 3);
+        emit(&mut code, Opcode::NewArray);
+        code.extend_from_slice(&6u32.to_le_bytes()); // AnyValue
+        emit_i32(&mut code, 11);
+        emit(&mut code, Opcode::InitArray);
+        code.extend_from_slice(&0u16.to_le_bytes());
+        emit_i32(&mut code, 22);
+        emit(&mut code, Opcode::InitArray);
+        code.extend_from_slice(&1u16.to_le_bytes());
+        match (int_key, str_idx) {
+            (Some(v), _) => emit_i32(&mut code, v),
+            (None, Some(idx)) => emit_const_str(&mut code, idx),
+            (None, None) => unreachable!("a keyed read needs one key"),
+        }
+        emit(&mut code, Opcode::DynGetKeyed);
+        emit(&mut code, Opcode::Return);
+        module.functions[0].code = code;
+        module.functions[0].name = "main".to_string();
+        finalize_module(module)
+    }
+
+    // Integer key 1 -> element 1.
+    let v = both_engines(keyed_array_module(Some(1), None), "int key 1");
+    assert_eq!(v.as_i32(), Some(22), "an integer key must read that element");
+
+    // STRING key "1" -> the SAME element, because dyn_key_parts parses it as an index.
+    let v = both_engines(keyed_array_module(None, Some("1")), "string key \"1\"");
+    assert_eq!(
+        v.as_i32(),
+        Some(22),
+        "a numeric string key must read the same element as the integer key"
+    );
+
+    // "length" -> 3, the array's length.
+    let v = both_engines(keyed_array_module(None, Some("length")), "length key");
+    assert_eq!(v.as_i32(), Some(3), "the length key must return the array length");
+
+    // Out-of-range integer key -> null (the Arr view returns null, not a raise —
+    // that RAISE-on-out-of-bounds behaviour belongs to `LoadElem`, a different
+    // opcode with a different handler).
+    let v = both_engines(keyed_array_module(Some(99), None), "out-of-range key");
+    assert!(v.is_null(), "an out-of-range keyed read must be null");
+}

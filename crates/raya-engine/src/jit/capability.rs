@@ -212,13 +212,19 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // the same module, and path 3 is unreachable from native code by design
         // because JitSuspendReason has no AwaitTask variant.
         | Opcode::Await
-        // D4.7: exact for the Str and Arr views, where the helper either computes
-        // the answer or declines via the fallback sentinel. The Struct view NEEDS
-        // `structural_object_shapes`, which the bridge does not carry, so it
-        // declines rather than guessing -- and declining is a deopt, not a wrong
-        // value. Engine-level Arr evidence is still gated on the array family
-        // (all Rejected under D4.2), so the differential covers Str only and says
-        // so in its own doc comment.
+        // D4.7, updated after D4.8. Exact for the Str and Arr views, where the
+        // helper either computes the answer or declines via the fallback sentinel.
+        //
+        // The Struct view NEEDS `structural_object_shapes`, which the bridge does
+        // not carry, so it declines rather than guessing -- and declining is a
+        // deopt, not a wrong value. That is the ONLY remaining narrowing.
+        //
+        // Arr was promoted in D4.7 on HELPER-LEVEL evidence alone, because no
+        // natively-compiled bytecode could construct an array to read from. D4.8
+        // promoted the array family, which removed that dependency, and
+        // dyn_get_keyed_array_view_matches_interpreter now covers Arr at engine
+        // level. So the corpus is no longer narrowed: Str and Arr are both
+        // engine-proven, and Struct declines by design.
         | Opcode::DynGetKeyed
         // D4.8, first slice. `NewArray` + `ArrayLen` only, deliberately: `NewArray`
         // bootstraps array construction, so nothing else in the family can be
