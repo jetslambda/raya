@@ -6824,3 +6824,138 @@ fn array_push_and_pop_match_interpreter() {
         assert_eq!(v.as_i32(), Some(42), "push then pop must return the pushed value");
     }
 }
+
+
+/// D4.8's error paths, differentially — the four cases acceptance criterion 4 asks
+/// for and the first three slices did not cover.
+///
+/// The pairing here is deliberately **not** "both engines produce the same value",
+/// because these cases have no value. The interpreter raises; the JIT cannot raise,
+/// so the only correct behaviour is to **exit to the interpreter and let it raise**.
+/// So each case asserts both halves:
+///
+///   * the interpreter returns `Err`
+///   * the JIT's exit is `Suspended` with `InterpreterBoundary` — i.e. it handed
+///     back rather than inventing an answer
+///
+/// A JIT that "handled" the error natively — returning null, or a zero, or
+/// truncating the index — would fail this test, because it would report
+/// `Completed`.
+///
+/// The four cases: out-of-bounds load (a raise, not a null), out-of-bounds store
+/// (**must not grow**), a non-array receiver, and an element-constraint violation.
+#[test]
+fn array_error_paths_fall_back_to_the_interpreter() {
+    use raya_engine::jit::runtime::trampoline::{JitExitKind, JitSuspendReason};
+    use raya_engine::vm::interpreter::Vm;
+
+    // Each case emits its own body, because the four shapes need different operand
+    // sequences and a shared op list turned into guesswork about which `ConstI32`
+    // was an index, a value, or a slot to read back.
+    type Body = Box<dyn Fn(&mut Vec<u8>, u32)>;
+    let cases: Vec<(&str, Body)> = vec![
+        // Out-of-bounds LOAD: a raise, not a null. A JIT that returned null here
+        // would report Completed and fail this test.
+        (
+            "out-of-bounds load raises",
+            Box::new(|c: &mut Vec<u8>, _s| {
+                emit_i32(c, 3);
+                emit(c, Opcode::NewArray);
+                c.extend_from_slice(&6u32.to_le_bytes());
+                emit_i32(c, 5); // index 5 on a length-3 array
+                emit(c, Opcode::LoadElem);
+                emit(c, Opcode::Return);
+            }),
+        ),
+        // Out-of-bounds STORE: `StoreElem` must NOT grow the array. The trailing
+        // `ConstI32 0` + Return is never reached in compiled code -- the arm exits at
+        // the store -- but the interpreter needs a well-formed tail.
+        (
+            "out-of-bounds store raises and does not grow",
+            Box::new(|c: &mut Vec<u8>, _s| {
+                emit_i32(c, 3);
+                emit(c, Opcode::NewArray);
+                c.extend_from_slice(&6u32.to_le_bytes());
+                emit(c, Opcode::Dup);
+                emit_i32(c, 5); // index 5 on a length-3 array
+                emit_i32(c, 42);
+                emit(c, Opcode::StoreElem);
+                emit_i32(c, 0);
+                emit(c, Opcode::Return);
+            }),
+        ),
+        // NON-ARRAY RECEIVER: `LoadElem` on a string. `jit_array_ptr_checked`
+        // validates the GC-header TypeId, so this must decline rather than
+        // reinterpreting the string's bytes as an `Array`.
+        (
+            "non-array receiver is rejected",
+            Box::new(|c: &mut Vec<u8>, s| {
+                emit_const_str(c, s);
+                emit_i32(c, 0);
+                emit(c, Opcode::LoadElem);
+                emit(c, Opcode::Return);
+            }),
+        ),
+        // ELEMENT-CONSTRAINT VIOLATION: element id 0 resolves to an `I32`
+        // constraint, so storing a string must be rejected. This is the case that
+        // proves the typed-array machinery is inherited rather than bypassed.
+        (
+            "element constraint violation is rejected",
+            Box::new(|c: &mut Vec<u8>, s| {
+                emit_i32(c, 1); // length 1, so slot 0 is in bounds on the INDEX
+                emit(c, Opcode::NewArray);
+                c.extend_from_slice(&0u32.to_le_bytes()); // element id 0 == I32
+                emit(c, Opcode::Dup);
+                emit_i32(c, 0);
+                emit_const_str(c, s); // a string into an I32 array
+                emit(c, Opcode::StoreElem);
+                emit_i32(c, 0);
+                emit(c, Opcode::Return);
+            }),
+        ),
+    ];
+
+    for (label, body) in cases {
+        let mut module = make_vm_module(Vec::new(), 0, 0);
+        let str_idx = module.constants.add_string("not an array".to_string());
+        let mut code: Vec<u8> = Vec::new();
+        body(&mut code, str_idx);
+        module.functions[0].code = code;
+        module.functions[0].name = "main".to_string();
+        let module = finalize_module(module);
+
+        // Engine 1: the interpreter must RAISE.
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref());
+        assert!(
+            interpreted.is_err(),
+            "[{label}] the interpreter must raise, not return a value"
+        );
+
+        // Engine 2: the JIT must hand back rather than invent an answer.
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (_raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Suspended as u32,
+            "[{label}] the JIT must exit to the interpreter, not complete"
+        );
+        assert_eq!(
+            exit.suspend_reason,
+            JitSuspendReason::InterpreterBoundary as u32,
+            "[{label}] the exit must be an interpreter boundary"
+        );
+    }
+}

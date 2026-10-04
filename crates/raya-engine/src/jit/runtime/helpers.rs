@@ -3642,6 +3642,16 @@ mod tests {
                 unsafe { helper_array_store(arr_val.raw(), Value::i32(5).raw(), Value::i32(1).raw(), ss) },
                 JIT_STORE_FALLBACK
             );
+            // A REJECTED store must leave the array untouched. `StoreElem` does not
+            // grow -- `checked_set` reports OutOfBounds -- and this is the assertion
+            // that would catch an implementation which resized before discovering the
+            // index was invalid. `DynSetKeyed`'s Arr arm DOES resize, so conflating
+            // the two is exactly the miscompile this pins shut.
+            assert_eq!(
+                unsafe { helper_array_len(arr_val.raw(), ss) },
+                2,
+                "a rejected out-of-bounds store must not grow the array"
+            );
             assert_eq!(
                 unsafe { helper_array_load(arr_val.raw(), Value::i32(5).raw(), ss) },
                 JIT_INTERPRETER_FALLBACK_SENTINEL
