@@ -237,6 +237,15 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // the opposite of `DynSetKeyed`'s Arr arm and must never be conflated with it.
         | Opcode::LoadElem
         | Opcode::StoreElem
+        // D4.8, slice 3. `ArrayPush` is the only array opcode that can grow the
+        // backing Vec; `helper_array_push` roots the receiver and the element across
+        // that window, and the arm deliberately roots nothing itself.
+        //
+        // `ArrayPop` on an EMPTY array yields null, not an error and not a fallback --
+        // so the arm's null-ctx path must yield null rather than the sentinel, or
+        // every empty pop would exit to the interpreter.
+        | Opcode::ArrayPush
+        | Opcode::ArrayPop
         | Opcode::InitArray => JitSupport::HelperExact,
         Opcode::StoreFieldExact => JitSupport::InterpreterBoundary,
         Opcode::LoadFieldExact
@@ -674,10 +683,9 @@ mod tests {
         // The promoted pair is asserted explicitly below rather than being quietly
         // dropped from this list: a guard that silently shrinks is how `BindMethod`
         // and `EndTry` were excluded by accident.
-        // Slice 3 of D4.8: not yet promoted. `ArrayPush` can grow the backing Vec, so
-        // it needs its rooting verified in an arm; `ArrayLiteral` is the only opcode
-        // with no helper at all.
-        for op in [Opcode::ArrayPush, Opcode::ArrayPop, Opcode::ArrayLiteral] {
+        // Slice 4 of D4.8: `ArrayLiteral` is the only opcode in the family with NO
+        // helper at all, so it needs one written before it can have an arm.
+        for op in [Opcode::ArrayLiteral] {
             assert_eq!(jit_support(op), JitSupport::Rejected, "{op:?}");
             assert!(!opcode_supported_for_jit(op), "{op:?} must not be selectable");
         }
@@ -689,6 +697,8 @@ mod tests {
             Opcode::ArrayLen,
             Opcode::LoadElem,
             Opcode::StoreElem,
+            Opcode::ArrayPush,
+            Opcode::ArrayPop,
             Opcode::InitArray,
         ] {
             assert_eq!(

@@ -6709,3 +6709,118 @@ fn array_index_coercion_matches_interpreter() {
         assert!(interpreted.is_null(), "[{label}] interpreter baseline is not null");
     }
 }
+
+
+/// D4.8 slice 3, differentially: `ArrayPush` and `ArrayPop` on the same bytecode
+/// through both engines.
+///
+/// Three programs, each covering something a plausible implementation gets wrong:
+///
+///   * **empty pop yields `null`** — not an error, and not a fallback. The arm's
+///     null-ctx path deliberately yields null rather than the sentinel precisely so
+///     this does not exit; if it did, this test would see a fallback and fail.
+///   * **push grows the backing `Vec`** — the reallocation path, which is the only
+///     window in this family where a GC-visible operand matters. Starting from a
+///     zero-length array and pushing twice forces at least one growth.
+///   * **push then pop round-trips** the value, proving `ArrayLen` after growth
+///     agrees too.
+///
+/// `exit.kind == Completed` is asserted for every case, so a silent fallback fails
+/// rather than passing with the right answer.
+#[test]
+fn array_push_and_pop_match_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // Runs one program through both engines and asserts native completion.
+    fn both_engines(code: Vec<u8>, label: &str) -> (raya_engine::vm::value::Value, bool) {
+        let mut raw = make_module(code, 0, 0);
+        raw.functions[0].name = "main".to_string();
+        let module = finalize_module(raw);
+
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref()).expect(label);
+
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] must complete natively, not fall back"
+        );
+        assert_eq!(
+            raw_bits,
+            interpreted.raw(),
+            "[{label}] engines disagree on the same bytecode"
+        );
+        (
+            unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) },
+            true,
+        )
+    }
+
+    // --- Case 1: popping an EMPTY array must yield null.
+    {
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, 0);
+        emit(&mut code, Opcode::NewArray);
+        code.extend_from_slice(&6u32.to_le_bytes());
+        emit(&mut code, Opcode::ArrayPop);
+        emit(&mut code, Opcode::Return);
+        let (v, _) = both_engines(code, "empty pop");
+        assert!(
+            v.is_null(),
+            "popping an empty array must yield null, got 0x{:016X}",
+            v.raw()
+        );
+    }
+
+    // --- Case 2: push twice onto a ZERO-length array, then read the length. This
+    // forces the backing Vec to reallocate at least once.
+    {
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, 0);
+        emit(&mut code, Opcode::NewArray);
+        code.extend_from_slice(&6u32.to_le_bytes());
+        for v in [5i32, 6] {
+            emit(&mut code, Opcode::Dup);
+            emit_i32(&mut code, v);
+            emit(&mut code, Opcode::ArrayPush);
+        }
+        emit(&mut code, Opcode::ArrayLen);
+        emit(&mut code, Opcode::Return);
+        let (v, _) = both_engines(code, "push grows");
+        assert_eq!(
+            v.as_i32(),
+            Some(2),
+            "two pushes onto an empty array must leave length 2"
+        );
+    }
+
+    // --- Case 3: push then pop round-trips the value.
+    {
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, 1);
+        emit(&mut code, Opcode::NewArray);
+        code.extend_from_slice(&6u32.to_le_bytes());
+        emit(&mut code, Opcode::Dup);
+        emit_i32(&mut code, 42);
+        emit(&mut code, Opcode::ArrayPush);
+        emit(&mut code, Opcode::ArrayPop);
+        emit(&mut code, Opcode::Return);
+        let (v, _) = both_engines(code, "push/pop roundtrip");
+        assert_eq!(v.as_i32(), Some(42), "push then pop must return the pushed value");
+    }
+}
