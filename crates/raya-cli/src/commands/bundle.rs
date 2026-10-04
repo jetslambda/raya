@@ -315,7 +315,6 @@ mod aot_impl {
             | Opcode::InitObject
             | Opcode::InitArray
             | Opcode::InitTuple
-            | Opcode::CloseVar
             | Opcode::LoadCaptured
             | Opcode::StoreCaptured
             | Opcode::SetClosureCapture

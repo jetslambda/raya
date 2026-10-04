@@ -218,7 +218,6 @@ fn decode_operands(
         | Opcode::StoreFieldExact
         | Opcode::OptionalFieldExact
         | Opcode::ConstStr
-        | Opcode::CloseVar
         | Opcode::LoadCaptured
         | Opcode::StoreCaptured
         | Opcode::SetClosureCapture

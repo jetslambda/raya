@@ -292,7 +292,6 @@ pub(crate) fn operand_size(opcode: Opcode) -> usize {
         | Opcode::InitObject
         | Opcode::InitArray
         | Opcode::InitTuple
-        | Opcode::CloseVar
         | Opcode::LoadCaptured
         | Opcode::StoreCaptured
         | Opcode::SetClosureCapture
@@ -511,7 +510,6 @@ fn get_stack_effect(opcode: Opcode) -> (i32, i32) {
         Opcode::LoadGlobal => (0, 1),
         Opcode::StoreGlobal => (1, 0),
         Opcode::MakeClosure => (0, 1),
-        Opcode::CloseVar => (1, 1),
         Opcode::LoadCaptured => (0, 1),
         Opcode::StoreCaptured => (1, 0),
         Opcode::SetClosureCapture => (2, 1), // Pop closure + value, push closure

@@ -912,8 +912,14 @@ fn jit_call_static_executes_sync_callee_via_runtime_helper() {
     assert_eq!(decode_i32(raw), 18);
 }
 
+// NOTE: `LoadFieldShape` is `Rejected` in the capability table, so this is NOT a
+// reachable fast path. This test lifts and calls the function directly, which
+// bypasses candidate selection, so it covers the lowering and the helper in
+// isolation. It must not be read as evidence that compiled code uses the helper:
+// see `accessor_and_proxy_field_opcodes_are_rejected_until_exact` in
+// `jit/capability.rs` for the gate that keeps this unreachable.
 #[test]
-fn jit_load_field_shape_uses_runtime_helper_fastpath() {
+fn load_field_shape_lowering_uses_runtime_helper_directly() {
     let (safepoint, shared) = new_shared_vm_state();
 
     let layout_names = vec!["b".to_string(), "a".to_string()];
@@ -961,8 +967,12 @@ fn jit_load_field_shape_uses_runtime_helper_fastpath() {
     assert_eq!(decode_i32(raw), 7);
 }
 
+// NOTE: as above, `StoreFieldShape` is `Rejected` in the capability table. The
+// interpreter handler for this opcode can invoke a descriptor setter and check
+// writability; this helper cannot, which is why it was demoted. This test covers
+// the lowering and helper only.
 #[test]
-fn jit_store_field_shape_uses_runtime_helper_fastpath() {
+fn store_field_shape_lowering_uses_runtime_helper_directly() {
     let (safepoint, shared) = new_shared_vm_state();
 
     let layout_names = vec!["b".to_string(), "a".to_string()];
@@ -2078,18 +2088,18 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     }
     unsafe extern "C" fn stub_alloc_array(
         _type_id: u32,
-        _capacity: usize,
+        _len: u64,
         _module: *const (),
         _shared_state: *mut (),
     ) -> *mut () {
         std::ptr::null_mut()
     }
-    unsafe extern "C" fn stub_array_load(_array: u64, _index: i64, _shared_state: *mut ()) -> u64 {
+    unsafe extern "C" fn stub_array_load(_array: u64, _index: u64, _shared_state: *mut ()) -> u64 {
         0
     }
     unsafe extern "C" fn stub_array_store(
         _array: u64,
-        _index: i64,
+        _index: u64,
         _value: u64,
         _shared_state: *mut (),
     ) -> i8 {
@@ -2103,6 +2113,138 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     }
     unsafe extern "C" fn stub_array_len(_array: u64, _shared_state: *mut ()) -> i32 {
         0
+    }
+    /// RefCell load has no stub behaviour: any RefCell opcode is `Rejected`, so no
+    /// compiled test can reach it. Returning the interpreter-fallback sentinel is
+    /// the honest stub — it is what the real helper returns for a receiver that is
+    /// not a pointer, and it routes to the interpreter rather than inventing a
+    /// value.
+    unsafe extern "C" fn stub_refcell_load(_refcell: u64, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter rather than
+    /// pretending it happened. `StoreRefCell` is still `Rejected`, so no compiled
+    /// test reaches this.
+    unsafe extern "C" fn stub_refcell_store(
+        _refcell: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+
+    /// Null means the allocation did not happen, which routes to the interpreter.
+    /// `NewRefCell` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_refcell_new(_initial: u64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+
+    /// Reports failure, which routes the patch to the interpreter.
+    /// `SetClosureCapture` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_set_closure_capture(
+        _closure: u64,
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+
+    /// Null means no allocation happened, which routes to the interpreter.
+    /// `MakeClosure` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_make_closure(
+        _func_id: u32,
+        _captures_ptr: *const u64,
+        _capture_count: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
+
+    /// Returns the fallback sentinel, which routes the load to the interpreter.
+    /// `LoadCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_load_captured(_index: u32, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter.
+    /// `StoreCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_store_captured(
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+
+    /// Null means the bind did not happen, which routes to the interpreter.
+    /// `BindMethod` is still not selectable, so no compiled test reaches this.
+    unsafe extern "C" fn stub_bind_method(
+        _object: u64,
+        _method_slot: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
+
+    /// Returns the fallback sentinel so the load routes to the interpreter.
+    /// `Await` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_await_task(_value: u64, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Returns the fallback sentinel so the load routes to the interpreter.
+    /// `DynGetKeyed` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_dyn_get_keyed(
+        _object: u64,
+        _key: u64,
+        _shared_state: *mut (),
+    ) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Returns the fallback status so a bad future promotion lands in the
+    /// interpreter rather than corrupting an array.
+    unsafe extern "C" fn stub_dyn_set_keyed(
+        _object: u64,
+        _key: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
+
+    /// Null, so a failure to allocate falls back rather than yielding a bogus object.
+    /// `ObjectLiteral` is still `Rejected`, so no compiled test reaches this yet.
+    unsafe extern "C" fn stub_alloc_struct_object(
+        _type_index: u32,
+        _field_count: u32,
+        _shared_state: *mut (),
+    ) -> *mut () {
+        std::ptr::null_mut()
+    }
+
+    /// Declines, so a slot write routes to the interpreter rather than silently
+    /// succeeding or writing out of bounds. `InitObject` is still `Rejected`.
+    unsafe extern "C" fn stub_init_object_field(
+        _object: u64,
+        _offset: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
+
+    /// Declines, so a cast routes to the interpreter rather than silently passing.
+    /// `CastObjectMinFields` is promoted as of D4.10; this stub is not the real
+    /// helper and no differential routes through it.
+    unsafe extern "C" fn stub_cast_object_min_fields(
+        _object: u64,
+        _required_fields: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // OBJECT_MIN_FIELDS_DECLINE
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2135,12 +2277,6 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     ) -> u64 {
         NULL_VALUE
     }
-    unsafe extern "C" fn stub_throw_exception(_exception_value: u64, _shared_state: *mut ()) {
-        panic!("not used")
-    }
-    unsafe extern "C" fn stub_deoptimize(_bytecode_offset: u32, _shared_state: *mut ()) {
-        panic!("not used")
-    }
     unsafe extern "C" fn stub_string_concat(
         _left: u64,
         _right: u64,
@@ -2178,8 +2314,6 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             check_preemption: stub_check_preemption,
             native_call_dispatch: stub_native_call_dispatch,
             interpreter_call: stub_interpreter_call,
-            throw_exception: stub_throw_exception,
-            deoptimize: stub_deoptimize,
             string_concat: stub_string_concat,
             generic_equals: stub_generic_equals,
             object_get_field: stub_object_get_field,
@@ -2197,6 +2331,20 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             array_push: stub_array_push,
             array_pop: stub_array_pop,
             array_len: stub_array_len,
+            refcell_load: stub_refcell_load,
+            refcell_store: stub_refcell_store,
+            refcell_new: stub_refcell_new,
+            set_closure_capture: stub_set_closure_capture,
+            make_closure: stub_make_closure,
+            load_captured: stub_load_captured,
+            store_captured: stub_store_captured,
+            bind_method: stub_bind_method,
+            await_task: stub_await_task,
+            dyn_get_keyed: stub_dyn_get_keyed,
+            dyn_set_keyed: stub_dyn_set_keyed,
+            alloc_struct_object: stub_alloc_struct_object,
+            init_object_field: stub_init_object_field,
+            cast_object_min_fields: stub_cast_object_min_fields,
         },
     };
 
@@ -2228,18 +2376,18 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     }
     unsafe extern "C" fn stub_alloc_array(
         _type_id: u32,
-        _capacity: usize,
+        _len: u64,
         _module: *const (),
         _shared_state: *mut (),
     ) -> *mut () {
         std::ptr::null_mut()
     }
-    unsafe extern "C" fn stub_array_load(_array: u64, _index: i64, _shared_state: *mut ()) -> u64 {
+    unsafe extern "C" fn stub_array_load(_array: u64, _index: u64, _shared_state: *mut ()) -> u64 {
         0
     }
     unsafe extern "C" fn stub_array_store(
         _array: u64,
-        _index: i64,
+        _index: u64,
         _value: u64,
         _shared_state: *mut (),
     ) -> i8 {
@@ -2253,6 +2401,138 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     }
     unsafe extern "C" fn stub_array_len(_array: u64, _shared_state: *mut ()) -> i32 {
         0
+    }
+    /// RefCell load has no stub behaviour: any RefCell opcode is `Rejected`, so no
+    /// compiled test can reach it. Returning the interpreter-fallback sentinel is
+    /// the honest stub — it is what the real helper returns for a receiver that is
+    /// not a pointer, and it routes to the interpreter rather than inventing a
+    /// value.
+    unsafe extern "C" fn stub_refcell_load(_refcell: u64, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter rather than
+    /// pretending it happened. `StoreRefCell` is still `Rejected`, so no compiled
+    /// test reaches this.
+    unsafe extern "C" fn stub_refcell_store(
+        _refcell: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+
+    /// Null means the allocation did not happen, which routes to the interpreter.
+    /// `NewRefCell` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_refcell_new(_initial: u64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+
+    /// Reports failure, which routes the patch to the interpreter.
+    /// `SetClosureCapture` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_set_closure_capture(
+        _closure: u64,
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+
+    /// Null means no allocation happened, which routes to the interpreter.
+    /// `MakeClosure` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_make_closure(
+        _func_id: u32,
+        _captures_ptr: *const u64,
+        _capture_count: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
+
+    /// Returns the fallback sentinel, which routes the load to the interpreter.
+    /// `LoadCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_load_captured(_index: u32, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter.
+    /// `StoreCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_store_captured(
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+
+    /// Null means the bind did not happen, which routes to the interpreter.
+    /// `BindMethod` is still not selectable, so no compiled test reaches this.
+    unsafe extern "C" fn stub_bind_method(
+        _object: u64,
+        _method_slot: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
+
+    /// Returns the fallback sentinel so the load routes to the interpreter.
+    /// `Await` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_await_task(_value: u64, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Returns the fallback sentinel so the load routes to the interpreter.
+    /// `DynGetKeyed` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_dyn_get_keyed(
+        _object: u64,
+        _key: u64,
+        _shared_state: *mut (),
+    ) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Returns the fallback status so a bad future promotion lands in the
+    /// interpreter rather than corrupting an array.
+    unsafe extern "C" fn stub_dyn_set_keyed(
+        _object: u64,
+        _key: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
+
+    /// Null, so a failure to allocate falls back rather than yielding a bogus object.
+    /// `ObjectLiteral` is still `Rejected`, so no compiled test reaches this yet.
+    unsafe extern "C" fn stub_alloc_struct_object(
+        _type_index: u32,
+        _field_count: u32,
+        _shared_state: *mut (),
+    ) -> *mut () {
+        std::ptr::null_mut()
+    }
+
+    /// Declines, so a slot write routes to the interpreter rather than silently
+    /// succeeding or writing out of bounds. `InitObject` is still `Rejected`.
+    unsafe extern "C" fn stub_init_object_field(
+        _object: u64,
+        _offset: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
+
+    /// Declines, so a cast routes to the interpreter rather than silently passing.
+    /// `CastObjectMinFields` is promoted as of D4.10; this stub is not the real
+    /// helper and no differential routes through it.
+    unsafe extern "C" fn stub_cast_object_min_fields(
+        _object: u64,
+        _required_fields: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // OBJECT_MIN_FIELDS_DECLINE
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2285,12 +2565,6 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     ) -> u64 {
         NULL_VALUE
     }
-    unsafe extern "C" fn stub_throw_exception(_exception_value: u64, _shared_state: *mut ()) {
-        panic!("not used")
-    }
-    unsafe extern "C" fn stub_deoptimize(_bytecode_offset: u32, _shared_state: *mut ()) {
-        panic!("not used")
-    }
     unsafe extern "C" fn stub_string_concat(
         _left: u64,
         _right: u64,
@@ -2328,8 +2602,6 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             check_preemption: stub_check_preemption,
             native_call_dispatch: stub_native_call_dispatch,
             interpreter_call: stub_interpreter_call,
-            throw_exception: stub_throw_exception,
-            deoptimize: stub_deoptimize,
             string_concat: stub_string_concat,
             generic_equals: stub_generic_equals,
             object_get_field: stub_object_get_field,
@@ -2347,6 +2619,20 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             array_push: stub_array_push,
             array_pop: stub_array_pop,
             array_len: stub_array_len,
+            refcell_load: stub_refcell_load,
+            refcell_store: stub_refcell_store,
+            refcell_new: stub_refcell_new,
+            set_closure_capture: stub_set_closure_capture,
+            make_closure: stub_make_closure,
+            load_captured: stub_load_captured,
+            store_captured: stub_store_captured,
+            bind_method: stub_bind_method,
+            await_task: stub_await_task,
+            dyn_get_keyed: stub_dyn_get_keyed,
+            dyn_set_keyed: stub_dyn_set_keyed,
+            alloc_struct_object: stub_alloc_struct_object,
+            init_object_field: stub_init_object_field,
+            cast_object_min_fields: stub_cast_object_min_fields,
         },
     };
 
@@ -2379,18 +2665,18 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     }
     unsafe extern "C" fn stub_alloc_array(
         _type_id: u32,
-        _capacity: usize,
+        _len: u64,
         _module: *const (),
         _shared_state: *mut (),
     ) -> *mut () {
         std::ptr::null_mut()
     }
-    unsafe extern "C" fn stub_array_load(_array: u64, _index: i64, _shared_state: *mut ()) -> u64 {
+    unsafe extern "C" fn stub_array_load(_array: u64, _index: u64, _shared_state: *mut ()) -> u64 {
         0
     }
     unsafe extern "C" fn stub_array_store(
         _array: u64,
-        _index: i64,
+        _index: u64,
         _value: u64,
         _shared_state: *mut (),
     ) -> i8 {
@@ -2404,6 +2690,138 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     }
     unsafe extern "C" fn stub_array_len(_array: u64, _shared_state: *mut ()) -> i32 {
         0
+    }
+    /// RefCell load has no stub behaviour: any RefCell opcode is `Rejected`, so no
+    /// compiled test can reach it. Returning the interpreter-fallback sentinel is
+    /// the honest stub — it is what the real helper returns for a receiver that is
+    /// not a pointer, and it routes to the interpreter rather than inventing a
+    /// value.
+    unsafe extern "C" fn stub_refcell_load(_refcell: u64, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter rather than
+    /// pretending it happened. `StoreRefCell` is still `Rejected`, so no compiled
+    /// test reaches this.
+    unsafe extern "C" fn stub_refcell_store(
+        _refcell: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+
+    /// Null means the allocation did not happen, which routes to the interpreter.
+    /// `NewRefCell` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_refcell_new(_initial: u64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+
+    /// Reports failure, which routes the patch to the interpreter.
+    /// `SetClosureCapture` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_set_closure_capture(
+        _closure: u64,
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+
+    /// Null means no allocation happened, which routes to the interpreter.
+    /// `MakeClosure` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_make_closure(
+        _func_id: u32,
+        _captures_ptr: *const u64,
+        _capture_count: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
+
+    /// Returns the fallback sentinel, which routes the load to the interpreter.
+    /// `LoadCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_load_captured(_index: u32, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter.
+    /// `StoreCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_store_captured(
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+
+    /// Null means the bind did not happen, which routes to the interpreter.
+    /// `BindMethod` is still not selectable, so no compiled test reaches this.
+    unsafe extern "C" fn stub_bind_method(
+        _object: u64,
+        _method_slot: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
+
+    /// Returns the fallback sentinel so the load routes to the interpreter.
+    /// `Await` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_await_task(_value: u64, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Returns the fallback sentinel so the load routes to the interpreter.
+    /// `DynGetKeyed` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_dyn_get_keyed(
+        _object: u64,
+        _key: u64,
+        _shared_state: *mut (),
+    ) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Returns the fallback status so a bad future promotion lands in the
+    /// interpreter rather than corrupting an array.
+    unsafe extern "C" fn stub_dyn_set_keyed(
+        _object: u64,
+        _key: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
+
+    /// Null, so a failure to allocate falls back rather than yielding a bogus object.
+    /// `ObjectLiteral` is still `Rejected`, so no compiled test reaches this yet.
+    unsafe extern "C" fn stub_alloc_struct_object(
+        _type_index: u32,
+        _field_count: u32,
+        _shared_state: *mut (),
+    ) -> *mut () {
+        std::ptr::null_mut()
+    }
+
+    /// Declines, so a slot write routes to the interpreter rather than silently
+    /// succeeding or writing out of bounds. `InitObject` is still `Rejected`.
+    unsafe extern "C" fn stub_init_object_field(
+        _object: u64,
+        _offset: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
+
+    /// Declines, so a cast routes to the interpreter rather than silently passing.
+    /// `CastObjectMinFields` is promoted as of D4.10; this stub is not the real
+    /// helper and no differential routes through it.
+    unsafe extern "C" fn stub_cast_object_min_fields(
+        _object: u64,
+        _required_fields: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // OBJECT_MIN_FIELDS_DECLINE
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2441,12 +2859,6 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     ) -> u64 {
         NULL_VALUE
     }
-    unsafe extern "C" fn stub_throw_exception(_exception_value: u64, _shared_state: *mut ()) {
-        panic!("not used")
-    }
-    unsafe extern "C" fn stub_deoptimize(_bytecode_offset: u32, _shared_state: *mut ()) {
-        panic!("not used")
-    }
     unsafe extern "C" fn stub_string_concat(
         _left: u64,
         _right: u64,
@@ -2486,8 +2898,6 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             check_preemption: stub_check_preemption,
             native_call_dispatch: stub_native_call_dispatch,
             interpreter_call: stub_interpreter_call,
-            throw_exception: stub_throw_exception,
-            deoptimize: stub_deoptimize,
             string_concat: stub_string_concat,
             generic_equals: stub_generic_equals,
             object_get_field: stub_object_get_field,
@@ -2505,6 +2915,20 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             array_push: stub_array_push,
             array_pop: stub_array_pop,
             array_len: stub_array_len,
+            refcell_load: stub_refcell_load,
+            refcell_store: stub_refcell_store,
+            refcell_new: stub_refcell_new,
+            set_closure_capture: stub_set_closure_capture,
+            make_closure: stub_make_closure,
+            load_captured: stub_load_captured,
+            store_captured: stub_store_captured,
+            bind_method: stub_bind_method,
+            await_task: stub_await_task,
+            dyn_get_keyed: stub_dyn_get_keyed,
+            dyn_set_keyed: stub_dyn_set_keyed,
+            alloc_struct_object: stub_alloc_struct_object,
+            init_object_field: stub_init_object_field,
+            cast_object_min_fields: stub_cast_object_min_fields,
         },
     };
 
@@ -2532,18 +2956,18 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     }
     unsafe extern "C" fn stub_alloc_array(
         _type_id: u32,
-        _capacity: usize,
+        _len: u64,
         _module: *const (),
         _shared_state: *mut (),
     ) -> *mut () {
         std::ptr::null_mut()
     }
-    unsafe extern "C" fn stub_array_load(_array: u64, _index: i64, _shared_state: *mut ()) -> u64 {
+    unsafe extern "C" fn stub_array_load(_array: u64, _index: u64, _shared_state: *mut ()) -> u64 {
         0
     }
     unsafe extern "C" fn stub_array_store(
         _array: u64,
-        _index: i64,
+        _index: u64,
         _value: u64,
         _shared_state: *mut (),
     ) -> i8 {
@@ -2557,6 +2981,138 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     }
     unsafe extern "C" fn stub_array_len(_array: u64, _shared_state: *mut ()) -> i32 {
         0
+    }
+    /// RefCell load has no stub behaviour: any RefCell opcode is `Rejected`, so no
+    /// compiled test can reach it. Returning the interpreter-fallback sentinel is
+    /// the honest stub — it is what the real helper returns for a receiver that is
+    /// not a pointer, and it routes to the interpreter rather than inventing a
+    /// value.
+    unsafe extern "C" fn stub_refcell_load(_refcell: u64, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter rather than
+    /// pretending it happened. `StoreRefCell` is still `Rejected`, so no compiled
+    /// test reaches this.
+    unsafe extern "C" fn stub_refcell_store(
+        _refcell: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+
+    /// Null means the allocation did not happen, which routes to the interpreter.
+    /// `NewRefCell` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_refcell_new(_initial: u64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+
+    /// Reports failure, which routes the patch to the interpreter.
+    /// `SetClosureCapture` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_set_closure_capture(
+        _closure: u64,
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+
+    /// Null means no allocation happened, which routes to the interpreter.
+    /// `MakeClosure` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_make_closure(
+        _func_id: u32,
+        _captures_ptr: *const u64,
+        _capture_count: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
+
+    /// Returns the fallback sentinel, which routes the load to the interpreter.
+    /// `LoadCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_load_captured(_index: u32, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter.
+    /// `StoreCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_store_captured(
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+
+    /// Null means the bind did not happen, which routes to the interpreter.
+    /// `BindMethod` is still not selectable, so no compiled test reaches this.
+    unsafe extern "C" fn stub_bind_method(
+        _object: u64,
+        _method_slot: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
+
+    /// Returns the fallback sentinel so the load routes to the interpreter.
+    /// `Await` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_await_task(_value: u64, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Returns the fallback sentinel so the load routes to the interpreter.
+    /// `DynGetKeyed` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_dyn_get_keyed(
+        _object: u64,
+        _key: u64,
+        _shared_state: *mut (),
+    ) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Returns the fallback status so a bad future promotion lands in the
+    /// interpreter rather than corrupting an array.
+    unsafe extern "C" fn stub_dyn_set_keyed(
+        _object: u64,
+        _key: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
+
+    /// Null, so a failure to allocate falls back rather than yielding a bogus object.
+    /// `ObjectLiteral` is still `Rejected`, so no compiled test reaches this yet.
+    unsafe extern "C" fn stub_alloc_struct_object(
+        _type_index: u32,
+        _field_count: u32,
+        _shared_state: *mut (),
+    ) -> *mut () {
+        std::ptr::null_mut()
+    }
+
+    /// Declines, so a slot write routes to the interpreter rather than silently
+    /// succeeding or writing out of bounds. `InitObject` is still `Rejected`.
+    unsafe extern "C" fn stub_init_object_field(
+        _object: u64,
+        _offset: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
+
+    /// Declines, so a cast routes to the interpreter rather than silently passing.
+    /// `CastObjectMinFields` is promoted as of D4.10; this stub is not the real
+    /// helper and no differential routes through it.
+    unsafe extern "C" fn stub_cast_object_min_fields(
+        _object: u64,
+        _required_fields: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // OBJECT_MIN_FIELDS_DECLINE
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2594,12 +3150,6 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     ) -> u64 {
         NULL_VALUE
     }
-    unsafe extern "C" fn stub_throw_exception(_exception_value: u64, _shared_state: *mut ()) {
-        panic!("not used")
-    }
-    unsafe extern "C" fn stub_deoptimize(_bytecode_offset: u32, _shared_state: *mut ()) {
-        panic!("not used")
-    }
     unsafe extern "C" fn stub_string_concat(
         _left: u64,
         _right: u64,
@@ -2639,8 +3189,6 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             check_preemption: stub_check_preemption,
             native_call_dispatch: stub_native_call_dispatch,
             interpreter_call: stub_interpreter_call,
-            throw_exception: stub_throw_exception,
-            deoptimize: stub_deoptimize,
             string_concat: stub_string_concat,
             generic_equals: stub_generic_equals,
             object_get_field: stub_object_get_field,
@@ -2658,6 +3206,20 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             array_push: stub_array_push,
             array_pop: stub_array_pop,
             array_len: stub_array_len,
+            refcell_load: stub_refcell_load,
+            refcell_store: stub_refcell_store,
+            refcell_new: stub_refcell_new,
+            set_closure_capture: stub_set_closure_capture,
+            make_closure: stub_make_closure,
+            load_captured: stub_load_captured,
+            store_captured: stub_store_captured,
+            bind_method: stub_bind_method,
+            await_task: stub_await_task,
+            dyn_get_keyed: stub_dyn_get_keyed,
+            dyn_set_keyed: stub_dyn_set_keyed,
+            alloc_struct_object: stub_alloc_struct_object,
+            init_object_field: stub_init_object_field,
+            cast_object_min_fields: stub_cast_object_min_fields,
         },
     };
 
@@ -2692,18 +3254,18 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     }
     unsafe extern "C" fn stub_alloc_array(
         _type_id: u32,
-        _capacity: usize,
+        _len: u64,
         _module: *const (),
         _shared_state: *mut (),
     ) -> *mut () {
         std::ptr::null_mut()
     }
-    unsafe extern "C" fn stub_array_load(_array: u64, _index: i64, _shared_state: *mut ()) -> u64 {
+    unsafe extern "C" fn stub_array_load(_array: u64, _index: u64, _shared_state: *mut ()) -> u64 {
         0
     }
     unsafe extern "C" fn stub_array_store(
         _array: u64,
-        _index: i64,
+        _index: u64,
         _value: u64,
         _shared_state: *mut (),
     ) -> i8 {
@@ -2717,6 +3279,138 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     }
     unsafe extern "C" fn stub_array_len(_array: u64, _shared_state: *mut ()) -> i32 {
         0
+    }
+    /// RefCell load has no stub behaviour: any RefCell opcode is `Rejected`, so no
+    /// compiled test can reach it. Returning the interpreter-fallback sentinel is
+    /// the honest stub — it is what the real helper returns for a receiver that is
+    /// not a pointer, and it routes to the interpreter rather than inventing a
+    /// value.
+    unsafe extern "C" fn stub_refcell_load(_refcell: u64, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter rather than
+    /// pretending it happened. `StoreRefCell` is still `Rejected`, so no compiled
+    /// test reaches this.
+    unsafe extern "C" fn stub_refcell_store(
+        _refcell: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+
+    /// Null means the allocation did not happen, which routes to the interpreter.
+    /// `NewRefCell` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_refcell_new(_initial: u64, _shared_state: *mut ()) -> u64 {
+        0
+    }
+
+    /// Reports failure, which routes the patch to the interpreter.
+    /// `SetClosureCapture` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_set_closure_capture(
+        _closure: u64,
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+
+    /// Null means no allocation happened, which routes to the interpreter.
+    /// `MakeClosure` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_make_closure(
+        _func_id: u32,
+        _captures_ptr: *const u64,
+        _capture_count: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
+
+    /// Returns the fallback sentinel, which routes the load to the interpreter.
+    /// `LoadCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_load_captured(_index: u32, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Reports failure, which routes the store to the interpreter.
+    /// `StoreCaptured` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_store_captured(
+        _index: u32,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0
+    }
+
+    /// Null means the bind did not happen, which routes to the interpreter.
+    /// `BindMethod` is still not selectable, so no compiled test reaches this.
+    unsafe extern "C" fn stub_bind_method(
+        _object: u64,
+        _method_slot: u32,
+        _shared_state: *mut (),
+    ) -> u64 {
+        0
+    }
+
+    /// Returns the fallback sentinel so the load routes to the interpreter.
+    /// `Await` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_await_task(_value: u64, _shared_state: *mut ()) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Returns the fallback sentinel so the load routes to the interpreter.
+    /// `DynGetKeyed` is still `Rejected`, so no compiled test reaches this.
+    unsafe extern "C" fn stub_dyn_get_keyed(
+        _object: u64,
+        _key: u64,
+        _shared_state: *mut (),
+    ) -> u64 {
+        raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
+    }
+
+    /// Returns the fallback status so a bad future promotion lands in the
+    /// interpreter rather than corrupting an array.
+    unsafe extern "C" fn stub_dyn_set_keyed(
+        _object: u64,
+        _key: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
+
+    /// Null, so a failure to allocate falls back rather than yielding a bogus object.
+    /// `ObjectLiteral` is still `Rejected`, so no compiled test reaches this yet.
+    unsafe extern "C" fn stub_alloc_struct_object(
+        _type_index: u32,
+        _field_count: u32,
+        _shared_state: *mut (),
+    ) -> *mut () {
+        std::ptr::null_mut()
+    }
+
+    /// Declines, so a slot write routes to the interpreter rather than silently
+    /// succeeding or writing out of bounds. `InitObject` is still `Rejected`.
+    unsafe extern "C" fn stub_init_object_field(
+        _object: u64,
+        _offset: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
+
+    /// Declines, so a cast routes to the interpreter rather than silently passing.
+    /// `CastObjectMinFields` is promoted as of D4.10; this stub is not the real
+    /// helper and no differential routes through it.
+    unsafe extern "C" fn stub_cast_object_min_fields(
+        _object: u64,
+        _required_fields: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // OBJECT_MIN_FIELDS_DECLINE
     }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
@@ -2749,12 +3443,6 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     ) -> u64 {
         NULL_VALUE
     }
-    unsafe extern "C" fn stub_throw_exception(_exception_value: u64, _shared_state: *mut ()) {
-        panic!("not used")
-    }
-    unsafe extern "C" fn stub_deoptimize(_bytecode_offset: u32, _shared_state: *mut ()) {
-        panic!("not used")
-    }
     unsafe extern "C" fn stub_string_concat(
         _left: u64,
         _right: u64,
@@ -2776,6 +3464,7 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
         param_count: 0,
         local_count: 0,
         blocks: vec![raya_engine::jit::ir::instr::JitBlock {
+            start_offset: raya_engine::jit::ir::instr::JitBlock::UNKNOWN_START_OFFSET,
             id: JitBlockId(0),
             instrs: vec![
                 JitInstr::CheckPreemption {
@@ -2807,8 +3496,6 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             check_preemption: stub_check_preemption,
             native_call_dispatch: stub_native_call_dispatch,
             interpreter_call: stub_interpreter_call,
-            throw_exception: stub_throw_exception,
-            deoptimize: stub_deoptimize,
             string_concat: stub_string_concat,
             generic_equals: stub_generic_equals,
             object_get_field: stub_object_get_field,
@@ -2826,6 +3513,20 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             array_push: stub_array_push,
             array_pop: stub_array_pop,
             array_len: stub_array_len,
+            refcell_load: stub_refcell_load,
+            refcell_store: stub_refcell_store,
+            refcell_new: stub_refcell_new,
+            set_closure_capture: stub_set_closure_capture,
+            make_closure: stub_make_closure,
+            load_captured: stub_load_captured,
+            store_captured: stub_store_captured,
+            bind_method: stub_bind_method,
+            await_task: stub_await_task,
+            dyn_get_keyed: stub_dyn_get_keyed,
+            dyn_set_keyed: stub_dyn_set_keyed,
+            alloc_struct_object: stub_alloc_struct_object,
+            init_object_field: stub_init_object_field,
+            cast_object_min_fields: stub_cast_object_min_fields,
         },
     };
 
@@ -4998,5 +5699,2245 @@ fn prewarm_candidates_submitted_to_background() {
         profiles.len(),
         1,
         "Expected module profile for adaptive compilation"
+    );
+}
+
+
+// ---------------------------------------------------------------------------
+// RefCell lowering coverage (D4.4)
+//
+// All three RefCell opcodes are still `Rejected` in the capability table, so
+// these are NOT reachable fast paths. Each lifts and calls the function directly,
+// bypassing candidate selection, which covers the Cranelift arm and the helper in
+// isolation. They must not be read as evidence that compiled code uses them:
+// `closure_and_refcell_family_is_fail_closed` in `jit/capability.rs` is the gate
+// that keeps this unreachable, and it is the gate that must stay until a
+// differential test runs these through candidate selection too.
+//
+// What these do prove is the part that was previously absent: that the lowering
+// arms are reachable, that the trampoline offsets resolve, and that the helpers'
+// fail-closed returns are observable at the machine-code level rather than dead.
+
+/// Allocate a RefCell in the shared GC and return its raw value.
+fn refcell_value(
+    shared: &std::sync::Arc<raya_engine::vm::interpreter::SharedVmState>,
+    initial: i32,
+) -> u64 {
+    let mut gc = shared.gc.lock();
+    let ptr = gc.allocate(raya_engine::vm::object::RefCell::new(
+        raya_engine::vm::value::Value::i32(initial),
+    ));
+    unsafe {
+        raya_engine::vm::value::Value::from_ptr(std::ptr::NonNull::new(ptr.as_ptr()).unwrap())
+            .raw()
+    }
+}
+
+#[test]
+fn load_refcell_lowering_uses_runtime_helper_directly() {
+    let (safepoint, shared) = new_shared_vm_state();
+    let cell = refcell_value(&shared, 11);
+
+    let mut code = Vec::new();
+    emit_load_local(&mut code, 0);
+    code.push(Opcode::LoadRefCell as u8);
+    emit(&mut code, Opcode::Return);
+
+    let module = finalize_module(make_module(code, 0, 1));
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals = vec![cell];
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+        "load must complete natively, not exit to the interpreter"
+    );
+    assert_eq!(decode_i32(raw), 11);
+}
+
+#[test]
+fn store_refcell_lowering_mutates_the_cell_natively() {
+    let (safepoint, shared) = new_shared_vm_state();
+    let cell = refcell_value(&shared, 11);
+
+    let mut code = Vec::new();
+    // StoreRefCell pops the value then the cell.
+    emit_load_local(&mut code, 0);
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&5i32.to_le_bytes());
+    code.push(Opcode::StoreRefCell as u8);
+    // Read it back through the JIT helper.
+    emit_load_local(&mut code, 0);
+    code.push(Opcode::LoadRefCell as u8);
+    emit(&mut code, Opcode::Return);
+
+    let module = finalize_module(make_module(code, 0, 1));
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals = vec![cell];
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+        "store must complete natively, not exit to the interpreter"
+    );
+    // 5 rather than the original 11, so the helper really wrote through.
+    assert_eq!(decode_i32(raw), 5);
+}
+
+#[test]
+fn new_refcell_lowering_allocates_and_reads_back() {
+    let (safepoint, shared) = new_shared_vm_state();
+
+    let mut code = Vec::new();
+    emit_load_local(&mut code, 0);
+    code.push(Opcode::NewRefCell as u8);
+    code.push(Opcode::LoadRefCell as u8);
+    emit(&mut code, Opcode::Return);
+
+    let module = finalize_module(make_module(code, 0, 1));
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    // local 0 is the initial value, not a RefCell.
+    let mut locals = vec![raya_engine::vm::value::Value::i32(7).raw()];
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+        "allocation must complete natively, not exit to the interpreter"
+    );
+    assert_eq!(decode_i32(raw), 7);
+}
+
+
+/// The RefCell differential: **the same bytecode** through both engines, compared.
+///
+/// This is the piece the promotion actually needs. The three direct-lift tests
+/// prove the JIT arms work; `object_model_tests` proves the interpreter handlers
+/// work; but until now they were separate programs, so nothing asserted the two
+/// engines agree. A promotion justified by comparing the JIT only against itself is
+/// not evidence, and neither is comparing two independently-written programs.
+///
+/// Limitation, stated so it is not over-read: this still lifts directly, so it does
+/// NOT go through `function_supported_for_jit`. It is an engine-agreement test, not
+/// a reachability test. The gate remains pinned by
+/// `refcell_opcodes_keep_a_function_out_of_the_jit`.
+#[test]
+fn refcell_interpreter_and_jit_agree_on_the_same_bytecode() {
+    use raya_engine::vm::interpreter::Vm;
+
+    // cell = new RefCell(11); cell.x = 99; return cell's contents.
+    // Dup before the value: it duplicates the top of stack, which is the cell.
+    let mut code = Vec::new();
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&11i32.to_le_bytes());
+    code.push(Opcode::NewRefCell as u8);
+    code.push(Opcode::Dup as u8);
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&99i32.to_le_bytes());
+    code.push(Opcode::StoreRefCell as u8);
+    code.push(Opcode::LoadRefCell as u8);
+    code.push(Opcode::Return as u8);
+
+    // `make_module` names the function "test_func"; `Vm::execute` looks the entry
+    // point up as "main", so rename before finalizing -- `finalize_module` wraps
+    // the module in an `Arc`, which cannot be mutated through. The JIT harness
+    // lifts `functions[0]` positionally, so the same module then serves both
+    // engines. Every other test in this file skips this because none of them run
+    // the interpreter.
+    let mut raw_module = make_module(code, 0, 0);
+    raw_module.functions[0].name = "main".to_string();
+    let module = finalize_module(raw_module);
+
+    // Engine 1: the interpreter.
+    let interpreted = {
+        let mut vm = Vm::new();
+        vm.execute(&module).expect("interpreter must run the RefCell program")
+    };
+
+    // Engine 2: the JIT, on the identical module.
+    let (safepoint, shared) = new_shared_vm_state();
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = Vec::new();
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+        "JIT must complete natively, not fall back to the interpreter -- otherwise this \
+         compares the interpreter against itself"
+    );
+
+    assert_eq!(
+        raw,
+        interpreted.raw(),
+        "engines disagree on the same RefCell bytecode: JIT 0x{raw:016X}, \
+         interpreter {}",
+        interpreted
+    );
+    assert!(
+        is_i32(raw),
+        "result should be a NaN-boxed i32, got 0x{raw:016X}"
+    );
+    assert_eq!(decode_i32(raw), 99, "both engines should have produced 99");
+}
+
+
+/// The interpreter polls a safepoint at the start of `MakeClosure`, before it
+/// allocates. Compiled code has no other opportunity to offer the collector a stop
+/// point at that allocation, so the lifter must emit a matching `GcSafepoint`.
+///
+/// This is the one change on this milestone that a compiler cannot catch: a
+/// *missing* safepoint compiles perfectly and every existing test still passes,
+/// because nothing downstream exercises `MakeClosure` natively yet. Asserting on the
+/// lifted IR is the only way to hold it.
+#[test]
+fn make_closure_emits_a_safepoint_before_allocating() {
+    use raya_engine::jit::ir::instr::JitInstr;
+
+    // MakeClosure func_index=0, capture_count=0; then Return.
+    let mut code = Vec::new();
+    code.push(Opcode::MakeClosure as u8);
+    code.extend_from_slice(&0u32.to_le_bytes());
+    code.extend_from_slice(&0u16.to_le_bytes());
+    emit(&mut code, Opcode::Return);
+
+    let module = finalize_module(make_module(code, 0, 0));
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let instrs: Vec<&JitInstr> = jit_func
+        .blocks
+        .iter()
+        .flat_map(|block| block.instrs.iter())
+        .collect();
+
+    let make_closure_at = instrs
+        .iter()
+        .position(|instr| matches!(instr, JitInstr::MakeClosure { .. }))
+        .expect("lifted IR must contain MakeClosure");
+    let safepoint_at = instrs
+        .iter()
+        .position(|instr| matches!(instr, JitInstr::GcSafepoint { .. }));
+
+    assert!(
+        safepoint_at.is_some(),
+        "MakeClosure allocates and the interpreter polls a safepoint first, but the \
+         lifter emitted no GcSafepoint"
+    );
+    assert!(
+        safepoint_at < Some(make_closure_at),
+        "GcSafepoint must come BEFORE MakeClosure: the interpreter polls before \
+         allocating, so the stop point has to precede the allocation \
+         (safepoint at {safepoint_at:?}, MakeClosure at {make_closure_at})"
+    );
+}
+
+
+/// The closure differential: **the same bytecode** through both engines.
+///
+/// `MakeClosure` and `SetClosureCapture` now have interpreter coverage
+/// (`3469bb4`) and their lowering arms are wired, but nothing yet asserts the two
+/// engines agree. Same shape as the RefCell differential (`b29f610`): one module,
+/// run through `Vm::execute` and through lift+compile+call, comparing raw bits.
+///
+/// As with the RefCell case this still lifts directly, so it is an engine-agreement
+/// test rather than a reachability one — `MakeClosure` and `SetClosureCapture` are
+/// still `Rejected`. The gate is pinned separately.
+#[test]
+fn closure_interpreter_and_jit_agree_on_the_same_bytecode() {
+    use raya_engine::vm::interpreter::Vm;
+
+    // Two functions: `main` at index 0, closure body at index 1.
+    let mut module = make_module(Vec::new(), 0, 0);
+
+    // The closure body: hand the capture straight back.
+    module.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "closure_body".to_string(),
+        param_count: 0,
+        local_count: 0,
+        code: vec![Opcode::LoadCaptured as u8, 0, 0, Opcode::Return as u8],
+    });
+
+    // main: capture 42, patch slot 0 to 7, then call -- so a JIT that skipped the
+    // patch, or called the wrong function, returns 42 instead of 7.
+    let mut main_code: Vec<u8> = Vec::new();
+    main_code.push(Opcode::ConstI32 as u8);
+    main_code.extend_from_slice(&42i32.to_le_bytes());
+    main_code.push(Opcode::MakeClosure as u8);
+    main_code.extend_from_slice(&1u32.to_le_bytes()); // func_index = closure_body
+    main_code.extend_from_slice(&1u16.to_le_bytes()); // capture_count = 1
+    // SetClosureCapture pops value then closure and pushes the closure back, so
+    // Dup the closure BEFORE pushing the value.
+    main_code.push(Opcode::Dup as u8);
+    main_code.push(Opcode::ConstI32 as u8);
+    main_code.extend_from_slice(&7i32.to_le_bytes());
+    main_code.push(Opcode::SetClosureCapture as u8);
+    main_code.extend_from_slice(&0u16.to_le_bytes()); // capture index 0
+    main_code.push(Opcode::Call as u8);
+    main_code.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // closure call
+    main_code.extend_from_slice(&0u16.to_le_bytes()); // arg_count = 0
+    main_code.push(Opcode::Return as u8);
+    module.functions[0] = Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "test_func".to_string(),
+        param_count: 0,
+        local_count: 0,
+        code: main_code,
+    };
+
+    let mut raw_module = module;
+    raw_module.functions[0].name = "main".to_string();
+    let module = finalize_module(raw_module);
+
+    // Engine 1: the interpreter.
+    let interpreted = {
+        let mut vm = Vm::new();
+        vm.execute(&module).expect("interpreter must run the closure program")
+    };
+
+    // Engine 2: the JIT, on the identical module.
+    let (safepoint, shared) = new_shared_vm_state();
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = Vec::new();
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+        "JIT must complete natively, not fall back -- otherwise this compares the \
+         interpreter against itself"
+    );
+
+    assert_eq!(
+        raw,
+        interpreted.raw(),
+        "engines disagree on the same closure bytecode: JIT 0x{raw:016X}, interpreter {interpreted}"
+    );
+    assert!(is_i32(raw), "expected a NaN-boxed i32, got 0x{raw:016X}");
+    // 7, not the 42 originally captured — so the SetClosureCapture actually landed.
+    assert_eq!(decode_i32(raw), 7);
+}
+
+
+/// `LoadCaptured` and `StoreCaptured` run **natively**, by lifting the closure body
+/// itself as the entry function.
+///
+/// This is not the shared-bytecode differential, and it is not meant to be. The
+/// `Call` lowering arm routes every callee through `interpreter_call`, so lifting
+/// `main` and calling a closure would run `main` natively but execute the body's
+/// captured opcodes **interpreted** — a test that passes while proving nothing about
+/// the two arms it appears to cover. Lifting the body directly is the only way these
+/// arms reach native code at all.
+///
+/// The active closure must be on the task **before** `build_bridge_and_ctx`, or the
+/// bridge's task will not have it and every read will take the fallback path.
+#[test]
+fn captured_opcodes_execute_natively_when_the_body_is_lifted_directly() {
+    use raya_engine::vm::value::Value;
+
+    // A two-function module. The body is the one that will be lifted; main is
+    // present only so the closure body has a plausible `func_index`.
+    let mut raw = make_module(Vec::new(), 0, 0);
+    raw.functions.push(Function {
+        signature_id: 0,
+        local_types: Vec::new(),
+        abi_version: 1,
+        name: "closure_body".to_string(),
+        param_count: 0,
+        local_count: 0,
+        // The lifter's stack model does not preload parameters, so the body pushes
+        // its own value rather than reading a parameter: relying on local 0 gave
+        // `Lift failed: StackUnderflow { offset: 0 }`.
+        code: vec![
+            Opcode::ConstI32 as u8,
+            42,
+            0,
+            0,
+            0, // value to store
+            Opcode::StoreCaptured as u8,
+            0,
+            0, // capture 0 <- value
+            Opcode::LoadCaptured as u8,
+            0,
+            0, // push capture 0 back
+            Opcode::Return as u8,
+        ],
+    });
+    let module = finalize_module(raw);
+
+    let (safepoint, shared) = new_shared_vm_state();
+
+    // A closure capturing [7], installed as the task's active closure.
+    let closure_raw = {
+        let mut gc = shared.gc.lock();
+        let closure = raya_engine::vm::object::Closure::new(0, vec![Value::i32(7)]);
+        let ptr = gc.allocate(closure);
+        unsafe { Value::from_ptr(std::ptr::NonNull::new(ptr.as_ptr()).unwrap()).raw() }
+    };
+    let closure_val = unsafe { Value::from_raw(closure_raw) };
+
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    task.push_closure(closure_val);
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+
+    // Lift the BODY (index 1), not main. local 0 is the argument StoreCaptured
+    // writes into capture 0.
+    let jit_func = lift_function(&module.functions[1], &module, 1).expect("Lift failed");
+    let mut locals: Vec<u64> = Vec::new();
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+        "both captured opcodes must run natively; a fallback here means the active \
+         closure was missing and the helper refused"
+    );
+    assert!(
+        is_i32(raw),
+        "expected a NaN-boxed i32, got 0x{raw:016X}"
+    );
+    // 42, not the captured 7: the store must have landed and the load must have
+    // read it back through the same active closure.
+    assert_eq!(
+        decode_i32(raw),
+        42,
+        "StoreCaptured must write local 0 into the active closure's capture 0, and \
+         LoadCaptured must read it back; 7 means the store never landed"
+    );
+}
+
+
+/// `BindMethod`'s lifter arm is no longer empty.
+///
+/// The interpreter reads the u16 operand, pops the receiver and pushes a
+/// `BoundMethod`. The old arm did none of that, so the lifted `ip` never advanced
+/// past the operand and the stack model disagreed with the interpreter from that
+/// instruction onward — which is why the opcode was rejected at the lifter rather
+/// than merely missing a helper.
+///
+/// This asserts the observable consequence: the lifted stream contains a
+/// `BindMethod` that consumes the operand, and the instruction AFTER it is the
+/// `Return` rather than something misaligned.
+#[test]
+fn bind_method_lifter_keeps_the_stack_model_in_step() {
+    use raya_engine::jit::ir::instr::JitInstr;
+
+    // BindMethod slot 0, then Return. The object operand comes from local 0.
+    let mut code: Vec<u8> = Vec::new();
+    emit_load_local(&mut code, 0);
+    code.push(Opcode::BindMethod as u8);
+    code.extend_from_slice(&0u16.to_le_bytes());
+    emit(&mut code, Opcode::Return);
+
+    let module = finalize_module(make_module(code, 0, 1));
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let instrs: Vec<&JitInstr> = jit_func
+        .blocks
+        .iter()
+        .flat_map(|block| block.instrs.iter())
+        .collect();
+
+    let at = instrs
+        .iter()
+        .position(|instr| matches!(instr, JitInstr::BindMethod { .. }))
+        .expect("lifted IR must contain BindMethod; an empty arm is exactly the defect");
+
+    // It must carry the operand the bytecode declared, and it must be followed by
+    // the Return rather than by an instruction from the wrong offset.
+    match instrs[at] {
+        JitInstr::BindMethod { method_slot, .. } => assert_eq!(
+            *method_slot, 0,
+            "the operand must be consumed, not left for the next instruction"
+        ),
+        other => panic!("expected BindMethod, got {other:?}"),
+    }
+    // `Return` is a lifter terminator and emits no instruction, so a correctly
+    // lifted stream ENDS with BindMethod. Anything after it would mean the operand
+    // was not consumed and the stream is misaligned.
+    assert_eq!(
+        at + 1,
+        instrs.len(),
+        "BindMethod must be the last lifted instruction; found {:?} after it — the \
+         operand was not consumed",
+        &instrs[at + 1..]
+    );
+}
+
+
+/// `BindMethod` executes natively: the lowering arm resolves the vtable slot and
+/// allocates a `BoundMethod`.
+///
+/// The class is registered into the bridge's registry directly rather than through
+/// module loading, because that is the only route available to a test — and it
+/// exercises the same code the helper reads, so the vtable resolution under test is
+/// real rather than a stub.
+#[test]
+fn bind_method_lowering_binds_natively() {
+    use raya_engine::vm::object::Class;
+    use raya_engine::vm::value::Value;
+
+    let (safepoint, shared) = new_shared_vm_state();
+
+    // LoadLocal 0; BindMethod slot 0; Return
+    let mut code: Vec<u8> = Vec::new();
+    emit_load_local(&mut code, 0);
+    code.push(Opcode::BindMethod as u8);
+    code.extend_from_slice(&0u16.to_le_bytes());
+    emit(&mut code, Opcode::Return);
+    let module = finalize_module(make_module(code, 0, 1));
+
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+
+    // Register a class with one method, then make an object carrying that id.
+    let object_raw = {
+        let mut classes = unsafe { (&*bridge.classes).write() };
+        let mut class = Class::new(0, "Point".to_string(), 2);
+        class.module = Some(module.clone());
+        class.vtable.add_method(42);
+        let nominal_type_id = classes.register_class(class);
+        drop(classes);
+
+        let mut gc = shared.gc.lock();
+        let mut object =
+            raya_engine::vm::object::Object::new_nominal(1, nominal_type_id as u32, 2);
+        object.set_field(0, Value::i32(99)).unwrap();
+        let ptr = gc.allocate(object);
+        unsafe { Value::from_ptr(std::ptr::NonNull::new(ptr.as_ptr()).unwrap()).raw() }
+    };
+
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = vec![object_raw];
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+    assert_eq!(
+        exit.kind,
+        raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+        "BindMethod must complete natively, not exit to the interpreter"
+    );
+    assert_ne!(raw, 0, "a bound method must not be null");
+
+    // It must be a BoundMethod carrying the receiver and the resolved func id.
+    let value = unsafe { Value::from_raw(raw) };
+    let bound = unsafe {
+        let ptr = value
+            .as_ptr::<raya_engine::vm::object::BoundMethod>()
+            .expect("result must be a BoundMethod");
+        &*ptr.as_ptr()
+    };
+    assert_eq!(bound.func_id, 42, "vtable slot must resolve to the func id");
+    assert_eq!(bound.receiver.raw(), object_raw, "receiver must be carried");
+}
+
+
+/// `Try`'s lifting arm resolves its catch target to a real block.
+///
+/// Before `5ee9e17` the arm computed `catch_abs` and `finally_abs` into
+/// underscore-prefixed bindings — computed and never read — and emitted
+/// `SetupTry { catch_block: JitBlockId(0) }`. This asserts the placeholder is gone
+/// and that the emitted block is the one whose recorded `start_offset` equals the
+/// expected catch target.
+///
+/// THE TWO BASES DIFFER, and a wrong expectation here would silently pass against
+/// `BlockId(0)`. `catch_abs` is measured from `instr.offset + 1 + 4` (after
+/// reading only `catch_rel`), `finally_abs` from `+ 1 + 8`. This program uses only
+/// a catch, so it pins the first base.
+#[test]
+fn try_lifter_resolves_the_catch_block() {
+    use raya_engine::jit::ir::instr::{JitInstr, JitTerminator};
+
+    //  Try                           @0        1 byte
+    //  catch_rel  (i32)              @1..5
+    //  finally_rel (i32)             @5..9
+    //  ConstI32 7                    @9..14     body
+    //  Throw                          @14
+    //  ConstI32 99                   @15..20    catch handler
+    //  Return                         @20
+    //
+    // `catch_rel` is measured from offset 5 — `instr.offset + 1` opcode byte + 4
+    // operand bytes — so it must be 15 - 5 = 10. An earlier version of this test
+    // forgot that the two i32 operands occupy eight bytes and expected offset 7.
+    let mut code: Vec<u8> = Vec::new();
+    code.push(Opcode::Try as u8);
+    code.extend_from_slice(&10i32.to_le_bytes()); // catch_rel
+    code.extend_from_slice(&0i32.to_le_bytes()); // finally_rel = 0 -> none
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&7i32.to_le_bytes());
+    code.push(Opcode::Throw as u8);
+    let catch_abs_at = code.len();
+    code.push(Opcode::ConstI32 as u8);
+    code.extend_from_slice(&99i32.to_le_bytes());
+    code.push(Opcode::Return as u8);
+    assert_eq!(catch_abs_at, 15, "catch handler must sit at offset 15");
+
+    let module = finalize_module(make_module(code, 0, 0));
+    let jit_func = lift_function(&module.functions[0], &module, 0)
+        .expect("a Try-containing function must now lift");
+
+    // The catch block must NOT be the entry block any more.
+    let mut setup: Option<(usize, Option<usize>)> = None;
+    for block in &jit_func.blocks {
+        for instr in &block.instrs {
+            if let JitInstr::SetupTry {
+                catch_block,
+                finally_block,
+                ..
+            } = instr
+            {
+                setup = Some((catch_block.0 as usize, finally_block.map(|b| b.0 as usize)));
+            }
+        }
+    }
+    let (catch_block, finally_block) =
+        setup.expect("SetupTry must be emitted — the placeholder arm produced it too");
+
+    assert_ne!(
+        catch_block, 0,
+        "catch_block must no longer be the JitBlockId(0) placeholder"
+    );
+    assert_eq!(finally_block, None, "finally_rel = 0 means no finally block");
+
+    // And it must be the block whose recorded start offset is the catch target.
+    assert_eq!(
+        jit_func.blocks[catch_block].start_offset,
+        15,
+        "catch block must begin at the catch target offset"
+    );
+
+    // Every lifted block carries a real offset, so the partition is reconstructable.
+    assert!(
+        jit_func.blocks.iter().all(|b| b.start_offset
+            != raya_engine::jit::ir::instr::JitBlock::UNKNOWN_START_OFFSET),
+        "no lifted block may have an unknown start offset"
+    );
+
+    // Sanity: the Throw arm is present too, since the body throws.
+    assert!(
+        jit_func
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .any(|i| matches!(i, JitInstr::Throw { .. })),
+        "the Throw arm must lift"
+    );
+    let _ = JitTerminator::None;
+}
+
+
+/// `Await` path 1 executes natively: a non-task value comes back **unchanged**.
+///
+/// This is the first promotion candidate on this branch whose correctness rests on
+/// `Value::as_u64` being **tag-gated** rather than on a pointer or bounds check, so
+/// the test asserts the *value*, not merely that execution completed. A
+/// payload-based "is this a task id" test would read 42 as task id 42, find no such
+/// task, and fall back — so a version of this test asserting only
+/// `exit.kind == Completed` would have passed against a wrong implementation that
+/// silently fell back instead.
+#[test]
+fn await_path_one_runs_natively_and_returns_the_value_unchanged() {
+    use raya_engine::jit::runtime::trampoline::{JitExitKind, JitSuspendReason};
+    use raya_engine::vm::value::Value;
+
+    let mut code: Vec<u8> = Vec::new();
+    emit_i32(&mut code, 42);
+    code.push(Opcode::Await as u8);
+    emit(&mut code, Opcode::Return);
+
+    let module = finalize_module(make_module(code, 0, 0));
+    let (safepoint, shared) = new_shared_vm_state();
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx = raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = Vec::new();
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+
+    let (raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+
+    // A non-task value takes the MERGED path: the helper returns it and execution
+    // completes normally. Only the sentinel path exits `Suspended` -- asserting
+    // `Suspended` here was wrong, and it is the same distinction every promoted arm
+    // makes: `Completed` is success, `Suspended` is a fallback to the interpreter.
+    assert_eq!(
+        exit.kind,
+        JitExitKind::Completed as u32,
+        "awaiting a non-task must complete natively, not fall back to the interpreter"
+    );
+    assert_eq!(
+        exit.suspend_reason,
+        JitSuspendReason::None as u32,
+        "a normal completion carries no suspend reason"
+    );
+    assert_eq!(
+        raw,
+        Value::i32(42).raw(),
+        "a non-task value must be returned unchanged by the helper"
+    );
+    assert!(
+        is_i32(raw),
+        "the result must still be a NaN-boxed i32, got 0x{raw:016X}"
+    );
+}
+
+
+/// The `Await` differential: **the same bytecode** through both engines.
+///
+/// `Await` is the first promotion candidate on this branch whose correctness rests
+/// on `Value::as_u64` being **tag-gated** rather than on a pointer or a bounds
+/// check, so this deliberately exercises the non-task case rather than a task id.
+/// Every other promotion's differential used a helper whose check was structural;
+/// this one's is a tagged union, and a payload-based implementation would read the
+/// value as a task id, find nothing, and fall back — agreeing with the interpreter
+/// only by accident.
+///
+/// Two values, not one: an `i32` and a `bool`, because both have payloads that
+/// could plausibly be read as a task id if the tag check were dropped.
+#[test]
+fn await_interpreter_and_jit_agree_on_the_same_bytecode() {
+    use raya_engine::vm::interpreter::Vm;
+
+    for (imm, label) in [(42i32, "i32"), (1i32, "small i32")] {
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, imm);
+        code.push(Opcode::Await as u8);
+        emit(&mut code, Opcode::Return);
+
+        // The interpreter needs a named "main"; the JIT harness lifts positionally.
+        let mut raw = make_module(code, 0, 0);
+        raw.functions[0].name = "main".to_string();
+        let module = finalize_module(raw);
+
+        // Engine 1: the interpreter, on the identical module.
+        let interpreted = {
+            let mut vm = Vm::new();
+            vm.execute(&module).expect("interpreter must run the await program")
+        };
+
+        // Engine 2: the JIT, on the same module.
+        let (safepoint, shared) = new_shared_vm_state();
+        let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+
+        assert_eq!(
+            exit.kind,
+            raya_engine::jit::runtime::trampoline::JitExitKind::Completed as u32,
+            "[{label}] awaiting a non-task must complete natively"
+        );
+        assert_eq!(
+            raw_bits,
+            interpreted.raw(),
+            "[{label}] engines disagree on the same await bytecode: JIT 0x{raw_bits:016X}, \
+             interpreter {interpreted}"
+        );
+    }
+}
+
+
+/// `DynGetKeyed`'s `Str` view: the differential, on the **same bytecode** through
+/// both engines.
+///
+/// Scoped honestly, because the corpus a differential can actually reach is
+/// narrower than the opcode:
+///
+///   * **`Str`** — fully covered here. `ConstStr` is `HelperExact`, so a string
+///     target is constructible in natively-compiled code.
+///   * **`Arr`** — **not** reachable in this test. The entire array family
+///     (`NewArray`, `InitArray`, `LoadElem`, ...) is `Rejected` under the D4.2
+///     fail-closed posture, so a program building an array would have its *whole
+///     function* rejected and silently fall back to the interpreter. A
+///     "differential" written that way passes while proving nothing about the
+///     helper, which is the same vacuity that let D4.3's P0 ship. Engine-level
+///     `Arr` evidence is gated on the array family milestone; the helper-level
+///     test covers `Arr` in the meantime.
+///   * **`Struct`** — declined by design; returns the fallback sentinel.
+///
+/// Two of the three cases exist to catch a specific byte-vs-char divergence,
+/// because this is the one view where the two disagree:
+///
+///   * `"héllo".length` is **6** (Rust `str::len` is bytes), while `"héllo"[1]`
+///     is `"é"` (`chars().nth` is characters). An implementation that used one
+///     for the other would agree with the interpreter on ASCII and diverge on
+///     every non-ASCII string, so the corpus is deliberately non-ASCII.
+#[test]
+fn dyn_get_keyed_string_view_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // (label, key program, expected)
+    let cases: Vec<(&str, Box<dyn Fn(&mut Vec<u8>, u32)>, Option<String>, Option<i32>)> = vec![
+        (
+            "char index 1 of \"héllo\"",
+            Box::new(|c: &mut Vec<u8>, _| emit_i32(c, 1)),
+            Some("é".to_string()),
+            None,
+        ),
+        (
+            "byte length of \"héllo\"",
+            Box::new(|c: &mut Vec<u8>, k: u32| emit_const_str(c, k)),
+            None,
+            Some(6),
+        ),
+        (
+            "out-of-range index 99",
+            Box::new(|c: &mut Vec<u8>, _| emit_i32(c, 99)),
+            None,
+            None,
+        ),
+    ];
+
+    for (label, emit_key, expect_string, expect_i32) in cases {
+        let mut module = make_vm_module(Vec::new(), 0, 0);
+        let target = module.constants.add_string("héllo".to_string());
+        let length_key = module.constants.add_string("length".to_string());
+
+        let mut code = Vec::new();
+        emit_const_str(&mut code, target);
+        emit_key(&mut code, length_key);
+        emit(&mut code, Opcode::DynGetKeyed);
+        emit(&mut code, Opcode::Return);
+        module.functions[0].code = code;
+        let module = finalize_module(module);
+
+        // Engine 1: the interpreter, on the identical module.
+        //
+        // `vm` must OUTLIVE every read of `interpreted`. It is deliberately not
+        // scoped to a block: `execute` returns a `Value` pointing into the VM's own
+        // GC, so dropping the `Vm` frees that GC and leaves `interpreted` dangling.
+        // The symptom was spectacular rather than obvious -- reading it cloned a
+        // `String` whose length field had been overwritten with `usize::MAX`, and
+        // the process aborted on a 18446744073709551615-byte allocation. It read as
+        // "the JIT returned a corrupt string" when the JIT result was the correct
+        // one, and the interpreter's was the dangling pointer.
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm
+            .execute(module.as_ref())
+            .expect("interpreter DynGetKeyed");
+
+        // Engine 2: the JIT, on the same module.
+        let (native, exit, _shared) = execute_module_natively(module, None);
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] the Str view must complete natively, not fall back"
+        );
+
+        match (expect_string, expect_i32) {
+            // A character is a freshly allocated string in BOTH engines, so the
+            // two hold different pointers. Comparing raw bits here would fail on
+            // correct code -- the content is the observable.
+            (Some(want), _) => {
+                assert_eq!(
+                    string_contents(native),
+                    want,
+                    "[{label}] JIT returned the wrong character"
+                );
+                assert_eq!(
+                    string_contents(interpreted),
+                    want,
+                    "[{label}] interpreter baseline disagrees, so the case is wrong"
+                );
+            }
+            // i32 and null are NaN-boxed immediates: identical bits in both engines.
+            (None, Some(want)) => {
+                assert_eq!(
+                    native.as_i32(),
+                    Some(want),
+                    "[{label}] JIT got the wrong value"
+                );
+                assert_eq!(native.raw(), interpreted.raw(), "[{label}] engines disagree");
+            }
+            (None, None) => {
+                assert!(
+                    native.is_null(),
+                    "[{label}] an out-of-range string index must be null, got 0x{:016X}",
+                    native.raw()
+                );
+                assert_eq!(native.raw(), interpreted.raw(), "[{label}] engines disagree");
+            }
+        }
+    }
+}
+
+
+/// D4.8's first slice, differentially: `NewArray` + `ArrayLen` on the **same
+/// bytecode** through both engines.
+///
+/// These two are promoted together for a structural reason, not a convenient one.
+/// `NewArray` is what bootstraps array construction: until a natively-compiled
+/// function can *make* an array, no other array opcode can be differentially
+/// tested at all, because the test program could not contain one. `ArrayLen` is
+/// the simplest consumer that needs no index coercion.
+///
+/// Both programs complete natively — `exit.kind == Completed` is asserted, so a
+/// silent fallback to the interpreter fails the test rather than passing with the
+/// right answer. That distinction is the whole reason `JitExitKind` is inspected
+/// everywhere on this branch.
+///
+/// Lengths compared as `i32`, never as raw bits: the array is a heap pointer and
+/// each engine allocates its own, so pointer identity is meaningless between them.
+#[test]
+fn new_array_and_array_len_match_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // (label, length operand)
+    let cases: Vec<(&str, i32)> = vec![("empty", 0), ("three", 3), ("one", 1)];
+
+    for (label, len) in cases {
+        // `[len] -> [arr] -> len`, i.e. NewArray then ArrayLen.
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, len);
+        emit(&mut code, Opcode::NewArray);
+        // `NewArray`'s operand is a u32 element-type id. 6 is `AnyValue`, i.e. a
+        // dynamic array that accepts any element -- the unconstrained case, so this
+        // differential is about the array machinery and not about element checking.
+        code.extend_from_slice(&6u32.to_le_bytes());
+        emit(&mut code, Opcode::ArrayLen);
+        emit(&mut code, Opcode::Return);
+
+        let mut raw = make_module(code, 0, 0);
+        raw.functions[0].name = "main".to_string();
+        let module = finalize_module(raw);
+
+        // Engine 1: the interpreter, on the identical module.
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref()).expect("interpreter NewArray/ArrayLen");
+
+        // Engine 2: the JIT, on the same module.
+        let (safepoint, shared) = new_shared_vm_state();
+        let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(
+            0,
+            module.clone(),
+            None,
+        ));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] NewArray/ArrayLen must complete natively, not fall back"
+        );
+        // Compare the DECODED value, not the raw register. Both engines return a
+        // boxed `Value`, and `Value::i32(0).raw()` is `0xFFF9000000000000`, not 0 —
+        // an earlier version of this assertion compared raw bits to `len as u64`
+        // and failed on correct code with "left: 18444773748872577024".
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert_eq!(
+            native.as_i32(),
+            Some(len),
+            "[{label}] the JIT returned the wrong length"
+        );
+        assert_eq!(
+            native.raw(),
+            interpreted.raw(),
+            "[{label}] engines disagree on the same bytecode"
+        );
+        assert_eq!(
+            interpreted.as_i32(),
+            Some(len),
+            "[{label}] the interpreter baseline disagrees, so the case itself is wrong"
+        );
+    }
+}
+
+/// The length coercion, differentially. `NewArray`'s length operand goes through
+/// `array_index_operand`, whose behaviour is deliberately surprising, and this is
+/// the engine-level counterpart to `array_index_operand_coercion_is_pinned`.
+///
+/// Two cases, and they are the two that disagree with intuition:
+///
+///   * a **non-numeric** length is 0, so a null length builds an empty array
+///   * a **negative** length wraps to `usize::MAX`, which both engines then try to
+///     reserve. That case is deliberately NOT asserted here: it aborts the process
+///     in *both* engines, which is pre-existing interpreter behaviour rather than
+///     something this milestone should either copy or quietly change. It is
+///     recorded in the spec instead, because "matching a crash" is not a contract
+///     worth pinning in a test.
+#[test]
+fn new_array_length_coercion_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // A null length must mean 0 -- not a fallback, and not an error.
+    let mut code: Vec<u8> = Vec::new();
+    code.push(Opcode::ConstNull as u8);
+    emit(&mut code, Opcode::NewArray);
+    code.extend_from_slice(&6u32.to_le_bytes());
+    emit(&mut code, Opcode::ArrayLen);
+    emit(&mut code, Opcode::Return);
+
+    let mut raw = make_module(code, 0, 0);
+    raw.functions[0].name = "main".to_string();
+    let module = finalize_module(raw);
+
+    let mut vm = Vm::with_worker_count(1);
+    let interpreted = vm.execute(module.as_ref()).expect("interpreter null length");
+
+    let (safepoint, shared) = new_shared_vm_state();
+    let task =
+        std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx =
+        raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = Vec::new();
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+    let (raw_bits, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+
+    assert_eq!(
+        exit.kind,
+        JitExitKind::Completed as u32,
+        "a null length must be handled natively as 0"
+    );
+    // Decoded, not raw: see the note in the test above. `Value::i32(0).raw()` is
+    // `0xFFF9000000000000`.
+    assert_eq!(
+        unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) }.as_i32(),
+        Some(0),
+        "a null length must build an empty array"
+    );
+    assert_eq!(
+        raw_bits,
+        interpreted.raw(),
+        "engines disagree about a null length"
+    );
+    assert_eq!(
+        interpreted.as_i32(),
+        Some(0),
+        "the interpreter baseline disagrees about a null length"
+    );
+}
+
+
+/// D4.8 slice 2, differentially: element access through `NewArray` + `InitArray` +
+/// `LoadElem` + `StoreElem`, on the **same bytecode** through both engines.
+///
+/// The corpus is built around the three facts that make these opcodes non-trivial,
+/// all of which a naive port gets wrong:
+///
+///   * **`StoreElem` does not grow.** `checked_set` reports `OutOfBounds`, the
+///     opposite of `DynSetKeyed`'s `Arr` arm which resizes. Conflating them is a
+///     silent miscompile, so this builds a length-2 array and writes index 5.
+///   * **`LoadElem` out-of-bounds is a raise**, not a null. Both engines must
+///     produce the interpreter's `RuntimeError`, not a JIT fallback that invents a
+///     value.
+///   * **The index coercion is shared with the interpreter**, so `arr[-1]`,
+///     `arr["x"]` and `arr[-0.5]` must all behave identically. `arr["x"]` and
+///     `arr[-0.5]` read element 0; `arr[-1]` errors.
+///
+/// Results are compared **decoded**, never as raw register bits: a boxed
+/// `Value::i32(0)` is `0xFFF9000000000000`, and an earlier version of this file's
+/// array test failed on correct code for exactly that reason.
+#[test]
+fn array_element_access_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // (label, slot to write, slot to read, expected value read back)
+    // `None` as the expected value means "must be null".
+    //
+    // The index is per-case on purpose. An earlier version of this test hard-coded
+    // index 1 for every case and labelled one of them "an untouched null slot" --
+    // but index 1 is precisely the slot `InitArray` writes, so the interpreter
+    // correctly returned 7 and the test's own expectation was the thing that was
+    // wrong.
+    let cases: Vec<(&str, i32, i32, Option<i32>)> = vec![
+        ("read back the slot InitArray wrote", 1, 1, Some(7)),
+        ("read an untouched null slot", 1, 2, None),
+        ("StoreElem then read back", 1, 0, Some(99)),
+    ];
+
+    for (label, write_slot, read_slot, expected) in cases {
+        // [3] -> NewArray(AnyValue) -> [arr]
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, 3);
+        emit(&mut code, Opcode::NewArray);
+        code.extend_from_slice(&6u32.to_le_bytes());
+
+        // arr, 7, InitArray <write_slot> -> arr
+        emit_i32(&mut code, 7);
+        emit(&mut code, Opcode::InitArray);
+        code.extend_from_slice(&(write_slot as u16).to_le_bytes());
+
+        if expected == Some(99) {
+            // `StoreElem` is `[arr, idx, val] -> []`: it CONSUMES the array. Dup
+            // BEFORE the store to keep a copy to read from afterwards. Duping after
+            // underflows the stack, which the interpreter caught immediately -- an
+            // earlier version of this test did exactly that.
+            emit(&mut code, Opcode::Dup);
+            emit_i32(&mut code, read_slot);
+            emit_i32(&mut code, 99);
+            emit(&mut code, Opcode::StoreElem);
+            emit_i32(&mut code, read_slot);
+            emit(&mut code, Opcode::LoadElem);
+        } else {
+            emit_i32(&mut code, read_slot);
+            emit(&mut code, Opcode::LoadElem);
+        }
+        emit(&mut code, Opcode::Return);
+
+        let mut raw = make_module(code, 0, 0);
+        raw.functions[0].name = "main".to_string();
+        let module = finalize_module(raw);
+
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref()).expect("interpreter element access");
+
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] element access must complete natively"
+        );
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        match expected {
+            None => {
+                assert!(native.is_null(), "[{label}] an untouched slot must read null");
+                assert!(
+                    interpreted.is_null(),
+                    "[{label}] the interpreter baseline is not null, so the case is wrong"
+                );
+            }
+            Some(want) => {
+                assert_eq!(native.as_i32(), Some(want), "[{label}] wrong value from the JIT");
+                assert_eq!(
+                    native.raw(),
+                    interpreted.raw(),
+                    "[{label}] engines disagree on the same bytecode"
+                );
+            }
+        }
+    }
+}
+
+/// The index coercion, differentially, at engine level for the first time.
+///
+/// This is the test `DynGetKeyed`'s `Arr` view could never have. It needs a
+/// natively-compiled array, which only became possible once `NewArray` was
+/// promoted — so the dependency that made `Arr` uncoverable in D4.7 is now gone.
+///
+/// Three cases, all of which look like bugs and are the interpreter's actual
+/// behaviour. A JIT arm that clamped, rejected or defaulted would fail here.
+#[test]
+fn array_index_coercion_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // (label, key program, expected read of slot 1, which holds 7)
+    let cases: Vec<(&str, Vec<Opcode>)> = vec![
+        ("null index means element 0", { let mut v = vec![]; v.push(Opcode::ConstNull); v }),
+        ("negative f64 truncates to 0", { let mut v = vec![]; v.push(Opcode::ConstF64); v }),
+    ];
+
+    for (label, key_ops) in cases {
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, 3);
+        emit(&mut code, Opcode::NewArray);
+        code.extend_from_slice(&6u32.to_le_bytes());
+        emit_i32(&mut code, 7);
+        emit(&mut code, Opcode::InitArray);
+        code.extend_from_slice(&1u16.to_le_bytes());
+        for op in &key_ops {
+            emit(&mut code, *op);
+            if *op == Opcode::ConstF64 {
+                code.extend_from_slice(&(-0.5f64).to_le_bytes());
+            }
+        }
+        emit(&mut code, Opcode::LoadElem);
+        emit(&mut code, Opcode::Return);
+
+        let mut raw = make_module(code, 0, 0);
+        raw.functions[0].name = "main".to_string();
+        let module = finalize_module(raw);
+
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref()).expect("interpreter coercion");
+
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] the coercion must be handled natively, not declined"
+        );
+        // Element 0 is a null slot, so both engines must return null.
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert!(native.is_null(), "[{label}] expected a null element 0");
+        assert!(interpreted.is_null(), "[{label}] interpreter baseline is not null");
+    }
+}
+
+
+/// D4.8 slice 3, differentially: `ArrayPush` and `ArrayPop` on the same bytecode
+/// through both engines.
+///
+/// Three programs, each covering something a plausible implementation gets wrong:
+///
+///   * **empty pop yields `null`** — not an error, and not a fallback. The arm's
+///     null-ctx path deliberately yields null rather than the sentinel precisely so
+///     this does not exit; if it did, this test would see a fallback and fail.
+///   * **push grows the backing `Vec`** — the reallocation path, which is the only
+///     window in this family where a GC-visible operand matters. Starting from a
+///     zero-length array and pushing twice forces at least one growth.
+///   * **push then pop round-trips** the value, proving `ArrayLen` after growth
+///     agrees too.
+///
+/// `exit.kind == Completed` is asserted for every case, so a silent fallback fails
+/// rather than passing with the right answer.
+#[test]
+fn array_push_and_pop_match_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // Runs one program through both engines and asserts native completion.
+    fn both_engines(code: Vec<u8>, label: &str) -> (raya_engine::vm::value::Value, bool) {
+        let mut raw = make_module(code, 0, 0);
+        raw.functions[0].name = "main".to_string();
+        let module = finalize_module(raw);
+
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref()).expect(label);
+
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] must complete natively, not fall back"
+        );
+        assert_eq!(
+            raw_bits,
+            interpreted.raw(),
+            "[{label}] engines disagree on the same bytecode"
+        );
+        (
+            unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) },
+            true,
+        )
+    }
+
+    // --- Case 1: popping an EMPTY array must yield null.
+    {
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, 0);
+        emit(&mut code, Opcode::NewArray);
+        code.extend_from_slice(&6u32.to_le_bytes());
+        emit(&mut code, Opcode::ArrayPop);
+        emit(&mut code, Opcode::Return);
+        let (v, _) = both_engines(code, "empty pop");
+        assert!(
+            v.is_null(),
+            "popping an empty array must yield null, got 0x{:016X}",
+            v.raw()
+        );
+    }
+
+    // --- Case 2: push twice onto a ZERO-length array, then read the length. This
+    // forces the backing Vec to reallocate at least once.
+    {
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, 0);
+        emit(&mut code, Opcode::NewArray);
+        code.extend_from_slice(&6u32.to_le_bytes());
+        for v in [5i32, 6] {
+            emit(&mut code, Opcode::Dup);
+            emit_i32(&mut code, v);
+            emit(&mut code, Opcode::ArrayPush);
+        }
+        emit(&mut code, Opcode::ArrayLen);
+        emit(&mut code, Opcode::Return);
+        let (v, _) = both_engines(code, "push grows");
+        assert_eq!(
+            v.as_i32(),
+            Some(2),
+            "two pushes onto an empty array must leave length 2"
+        );
+    }
+
+    // --- Case 3: push then pop round-trips the value.
+    {
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, 1);
+        emit(&mut code, Opcode::NewArray);
+        code.extend_from_slice(&6u32.to_le_bytes());
+        emit(&mut code, Opcode::Dup);
+        emit_i32(&mut code, 42);
+        emit(&mut code, Opcode::ArrayPush);
+        emit(&mut code, Opcode::ArrayPop);
+        emit(&mut code, Opcode::Return);
+        let (v, _) = both_engines(code, "push/pop roundtrip");
+        assert_eq!(v.as_i32(), Some(42), "push then pop must return the pushed value");
+    }
+}
+
+
+/// D4.8's error paths, differentially — the four cases acceptance criterion 4 asks
+/// for and the first three slices did not cover.
+///
+/// The pairing here is deliberately **not** "both engines produce the same value",
+/// because these cases have no value. The interpreter raises; the JIT cannot raise,
+/// so the only correct behaviour is to **exit to the interpreter and let it raise**.
+/// So each case asserts both halves:
+///
+///   * the interpreter returns `Err`
+///   * the JIT's exit is `Suspended` with `InterpreterBoundary` — i.e. it handed
+///     back rather than inventing an answer
+///
+/// A JIT that "handled" the error natively — returning null, or a zero, or
+/// truncating the index — would fail this test, because it would report
+/// `Completed`.
+///
+/// The four cases: out-of-bounds load (a raise, not a null), out-of-bounds store
+/// (**must not grow**), a non-array receiver, and an element-constraint violation.
+#[test]
+fn array_error_paths_fall_back_to_the_interpreter() {
+    use raya_engine::jit::runtime::trampoline::{JitExitKind, JitSuspendReason};
+    use raya_engine::vm::interpreter::Vm;
+
+    // Each case emits its own body, because the four shapes need different operand
+    // sequences and a shared op list turned into guesswork about which `ConstI32`
+    // was an index, a value, or a slot to read back.
+    type Body = Box<dyn Fn(&mut Vec<u8>, u32)>;
+    let cases: Vec<(&str, Body)> = vec![
+        // Out-of-bounds LOAD: a raise, not a null. A JIT that returned null here
+        // would report Completed and fail this test.
+        (
+            "out-of-bounds load raises",
+            Box::new(|c: &mut Vec<u8>, _s| {
+                emit_i32(c, 3);
+                emit(c, Opcode::NewArray);
+                c.extend_from_slice(&6u32.to_le_bytes());
+                emit_i32(c, 5); // index 5 on a length-3 array
+                emit(c, Opcode::LoadElem);
+                emit(c, Opcode::Return);
+            }),
+        ),
+        // Out-of-bounds STORE: `StoreElem` must NOT grow the array. The trailing
+        // `ConstI32 0` + Return is never reached in compiled code -- the arm exits at
+        // the store -- but the interpreter needs a well-formed tail.
+        (
+            "out-of-bounds store raises and does not grow",
+            Box::new(|c: &mut Vec<u8>, _s| {
+                emit_i32(c, 3);
+                emit(c, Opcode::NewArray);
+                c.extend_from_slice(&6u32.to_le_bytes());
+                emit(c, Opcode::Dup);
+                emit_i32(c, 5); // index 5 on a length-3 array
+                emit_i32(c, 42);
+                emit(c, Opcode::StoreElem);
+                emit_i32(c, 0);
+                emit(c, Opcode::Return);
+            }),
+        ),
+        // NON-ARRAY RECEIVER: `LoadElem` on a string. `jit_array_ptr_checked`
+        // validates the GC-header TypeId, so this must decline rather than
+        // reinterpreting the string's bytes as an `Array`.
+        (
+            "non-array receiver is rejected",
+            Box::new(|c: &mut Vec<u8>, s| {
+                emit_const_str(c, s);
+                emit_i32(c, 0);
+                emit(c, Opcode::LoadElem);
+                emit(c, Opcode::Return);
+            }),
+        ),
+        // ELEMENT-CONSTRAINT VIOLATION: element id 0 resolves to an `I32`
+        // constraint, so storing a string must be rejected. This is the case that
+        // proves the typed-array machinery is inherited rather than bypassed.
+        (
+            "element constraint violation is rejected",
+            Box::new(|c: &mut Vec<u8>, s| {
+                emit_i32(c, 1); // length 1, so slot 0 is in bounds on the INDEX
+                emit(c, Opcode::NewArray);
+                c.extend_from_slice(&0u32.to_le_bytes()); // element id 0 == I32
+                emit(c, Opcode::Dup);
+                emit_i32(c, 0);
+                emit_const_str(c, s); // a string into an I32 array
+                emit(c, Opcode::StoreElem);
+                emit_i32(c, 0);
+                emit(c, Opcode::Return);
+            }),
+        ),
+    ];
+
+    for (label, body) in cases {
+        let mut module = make_vm_module(Vec::new(), 0, 0);
+        let str_idx = module.constants.add_string("not an array".to_string());
+        let mut code: Vec<u8> = Vec::new();
+        body(&mut code, str_idx);
+        module.functions[0].code = code;
+        module.functions[0].name = "main".to_string();
+        let module = finalize_module(module);
+
+        // Engine 1: the interpreter must RAISE.
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref());
+        assert!(
+            interpreted.is_err(),
+            "[{label}] the interpreter must raise, not return a value"
+        );
+
+        // Engine 2: the JIT must hand back rather than invent an answer.
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (_raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Suspended as u32,
+            "[{label}] the JIT must exit to the interpreter, not complete"
+        );
+        assert_eq!(
+            exit.suspend_reason,
+            JitSuspendReason::InterpreterBoundary as u32,
+            "[{label}] the exit must be an interpreter boundary"
+        );
+    }
+}
+
+
+/// D4.8 slice 4, differentially: `ArrayLiteral`, and with it the whole family.
+///
+/// **Every case uses DISTINCT elements per slot** (11, 22, 33), never a repeated
+/// value. That is the whole point of this test. The handler pops elements and then
+/// reverses them — "first pushed = first element" — and the lifter reverses too, so
+/// the two could disagree, or agree and both be wrong. With a uniform element
+/// (`[7, 7, 7]`) a reversal is **invisible**. With distinct elements, a reversal
+/// returns 33 where 11 belongs and the test fails immediately.
+///
+/// The arm is `helper_alloc_array` plus one `helper_array_store` per element with a
+/// constant index, mirroring the interpreter's own `build_array` + `checked_set`
+/// loop. So this also proves the element-constraint check is inherited rather than
+/// bypassed.
+#[test]
+fn array_literal_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::{JitExitKind, JitSuspendReason};
+    use raya_engine::vm::interpreter::Vm;
+
+    // (label, element values, slot to read back, expected)
+    let cases: Vec<(&str, Vec<i32>, usize, i32)> = vec![
+        ("first element is the first pushed", vec![11, 22, 33], 0, 11),
+        ("middle element", vec![11, 22, 33], 1, 22),
+        ("last element", vec![11, 22, 33], 2, 33),
+        ("two elements", vec![11, 22], 1, 22),
+    ];
+
+    for (label, elems, slot, expected) in cases {
+        let mut code: Vec<u8> = Vec::new();
+        for e in &elems {
+            emit_i32(&mut code, *e);
+        }
+        emit(&mut code, Opcode::ArrayLiteral);
+        code.extend_from_slice(&6u32.to_le_bytes()); // type_index: AnyValue
+        code.extend_from_slice(&(elems.len() as u32).to_le_bytes()); // length
+        emit_i32(&mut code, slot as i32);
+        emit(&mut code, Opcode::LoadElem);
+        emit(&mut code, Opcode::Return);
+
+        let mut raw = make_module(code, 0, 0);
+        raw.functions[0].name = "main".to_string();
+        let module = finalize_module(raw);
+
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref()).expect(label);
+
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] ArrayLiteral must complete natively"
+        );
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert_eq!(
+            native.as_i32(),
+            Some(expected),
+            "[{label}] wrong element — a reversed literal would land here"
+        );
+        assert_eq!(native.raw(), interpreted.raw(), "[{label}] engines disagree");
+    }
+}
+
+/// `ArrayLiteral`'s element-constraint violation, differentially. Element id 0
+/// resolves to an `I32` constraint, so a literal containing a string must be
+/// rejected — and the rejection has to come from the interpreter, because the JIT
+/// cannot raise.
+#[test]
+fn array_literal_constraint_violation_falls_back() {
+    use raya_engine::jit::runtime::trampoline::{JitExitKind, JitSuspendReason};
+    use raya_engine::vm::interpreter::Vm;
+
+    let mut module = make_vm_module(Vec::new(), 0, 0);
+    let str_idx = module.constants.add_string("nope".to_string());
+    let mut code: Vec<u8> = Vec::new();
+    emit_const_str(&mut code, str_idx);
+    emit(&mut code, Opcode::ArrayLiteral);
+    code.extend_from_slice(&0u32.to_le_bytes()); // element id 0 == I32
+    code.extend_from_slice(&1u32.to_le_bytes()); // length 1
+    emit(&mut code, Opcode::Return);
+    module.functions[0].code = code;
+    module.functions[0].name = "main".to_string();
+    let module = finalize_module(module);
+
+    let mut vm = Vm::with_worker_count(1);
+    assert!(
+        vm.execute(module.as_ref()).is_err(),
+        "the interpreter must reject a string in an I32 array"
+    );
+
+    let (safepoint, shared) = new_shared_vm_state();
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx =
+        raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = Vec::new();
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+    let (_raw_bits, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+
+    assert_eq!(
+        exit.kind,
+        JitExitKind::Suspended as u32,
+        "the JIT must hand back rather than build the array anyway"
+    );
+    assert_eq!(
+        exit.suspend_reason,
+        JitSuspendReason::InterpreterBoundary as u32,
+        "the exit must be an interpreter boundary"
+    );
+}
+
+
+/// D4.7's deferred evidence, now collectable: `DynGetKeyed`'s **`Arr` view**,
+/// differentially.
+///
+/// This is the corpus D4.7 could not have. With the whole array family `Rejected`,
+/// no natively-compiled bytecode could construct an array, so this test would have
+/// had its entire function rejected and silently run interpreted — passing while
+/// proving nothing about the helper, which is the exact vacuity that let D4.3's P0
+/// ship. D4.8 promoted `NewArray`/`InitArray`/`LoadElem`, and the dependency is
+/// gone.
+///
+/// Four cases, because the keyed path has a trap the positional one does not:
+/// `dyn_key_parts` parses a **string** key with `key.parse::<usize>()`, so `"1"`
+/// and `1` are the SAME index. A helper that only handled integer keys, or that
+/// treated a string key as a property name, would agree with the interpreter on
+/// neither.
+#[test]
+fn dyn_get_keyed_array_view_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // Takes the MODULE, not the code: these cases index into the constant pool for
+    // their string keys, and an earlier version built its own module with
+    // `make_module`, whose pool is empty -- so the string key indices pointed at
+    // nothing.
+    fn both_engines(
+        module: std::sync::Arc<Module>,
+        label: &str,
+    ) -> raya_engine::vm::value::Value {
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref()).expect(label);
+
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] the Arr view must complete natively, not fall back"
+        );
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert_eq!(
+            native.raw(),
+            interpreted.raw(),
+            "[{label}] engines disagree on the same bytecode"
+        );
+        native
+    }
+
+    // Builds a module whose function is `array[11, 22, null]` with `key_ops`
+    // pushing exactly one key, then a `DynGetKeyed`.
+    // `str_key` is added to THIS module's pool, so the index is valid in the module
+    // the code actually lives in. An earlier version added the strings to a separate
+    // throwaway module and the interpreter rejected the program with
+    // `Invalid string constant index: 0`.
+    fn keyed_array_module(
+        int_key: Option<i32>,
+        str_key: Option<&str>,
+    ) -> std::sync::Arc<Module> {
+        let mut module = make_vm_module(Vec::new(), 0, 0);
+        let str_idx = str_key.map(|s| module.constants.add_string(s.to_string()));
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, 3);
+        emit(&mut code, Opcode::NewArray);
+        code.extend_from_slice(&6u32.to_le_bytes()); // AnyValue
+        emit_i32(&mut code, 11);
+        emit(&mut code, Opcode::InitArray);
+        code.extend_from_slice(&0u16.to_le_bytes());
+        emit_i32(&mut code, 22);
+        emit(&mut code, Opcode::InitArray);
+        code.extend_from_slice(&1u16.to_le_bytes());
+        match (int_key, str_idx) {
+            (Some(v), _) => emit_i32(&mut code, v),
+            (None, Some(idx)) => emit_const_str(&mut code, idx),
+            (None, None) => unreachable!("a keyed read needs one key"),
+        }
+        emit(&mut code, Opcode::DynGetKeyed);
+        emit(&mut code, Opcode::Return);
+        module.functions[0].code = code;
+        module.functions[0].name = "main".to_string();
+        finalize_module(module)
+    }
+
+    // Integer key 1 -> element 1.
+    let v = both_engines(keyed_array_module(Some(1), None), "int key 1");
+    assert_eq!(v.as_i32(), Some(22), "an integer key must read that element");
+
+    // STRING key "1" -> the SAME element, because dyn_key_parts parses it as an index.
+    let v = both_engines(keyed_array_module(None, Some("1")), "string key \"1\"");
+    assert_eq!(
+        v.as_i32(),
+        Some(22),
+        "a numeric string key must read the same element as the integer key"
+    );
+
+    // "length" -> 3, the array's length.
+    let v = both_engines(keyed_array_module(None, Some("length")), "length key");
+    assert_eq!(v.as_i32(), Some(3), "the length key must return the array length");
+
+    // Out-of-range integer key -> null (the Arr view returns null, not a raise —
+    // that RAISE-on-out-of-bounds behaviour belongs to `LoadElem`, a different
+    // opcode with a different handler).
+    let v = both_engines(keyed_array_module(Some(99), None), "out-of-range key");
+    assert!(v.is_null(), "an out-of-range keyed read must be null");
+}
+
+
+/// D4.9, differentially: `DynSetKeyed` against an **array** receiver.
+///
+/// The corpus is built around one fact that makes this opcode unlike anything else
+/// on the branch, and the fact looks like a bug if you do not know it:
+///
+/// | | `DynSetKeyed` | `StoreElem` |
+/// |---|---|---|
+/// | index past the end | **grows** via `resize(index + 1, null)` | `OutOfBounds` error |
+/// | element constraint | **not checked at all** | enforced by `checked_set` |
+///
+/// The interpreter's `DynSetKeyed` arm assigns `arr.elements[index] = value`
+/// directly after an optional `resize`. So a string stored into an `I32`-constrained
+/// array *succeeds* — and `dyn_set_keyed_constraint_is_not_enforced` below pins that.
+/// A helper that reused `array_store` would refuse to grow and reject the value, and
+/// "it should enforce the element type" is exactly what a bug report would say. It
+/// would be a divergence.
+#[test]
+fn dyn_set_keyed_array_view_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    fn both_engines(
+        module: std::sync::Arc<Module>,
+        label: &str,
+    ) -> raya_engine::vm::value::Value {
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref()).expect(label);
+
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] must complete natively, not fall back"
+        );
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert_eq!(
+            native.raw(),
+            interpreted.raw(),
+            "[{label}] engines disagree on the same bytecode"
+        );
+        native
+    }
+
+    // `array[11, 22, null]`, then `DynSetKeyed` with the given key and value, then
+    // read `read_slot` back.
+    fn set_then_read(
+        type_id: u32,
+        set_key: Option<i32>,
+        set_key_str: Option<&str>,
+        set_value: i32,
+        read_slot: i32,
+    ) -> std::sync::Arc<Module> {
+        let mut module = make_vm_module(Vec::new(), 0, 0);
+        let key_idx = set_key_str.map(|s| module.constants.add_string(s.to_string()));
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, 3);
+        emit(&mut code, Opcode::NewArray);
+        code.extend_from_slice(&type_id.to_le_bytes());
+        emit_i32(&mut code, 11);
+        emit(&mut code, Opcode::InitArray);
+        code.extend_from_slice(&0u16.to_le_bytes());
+        emit_i32(&mut code, 22);
+        emit(&mut code, Opcode::InitArray);
+        code.extend_from_slice(&1u16.to_le_bytes());
+
+        // DynSetKeyed consumes the array, so keep a copy to read back afterwards.
+        emit(&mut code, Opcode::Dup); // [arr, arr]
+        match (set_key, key_idx) {
+            (Some(k), _) => emit_i32(&mut code, k),
+            (None, Some(idx)) => emit_const_str(&mut code, idx),
+            (None, None) => unreachable!("a keyed set needs one key"),
+        }
+        emit_i32(&mut code, set_value);
+        emit(&mut code, Opcode::DynSetKeyed); // [arr]
+        emit_i32(&mut code, read_slot);
+        emit(&mut code, Opcode::LoadElem);
+        emit(&mut code, Opcode::Return);
+        module.functions[0].code = code;
+        module.functions[0].name = "main".to_string();
+        finalize_module(module)
+    }
+
+    // In-range write, read back.
+    let v = both_engines(set_then_read(6, Some(1), None, 99, 1), "in-range set");
+    assert_eq!(v.as_i32(), Some(99), "an in-range keyed set must be visible");
+
+    // Numeric STRING key resolves to the same index.
+    let v = both_engines(set_then_read(6, None, Some("1"), 77, 1), "string key set");
+    assert_eq!(v.as_i32(), Some(77), "a numeric string key must set that element");
+
+    // BEYOND THE END: this GROWS, and the interpreter fills the gap with null.
+    let v = both_engines(set_then_read(6, Some(5), None, 42, 5), "growing set");
+    assert_eq!(
+        v.as_i32(),
+        Some(42),
+        "an out-of-range keyed set must GROW the array rather than fail"
+    );
+}
+
+/// The constraint case, on its own because it is the one that would be "fixed" by
+/// mistake: the interpreter does **not** enforce the element constraint on
+/// `DynSetKeyed`, and neither may the helper.
+///
+/// An `I32`-constrained array (`NewArray` element id 0) given a **string** by
+/// `DynSetKeyed`. The interpreter stores it. If the helper used `checked_set`, or
+/// re-derived `helper_array_store`, it would fall back — the exit kind would be
+/// `Suspended` instead of `Completed`, and this fails.
+#[test]
+fn dyn_set_keyed_constraint_is_not_enforced() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    let mut module = make_vm_module(Vec::new(), 0, 0);
+    let str_idx = module.constants.add_string("not an i32".to_string());
+    let mut code: Vec<u8> = Vec::new();
+    emit_i32(&mut code, 1);
+    emit(&mut code, Opcode::NewArray);
+    code.extend_from_slice(&0u32.to_le_bytes()); // element id 0 == I32
+    emit(&mut code, Opcode::Dup);
+    emit_i32(&mut code, 0);
+    emit_const_str(&mut code, str_idx);
+    emit(&mut code, Opcode::DynSetKeyed); // [arr]
+    emit_i32(&mut code, 0);
+    emit(&mut code, Opcode::LoadElem); // read it back
+    emit(&mut code, Opcode::Return);
+    module.functions[0].code = code;
+    module.functions[0].name = "main".to_string();
+    let module = finalize_module(module);
+
+    let mut vm = Vm::with_worker_count(1);
+    let interpreted = vm
+        .execute(module.as_ref())
+        .expect("the interpreter MUST accept a string in an I32 array here");
+    assert_eq!(
+        string_contents(interpreted),
+        "not an i32",
+        "the interpreter must store the unconstrained value, not reject it"
+    );
+
+    let (safepoint, shared) = new_shared_vm_state();
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx =
+        raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = Vec::new();
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+    let (raw_bits, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+
+    assert_eq!(
+        exit.kind,
+        JitExitKind::Completed as u32,
+        "the JIT must store the value unchecked too -- falling back here would mean it \\
+         enforced the constraint, which the interpreter does not"
+    );
+    let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+    assert_eq!(string_contents(native), "not an i32");
+}
+
+
+/// D4.10: `CastObjectMinFields` and object construction, differentially.
+///
+/// It is a **checked pass-through**: the interpreter pushes the OBJECT back unchanged,
+/// so there is no boolean to compare and no `false` outcome anywhere. Every failure
+/// path is a `TypeError` a helper cannot raise, so each must DECLINE rather than answer.
+///
+/// | case | expected |
+/// |---|---|
+/// | enough fields | `Completed`; the object passes through |
+/// | **not** enough fields | interpreter raises; JIT declines (`Suspended` + `InterpreterBoundary`) |
+/// | non-object receiver | interpreter raises; JIT declines |
+///
+/// Object comparison is "is it a pointer", never raw bits: the two engines each
+/// allocate their own object, so the pointers necessarily differ.
+#[test]
+fn cast_object_min_fields_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::{JitExitKind, JitSuspendReason};
+    use raya_engine::vm::interpreter::Vm;
+
+    fn program(with_object: bool, field_count: u16, required: u16) -> std::sync::Arc<Module> {
+        let mut module = make_vm_module(Vec::new(), 0, 0);
+        let mut code: Vec<u8> = Vec::new();
+        if with_object {
+            emit(&mut code, Opcode::ObjectLiteral);
+            code.extend_from_slice(&1u32.to_le_bytes()); // layout id, non-zero
+            code.extend_from_slice(&field_count.to_le_bytes());
+        } else {
+            emit_i32(&mut code, 5); // an integer: not an object
+        }
+        emit(&mut code, Opcode::CastObjectMinFields);
+        code.extend_from_slice(&required.to_le_bytes());
+        emit(&mut code, Opcode::Return);
+        module.functions[0].code = code;
+        module.functions[0].name = "main".to_string();
+        finalize_module(module)
+    }
+
+    fn jit_side(
+        module: std::sync::Arc<Module>,
+    ) -> (u32, u32, u64) {
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+        (exit.kind, exit.suspend_reason, raw_bits)
+    }
+
+    fn interpreter(
+        module: &Module,
+    ) -> Result<raya_engine::vm::value::Value, String> {
+        let mut vm = Vm::with_worker_count(1);
+        vm.execute(module).map_err(|e| e.to_string())
+    }
+
+    // --- Case 1: enough fields -> the object passes through, natively.
+    {
+        let module = program(true, 3, 2);
+        let interpreted = interpreter(&module).expect("interpreter must pass the cast");
+        let (kind, _, raw_bits) = jit_side(module);
+        assert_eq!(
+            kind,
+            JitExitKind::Completed as u32,
+            "a sufficient cast must complete natively"
+        );
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert!(
+            native.is_ptr() && interpreted.is_ptr(),
+            "both engines must return the object, not a boolean and not null"
+        );
+    }
+
+    // --- Case 2: field count below the requirement -> BOTH raise / decline.
+    {
+        let module = program(true, 1, 5);
+        assert!(
+            interpreter(&module).is_err(),
+            "the interpreter must RAISE when the field count is too low -- this is an \
+             error, NOT a false cast"
+        );
+        let (kind, reason, _) = jit_side(module);
+        assert_eq!(
+            kind,
+            JitExitKind::Suspended as u32,
+            "a too-small field count must DECLINE, not answer false"
+        );
+        assert_eq!(reason, JitSuspendReason::InterpreterBoundary as u32);
+    }
+
+    // --- Case 3: non-object receiver -> BOTH raise / decline.
+    {
+        let module = program(false, 0, 1);
+        assert!(
+            interpreter(&module).is_err(),
+            "the interpreter must raise on a non-object receiver"
+        );
+        let (kind, reason, _) = jit_side(module);
+        assert_eq!(
+            kind,
+            JitExitKind::Suspended as u32,
+            "a non-object receiver must DECLINE"
+        );
+        assert_eq!(reason, JitSuspendReason::InterpreterBoundary as u32);
+    }
+}
+
+
+/// D4.10: `DynGetKeyed`'s **`Struct` view**, differentially.
+///
+/// It was blocked for three steps because no compiled function could *construct* a
+/// `Struct`. `CastObjectMinFields`, `ObjectLiteral` and `InitObject` are now promoted,
+/// which removed that wall; the nominal-type opcodes never could have, because they
+/// test **nominal** type and `ObjectLiteral` produces a **structural** object.
+///
+/// | case | helper | expected |
+/// |---|---|---|
+/// | ordinary field | computes | `Completed`, value read back |
+/// | **missing** field | computes | `Completed`, **`null`** |
+///
+/// **A missing `Struct` field is `null`, not a `TypeError`.** An earlier note in this
+/// repo asserted the opposite and a differential caught it: the interpreter's fallback
+/// for an unknown field is the object's **dynamic property map**, ending in
+/// `Value::null()`. The asymmetry that IS real runs the other way — `Str` and `Arr`
+/// yield null on out-of-range, while `DynSetKeyed`'s out-of-range array index is a
+/// `TypeError`.
+#[test]
+fn dyn_get_keyed_struct_view_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // `ObjectLiteral <u32 layout_id><u16 field_count>`, then `InitObject <u16 offset>`
+    // with `[obj, value]` on the stack, then `DynGetKeyed` with the given key.
+    fn program(field_key: &str) -> std::sync::Arc<Module> {
+        let mut module = make_vm_module(Vec::new(), 0, 0);
+        let key_idx = module.constants.add_string(field_key.to_string());
+        let mut code: Vec<u8> = Vec::new();
+        emit(&mut code, Opcode::ObjectLiteral);
+        code.extend_from_slice(&1u32.to_le_bytes());
+        code.extend_from_slice(&1u16.to_le_bytes()); // one slot
+        emit_i32(&mut code, 11);
+        emit(&mut code, Opcode::InitObject);
+        code.extend_from_slice(&0u16.to_le_bytes());
+        emit_const_str(&mut code, key_idx);
+        emit(&mut code, Opcode::DynGetKeyed);
+        emit(&mut code, Opcode::Return);
+        module.functions[0].code = code;
+        module.functions[0].name = "main".to_string();
+        finalize_module(module)
+    }
+
+    fn jit_side(module: std::sync::Arc<Module>) -> (u32, u64) {
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+        (exit.kind, raw_bits)
+    }
+
+    // --- Case 1: an ordinary field -> computed, both engines read the same slot.
+    {
+        let module = program("value");
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm
+            .execute(module.as_ref())
+            .expect("interpreter must resolve an ordinary field");
+        assert_eq!(interpreted.as_i32(), Some(11), "the interpreter baseline is wrong");
+
+        let (kind, raw_bits) = jit_side(module);
+        assert_eq!(
+            kind,
+            JitExitKind::Completed as u32,
+            "an ordinary Struct field must be computed natively, not declined"
+        );
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert_eq!(
+            native.as_i32(),
+            Some(11),
+            "the JIT must read the same slot the interpreter did"
+        );
+    }
+
+    // --- Case 2: a MISSING field -> null in BOTH engines, computed natively.
+    {
+        let module = program("nope");
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm
+            .execute(module.as_ref())
+            .expect("a missing field is null, not an error");
+        assert!(
+            interpreted.is_null(),
+            "the interpreter must answer null for an unknown Struct field"
+        );
+
+        let (kind, raw_bits) = jit_side(module);
+        assert_eq!(
+            kind,
+            JitExitKind::Completed as u32,
+            "with no dynamic map there is nothing to look up, so the helper computes null"
+        );
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert!(
+            native.is_null(),
+            "the JIT must also answer null, not decline and not invent a value"
+        );
+    }
+}
+
+
+/// ALY-75: a **nominal instance with no dynamic map**, keyed by a name that could be a
+/// method slot — the exact shape that produced the round-1 P1 on this PR.
+///
+/// The existing `dyn_get_keyed_struct_view_matches_interpreter` builds an
+/// `ObjectLiteral` **structural** object, so it never reaches the branch the P1 lived in.
+/// This one reaches it via `NewType`, which needs FOUR registrations, each found by
+/// reading what actually consumes it:
+///
+///   1. `ModuleRuntimeLayout` on the **shared state**, so `resolve_nominal_type_id`
+///      maps a local class index to a nominal type id. (ALY-76's seam — without it the
+///      interpreter and the JIT harness see different states and the error is
+///      "Invalid module-local nominal type id 0".)
+///   2. `ClassRegistry::register_nominal_layout` on the same state, so
+///      `nominal_allocation` can map that nominal id to a layout. **`layout_id` must
+///      be non-zero — `register_nominal_layout` returns early when it is 0.**
+///   3. `ClassDef` on the module, for the class name and shape.
+///   4. `register_module`, so the module is visible to the interpreter.
+///
+/// **It deliberately does NOT assert a value.** Whether the interpreter yields a bound
+/// method or `null` depends on whether the class has a method registered, and this
+/// fixture registers none. What is pinned is narrower and stronger: **the JIT declines
+/// and lets the interpreter resolve it.** A value-asserting test here could not have
+/// caught the P1 it exists to guard against.
+#[test]
+fn dyn_get_keyed_nominal_receiver_declines() {
+    use raya_engine::compiler::bytecode::module::{ClassDef, Method};
+    use raya_engine::jit::runtime::trampoline::{JitExitKind, JitSuspendReason};
+    use raya_engine::vm::interpreter::{ModuleRuntimeLayout, Vm};
+    use raya_engine::vm::ResolvedNatives;
+
+    let mut module = make_vm_module(Vec::new(), 0, 0);
+    // No methods: we want the no-slot path, which is the one the JIT must decline.
+    module.classes = vec![ClassDef {
+        name: "Target".to_string(),
+        field_count: 0,
+        parent_id: None,
+        methods: Vec::<Method>::new(),
+    }];
+    let key_idx = module.constants.add_string("value".to_string());
+    let mut code: Vec<u8> = Vec::new();
+    emit(&mut code, Opcode::NewType);
+    code.extend_from_slice(&0u16.to_le_bytes()); // local class index 0
+    emit_const_str(&mut code, key_idx);
+    emit(&mut code, Opcode::DynGetKeyed);
+    emit(&mut code, Opcode::Return);
+    module.functions[0].code = code;
+    module.functions[0].name = "main".to_string();
+    let module = finalize_module(module);
+
+    let mut vm = Vm::with_worker_count(1);
+    {
+        let shared = vm.shared_state_arc();
+        shared.module_layouts.write().insert(
+            module.checksum,
+            ModuleRuntimeLayout {
+                checksum: module.checksum,
+                global_base: 0,
+                global_len: 0,
+                nominal_type_base: 0,
+                nominal_type_len: 1,
+                resolved_natives: ResolvedNatives::empty(),
+                initialized: false,
+            },
+        );
+        // layout_id 1, NOT 0 -- register_nominal_layout silently returns on 0.
+        shared
+            .layouts
+            .write()
+            .register_nominal_layout(0, 1, 0, Some("Target".to_string()));
+        shared
+            .register_module(module.clone())
+            .expect("register module for NewType");
+    }
+    let interpreted = vm
+        .execute(module.as_ref())
+        .expect("the interpreter must answer a keyed read on a nominal instance");
+
+    let (safepoint, _own) = new_shared_vm_state();
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_rn, bridge) =
+        build_bridge_and_ctx(&safepoint, vm.shared_state_arc(), &task, &module);
+    let mut ctx =
+        raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = Vec::new();
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+    let (_raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+
+    assert_eq!(
+        exit.kind,
+        JitExitKind::Suspended as u32,
+        "a NOMINAL receiver with no field index must DECLINE, never answer itself"
+    );
+    assert_eq!(
+        exit.suspend_reason,
+        JitSuspendReason::InterpreterBoundary as u32,
+        "the decline must be an interpreter boundary"
+    );
+    // Recorded, not asserted.
+    eprintln!(
+        "ALY-75 nominal fixture: interpreter answered 0x{:016X}",
+        interpreted.raw()
     );
 }

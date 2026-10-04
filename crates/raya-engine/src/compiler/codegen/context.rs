@@ -1041,7 +1041,9 @@ impl<'a> IrCodeGenerator<'a> {
                 ctx.emit(Opcode::ObjectLiteral);
                 ctx.emit_u32(*type_index);
                 ctx.emit_u16(fields.len() as u16);
-                // Initialize each field: push value, then InitObject pops value and peeks object
+                // Initialize each field: push value, then InitObject pops value and peeks
+                // object. One opcode per field; the u16 operand is that field's
+                // offset, not a count of values to consume.
                 for (field_idx, value) in fields {
                     self.emit_load_register(ctx, value);
                     ctx.emit(Opcode::InitObject);

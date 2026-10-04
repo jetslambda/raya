@@ -851,18 +851,13 @@ impl SharedVmState {
 
     /// Resolve canonical member names for a physical structural layout.
     pub fn structural_layout_names(&self, layout_id: LayoutId) -> Option<Vec<String>> {
-        if let Some(names) = self
-            .layouts
-            .read()
-            .layout_field_names(layout_id)
-            .map(|names| names.to_vec())
-        {
-            return Some(names);
-        }
-        self.structural_layout_shapes
-            .read()
-            .get(&layout_id)
-            .cloned()
+        // Delegates to the shared resolver; this body was byte-identical to
+        // `Interpreter::structural_layout_names`.
+        crate::vm::interpreter::opcodes::native::structural_layout_names_from(
+            layout_id,
+            &self.layouts,
+            &self.structural_layout_shapes,
+        )
     }
 
     /// Resolve canonical layout member names for an object, lazily seeding
@@ -1236,6 +1231,57 @@ mod tests {
         PropertyKeyRegistry, RuntimeTypeHandleRegistry, ShapeAdapter, ShapeId,
         StructuralSlotBinding,
     };
+
+    /// `SharedVmState::layout_field_names_for_object` resolves through
+    /// `structural_layout_shapes`, and that is the only registry it has.
+    ///
+    /// There is a near-identical function on `Interpreter`
+    /// (`core.rs::layout_field_names_for_object`) which falls back to
+    /// **`structural_object_shapes`** — a registry `SharedVmState` does not have.
+    /// I twice mistook the two for duplicated code and nearly "consolidated" them,
+    /// which would have changed which shapes resolve. They are not interchangeable
+    /// and this test exists so that stays true.
+    ///
+    /// What it pins: a layout registered in `structural_layout_shapes` is found by
+    /// name. That is the behaviour that actually matters — the companion half, that a
+    /// layout *not* registered is not found, is asserted too, since silently
+    /// resolving an unregistered layout to a name would be worse than not
+    /// resolving it.
+    #[test]
+    fn layout_field_names_resolve_through_the_registry_shared_vm_state_actually_has() {
+        use crate::vm::object::{Object, STRUCTURAL_LAYOUT_ID_TAG};
+        use rustc_hash::FxHashMap;
+        use std::sync::Arc;
+
+        let safepoint = Arc::new(super::SafepointCoordinator::new(1));
+        let tasks = Arc::new(parking_lot::RwLock::new(FxHashMap::default()));
+        let injector = Arc::new(crossbeam_deque::Injector::new());
+        let shared = super::SharedVmState::new(safepoint, tasks, injector);
+
+        // A structural layout id, distinct from any nominal one. `ShapeId` is a
+        // `u64` alias, and `STRUCTURAL_LAYOUT_ID_TAG` is the high bit marking a
+        // layout as structural rather than nominal.
+        let layout_id: crate::vm::object::LayoutId = STRUCTURAL_LAYOUT_ID_TAG | 7;
+        let object = Object::new_structural(layout_id, 2);
+
+        // Unregistered: must not resolve to a name rather than inventing one.
+        assert_eq!(
+            shared.layout_field_names_for_object(&object),
+            None,
+            "an unregistered layout must not resolve to field names"
+        );
+
+        // Registered in the registry SharedVmState actually consults.
+        {
+            let mut shapes = shared.structural_layout_shapes.write();
+            shapes.insert(layout_id, vec!["alpha".to_string(), "beta".to_string()]);
+        }
+        assert_eq!(
+            shared.layout_field_names_for_object(&object),
+            Some(vec!["alpha".to_string(), "beta".to_string()]),
+            "a layout registered in structural_layout_shapes must resolve by name"
+        );
+    }
 
     #[cfg(feature = "jit")]
     #[test]

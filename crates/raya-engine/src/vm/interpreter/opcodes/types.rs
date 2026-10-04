@@ -217,7 +217,13 @@ pub(in crate::vm::interpreter) fn builtin_handle_native_method_id(
     None
 }
 
-fn dyn_key_parts(key_val: Value) -> Result<(Option<String>, Option<usize>), VmError> {
+/// Split a keyed operand into `(property_name, array_index)`.
+///
+/// `pub(crate)` so a JIT helper can reproduce the interpreter's key parsing exactly
+/// rather than reimplementing it — the same reasoning that applies to
+/// `Value::as_u64` and the descriptor predicates. Reimplementing a key parser is
+/// precisely the kind of divergence that ships.
+pub(crate) fn dyn_key_parts(key_val: Value) -> Result<(Option<String>, Option<usize>), VmError> {
     use crate::vm::json::view::{js_classify, JSView};
 
     match js_classify(key_val) {

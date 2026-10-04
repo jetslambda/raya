@@ -2033,11 +2033,11 @@ fn allocate_buffer_object(ctx: &RuntimeHandlerContext<'_>, data: &[u8]) -> Resul
         buffer_nominal_type_id as u32,
         buffer_field_count,
     );
-    obj.set_field(0, Value::u64(handle))
-        .map_err(VmError::RuntimeError)?;
+    obj.checked_set_field(0, Value::u64(handle))
+        .map_err(|error| VmError::RuntimeError(error.to_string()))?;
     if buffer_field_count > 1 {
-        obj.set_field(1, Value::i32(data.len() as i32))
-            .map_err(VmError::RuntimeError)?;
+        obj.checked_set_field(1, Value::i32(data.len() as i32))
+            .map_err(|error| VmError::RuntimeError(error.to_string()))?;
     }
     let obj_ptr = gc.allocate(obj);
     Ok(unsafe { Value::from_ptr(std::ptr::NonNull::new(obj_ptr.as_ptr()).unwrap()) })

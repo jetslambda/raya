@@ -505,18 +505,14 @@ impl<'a> Interpreter<'a> {
         &self,
         layout_id: crate::vm::object::LayoutId,
     ) -> Option<Vec<String>> {
-        if let Some(names) = self
-            .layouts
-            .read()
-            .layout_field_names(layout_id)
-            .map(|names| names.to_vec())
-        {
-            return Some(names);
-        }
-        self.structural_object_shapes
-            .read()
-            .get(&layout_id)
-            .cloned()
+        // Delegates to the shared resolver. This body was byte-identical to
+        // `SharedVmState::structural_layout_names`; both now call one implementation so
+        // the field-index work cannot add a third divergent copy.
+        crate::vm::interpreter::opcodes::native::structural_layout_names_from(
+            layout_id,
+            self.layouts,
+            self.structural_object_shapes,
+        )
     }
 
     #[inline]

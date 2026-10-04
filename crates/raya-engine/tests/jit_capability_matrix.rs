@@ -172,24 +172,64 @@ fn simple_math_loop_is_still_selectable_and_liftable() {
 
 #[test]
 fn capability_table_is_internally_consistent() {
-    // Every opcode on the known-wrong list must be non-selectable, and its
-    // classification must never be NativeExact or HelperExact.
+    // This test used to assert one flat invariant over nine opcodes: "if it is on the
+    // known-wrong list then it is never selectable and never Native/Helper exact". That
+    // conflated three genuinely different categories and went stale twice, so CI was red
+    // for much of the milestone.
+    //
+    //   * `Try`, `Throw`, `Rethrow`, `EndTry` were NEVER on the known-wrong list. They
+    //     are deliberately interpreted (D4.5): `JitTerminator::Throw` stays fail-closed
+    //     so a compiled trap cannot SIGTRAP the process. Asserting they were
+    //     "known-wrong" was simply wrong.
+    //   * `BindMethod` WAS on that list, and D4.4 removed it when it was promoted on
+    //     evidence. The old invariant cannot hold for a promoted opcode.
+    //   * The rest are still known-wrong and still unselectable.
+    //
+    // The invariant that actually survives: an opcode is either on the known-wrong list
+    // and unselectable, or it was deliberately re-classified with the reasoning recorded
+    // next to it. Each group below says which.
+
+    // (a) Still known-wrong: on the list, unselectable, never natively exact.
     for op in [
         Opcode::Ipow,
         Opcode::Fpow,
         Opcode::Fmod,
-        Opcode::BindMethod,
         Opcode::GetArgCount,
         Opcode::LoadArgLocal,
-        Opcode::Try,
-        Opcode::Rethrow,
-        Opcode::Throw,
     ] {
         assert!(produces_incorrect_native_results(op), "{op:?}");
         assert!(!opcode_supported_for_jit(op), "{op:?}");
         assert_ne!(jit_support(op), JitSupport::NativeExact, "{op:?}");
         assert_ne!(jit_support(op), JitSupport::HelperExact, "{op:?}");
     }
+
+    // (b) Deliberately interpreted, NOT known-wrong: unselectable because we chose to
+    // keep them out of the JIT, not because the JIT got them wrong.
+    for op in [Opcode::Try, Opcode::Throw, Opcode::Rethrow, Opcode::EndTry] {
+        assert!(
+            !produces_incorrect_native_results(op),
+            "{op:?} is deliberately interpreted, not known-wrong"
+        );
+        assert_eq!(jit_support(op), JitSupport::Rejected, "{op:?}");
+        assert!(!opcode_supported_for_jit(op), "{op:?}");
+    }
+
+    // (c) Re-promoted on evidence: D4.4 promoted `BindMethod` to `HelperExact` and
+    // REMOVED it from the known-wrong list in the same change. Selecting it is the point;
+    // the evidence lives in the differential, not in this table.
+    assert!(
+        !produces_incorrect_native_results(Opcode::BindMethod),
+        "D4.4 removed BindMethod from the known-wrong list when it was promoted"
+    );
+    assert_eq!(
+        jit_support(Opcode::BindMethod),
+        JitSupport::HelperExact,
+        "D4.4 promoted BindMethod to HelperExact on evidence"
+    );
+    assert!(
+        opcode_supported_for_jit(Opcode::BindMethod),
+        "a promoted opcode must be selectable"
+    );
 }
 
 #[test]

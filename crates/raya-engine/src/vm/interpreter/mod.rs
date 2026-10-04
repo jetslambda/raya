@@ -10,7 +10,7 @@ mod handlers;
 mod marshal;
 mod module_registry;
 mod native_module_registry;
-mod opcodes;
+pub(crate) mod opcodes;
 mod safepoint;
 mod shared_state;
 mod vm_facade;

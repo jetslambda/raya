@@ -1004,11 +1004,25 @@ impl LiftedFunction {
                 helper: HelperCall::Typeof,
                 args: vec![operand.0],
             }),
-            JitInstr::ObjectLiteral { dest, type_index, fields } => {
+            JitInstr::ObjectLiteral {
+                dest,
+                type_index,
+                field_count,
+                fields,
+                ..
+            } => {
                 out.push(SmInstr::CallHelper {
                     dest: Some(dest.0),
                     helper: HelperCall::AllocStructuralObject,
-                    args: vec![*type_index, fields.len() as u32],
+                    // Was `fields.len()`, which is ALWAYS 0 for this variant -- so
+                    // this backend was asking for a zero-field object. It now uses
+                    // the slot count the lifter actually carries.
+                    //
+                    // NOTE: the `fields` loop below is therefore DEAD in this backend,
+                    // because the values arrive as separate `InitObjectField`
+                    // instructions. This AOT path expects them inline, so it does not
+                    // mirror the compiler's emission -- recorded, not fixed here.
+                    args: vec![*type_index, *field_count as u32],
                 });
                 for (field_index, value) in fields.iter().enumerate() {
                     out.push(SmInstr::CallHelper {
@@ -1018,12 +1032,12 @@ impl LiftedFunction {
                     });
                 }
             }
-            JitInstr::DynGetKeyed { dest, object, index } => out.push(SmInstr::CallHelper {
+            JitInstr::DynGetKeyed { dest, object, index, .. } => out.push(SmInstr::CallHelper {
                 dest: Some(dest.0),
                 helper: HelperCall::DynGetProp,
                 args: vec![object.0, index.0],
             }),
-            JitInstr::DynSetKeyed { object, index, value } => out.push(SmInstr::CallHelper {
+            JitInstr::DynSetKeyed { object, index, value, .. } => out.push(SmInstr::CallHelper {
                 dest: None,
                 helper: HelperCall::DynSetProp,
                 args: vec![object.0, index.0, value.0],
@@ -1607,6 +1621,7 @@ mod tests {
         jit_func.reg_types.insert(Reg(0), JitType::Value);
         jit_func.reg_types.insert(Reg(1), JitType::Value);
         jit_func.blocks.push(JitBlock {
+            start_offset: JitBlock::UNKNOWN_START_OFFSET,
             id: JitBlockId(0),
             instrs: vec![JitInstr::LoadLocal {
                 dest: Reg(0),

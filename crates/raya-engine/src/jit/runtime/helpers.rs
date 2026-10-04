@@ -57,7 +57,7 @@ thread_local! {
         const { RefCell::new(Vec::new()) };
 }
 
-const JIT_STORE_SUCCESS: i8 = 1;
+pub const JIT_STORE_SUCCESS: i8 = 1;
 const JIT_STORE_FALLBACK: i8 = 0;
 
 #[repr(C)]
@@ -193,8 +193,6 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         check_preemption: helper_check_preemption,
         native_call_dispatch: helper_native_call_dispatch,
         interpreter_call: helper_interpreter_call,
-        throw_exception: helper_throw_exception,
-        deoptimize: helper_deoptimize,
         string_concat: helper_string_concat,
         generic_equals: helper_generic_equals,
         object_get_field: helper_object_get_field,
@@ -212,6 +210,20 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         array_push: helper_array_push,
         array_pop: helper_array_pop,
         array_len: helper_array_len,
+        refcell_load: helper_load_refcell,
+        refcell_store: helper_store_refcell,
+        refcell_new: helper_new_refcell,
+        set_closure_capture: helper_set_closure_capture,
+        make_closure: helper_make_closure,
+        load_captured: helper_load_captured,
+        store_captured: helper_store_captured,
+        bind_method: helper_bind_method,
+        await_task: helper_await_task,
+        dyn_get_keyed: helper_dyn_get_keyed,
+        dyn_set_keyed: helper_dyn_set_keyed,
+        alloc_struct_object: helper_alloc_struct_object,
+        init_object_field: helper_init_object_field,
+        cast_object_min_fields: helper_cast_object_min_fields,
     }
 }
 
@@ -1026,7 +1038,7 @@ unsafe extern "C" fn helper_alloc_object(
 /// to the caller immediately.
 unsafe extern "C" fn helper_alloc_array(
     type_index: u32,
-    capacity: usize,
+    len_raw: u64,
     module_ptr: *const (),
     shared_state: *mut (),
 ) -> *mut () {
@@ -1043,6 +1055,20 @@ unsafe extern "C" fn helper_alloc_array(
         let module = &*(module_ptr.cast::<Module>());
         jit_resolve_array_element_descriptor(module, type_index)
     };
+    // Boxed length, coerced by the interpreter's own function, exactly as
+    // `helper_array_load`/`_store` do for the index. `NewArray` pops a length off
+    // the operand stack and runs it through `array_index_operand`, so a length of
+    // `null` is 0 and a negative `i32` wraps to a huge `usize` -- which
+    // `Array::with_element_type` will try to reserve. An `i64`/`usize` parameter
+    // could not express that, and the arm would have had to reimplement it in IR.
+    let capacity = crate::vm::interpreter::opcodes::arrays::array_index_operand(
+        Value::from_raw(len_raw),
+    );
+    // NOTE: no `EphemeralRootScope` here, and it is deliberate. The length is
+    // coerced to a `usize` BEFORE the allocation, so no `Value` is live across the
+    // `gc.allocate` call -- `type_index`, `capacity` and `module_ptr` are all plain
+    // integers. `helper_new_refcell` roots because it holds the initial `Value`
+    // across its allocation; this one does not.
     let mut gc = (&*bridge.gc).lock();
     let array_ptr = gc.allocate(Array::with_element_type(
         type_index as usize,
@@ -1102,16 +1128,26 @@ unsafe fn jit_array_ptr_checked(value: Value) -> Option<NonNull<crate::vm::objec
 /// Load `array[index]`. Returns the element, or the interpreter-fallback
 /// sentinel when the receiver is not an array or the index is out of bounds.
 /// Reads never validate element types, matching the interpreter.
-unsafe extern "C" fn helper_array_load(array_raw: u64, index: i64, _shared_state: *mut ()) -> u64 {
+unsafe extern "C" fn helper_array_load(array_raw: u64, index_raw: u64, _shared_state: *mut ()) -> u64 {
     let array_value = Value::from_raw(array_raw);
     let Some(array_ptr) = jit_array_ptr_checked(array_value) else {
         return JIT_INTERPRETER_FALLBACK_SENTINEL;
     };
-    if index < 0 {
-        return JIT_INTERPRETER_FALLBACK_SENTINEL;
-    }
+    // The index arrives as a boxed `Value` and is coerced by the interpreter's OWN
+    // function, not by an `i64` parameter. That is the whole point of the signature:
+    // an `i64` cannot represent "non-numeric", which is the case where this coercion
+    // is most surprising (`arr["x"]` reads `arr[0]`).
+    //
+    // Note there is no `index < 0` guard any more, and it is not missing by accident:
+    // a negative `i32` coerces to `usize::MAX` inside `array_index_operand`, so
+    // `get` returns `None` and this declines — which is right, because the
+    // interpreter raises "Array index 18446744073709551615 out of bounds" and the
+    // sentinel hands it back to the interpreter to raise exactly that.
+    let index = crate::vm::interpreter::opcodes::arrays::array_index_operand(
+        Value::from_raw(index_raw),
+    );
     let array = &*array_ptr.as_ptr();
-    match array.get(index as usize) {
+    match array.get(index) {
         Some(value) => value.raw(),
         None => JIT_INTERPRETER_FALLBACK_SENTINEL,
     }
@@ -1123,7 +1159,7 @@ unsafe extern "C" fn helper_array_load(array_raw: u64, index: i64, _shared_state
 /// the element constraint (the interpreter then produces the exact error).
 unsafe extern "C" fn helper_array_store(
     array_raw: u64,
-    index: i64,
+    index_raw: u64,
     value_raw: u64,
     _shared_state: *mut (),
 ) -> i8 {
@@ -1131,11 +1167,15 @@ unsafe extern "C" fn helper_array_store(
     let Some(array_ptr) = jit_array_ptr_checked(array_value) else {
         return JIT_STORE_FALLBACK;
     };
-    if index < 0 {
-        return JIT_STORE_FALLBACK;
-    }
+    // Boxed index, coerced by the interpreter's own function — see the note on
+    // `helper_array_load`. As there, the absent `index < 0` guard is not an
+    // omission: a negative `i32` becomes `usize::MAX`, `checked_set` reports
+    // `OutOfBounds`, and this declines so the interpreter raises the real message.
+    let index = crate::vm::interpreter::opcodes::arrays::array_index_operand(
+        Value::from_raw(index_raw),
+    );
     let array = &mut *array_ptr.as_ptr();
-    match array.checked_set(index as usize, Value::from_raw(value_raw)) {
+    match array.checked_set(index, Value::from_raw(value_raw)) {
         Ok(()) => JIT_STORE_SUCCESS,
         Err(_) => JIT_STORE_FALLBACK,
     }
@@ -1516,14 +1556,6 @@ unsafe extern "C" fn helper_interpreter_call(
     }
 }
 
-unsafe extern "C" fn helper_throw_exception(_exception_value: u64, _shared_state: *mut ()) {
-    panic!("helper_throw_exception is not wired yet")
-}
-
-unsafe extern "C" fn helper_deoptimize(_bytecode_offset: u32, _shared_state: *mut ()) {
-    panic!("helper_deoptimize is not wired yet")
-}
-
 fn jit_add_ephemeral_roots(bridge: &JitRuntimeBridgeContext, values: &[Value]) -> bool {
     if bridge.ephemeral_gc_roots.is_null() {
         return false;
@@ -1672,6 +1704,844 @@ unsafe extern "C" fn helper_value_to_string(value_raw: u64, shared_state: *mut (
     result.raw()
 }
 
+// ---------------------------------------------------------------------------
+// RefCell helpers (D4.4)
+//
+// NOT YET REACHABLE, but for a narrower reason than `BindMethod`.
+//
+// The lifter already handles all three opcodes correctly (`lifter.rs:1604-1626`),
+// emitting `JitInstr::NewRefCell` / `LoadRefCell` / `StoreRefCell` with the right
+// stack effects — including `StoreRefCell`'s net -2, which pushes nothing. What is
+// missing is the *native* half: `jit/backend/cranelift/lowering.rs` has no RefCell
+// arm at all, so nothing reaches these helpers, and they are deliberately absent
+// from the trampoline table as well. `BindMethod` is the opposite problem — the
+// lifter emits nothing for it at all.
+//
+// So RefCell is lifter-ready and only needs a Cranelift arm plus a differential
+// test. Do not read this as "the whole path is absent". That is stated here because unwired helpers are exactly what I
+// misread during the D4.3 audit — I trusted a capability classification and
+// assumed reachability, and three of the object helpers turned out to be wired
+// while a fourth was referenced nowhere.
+//
+// They are written and tested now so the semantics are settled before anything can
+// call them. Wiring is the next slice, and `NewRefCell`/`LoadRefCell`/`StoreRefCell`
+// stay `Rejected` until it is done.
+//
+// **The receiver check is deliberately weak.** The interpreter's RefCell handlers
+// test `is_ptr()` only — never the GC-header TypeId — and will reinterpret any heap
+// value as a RefCell (ALY-54). These helpers reproduce that exactly rather than
+// "fixing" it, because a helper that type-checks properly would diverge from the
+// interpreter, which is the opposite of the goal. Do not strengthen these checks
+// without fixing the interpreter in the same change.
+
+// ---------------------------------------------------------------------------
+// Task helpers (D4.6)
+// ---------------------------------------------------------------------------
+
+/// `Await` one of the paths that do not suspend.
+///
+/// Three paths, and this covers the two that can be leaf operations:
+///
+/// 1. **The value is not a task id** — pushed straight back, execution continues.
+///    This is JS-like `await` normalisation. Note `Value::as_u64` is **tag-gated**
+///    (`is_u64()` then `PAYLOAD_MASK`), so `await` on a boxed `i32 42` returns
+///    `None` and is NOT read as task id 42. The test below pins that.
+/// 2. **The awaited task is already `Completed`** — its result is returned.
+/// 3. **Cancelled or still pending** — returns the interpreter-fallback sentinel, so
+///    the interpreter raises `"Awaited task {:?} cancelled"` or suspends
+///    respectively. A leaf helper cannot raise, and it must not invent a value for
+///    either case.
+///
+/// Path 3 is not an oversight: `JitSuspendReason` has no `AwaitTask` variant, so the
+/// JIT cannot express an await suspension at all. Its only suspension is
+/// `InterpreterBoundary`. See the D4.6 spec.
+///
+/// NOT YET LOWERED. See the note on the RefCell helpers.
+unsafe extern "C" fn helper_await_task(value_raw: u64, shared_state: *mut ()) -> u64 {
+    let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
+        Some(ptr) => &*ptr.as_ptr(),
+        None => return JIT_INTERPRETER_FALLBACK_SENTINEL,
+    };
+    let value = Value::from_raw(value_raw);
+
+    // Path 1. Deliberately `Value::as_u64()` and not a payload test: the accessor is
+    // tag-gated, and reimplementing it by payload would misread any value whose
+    // payload looks like a plausible task id.
+    let Some(task_id_u64) = value.as_u64() else {
+        return value_raw;
+    };
+
+    if bridge.tasks.is_null() {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+    let task_id = crate::vm::scheduler::TaskId::from_u64(task_id_u64);
+    let tasks = (&*bridge.tasks).read();
+    let Some(awaited) = tasks.get(&task_id).cloned() else {
+        // Unknown task id: let the interpreter produce its own error rather than
+        // guessing at one here.
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    };
+    drop(tasks);
+
+    if awaited.is_cancelled() {
+        // The interpreter raises "Awaited task {:?} cancelled" after marking the
+        // rejection observed. Marking it is a visible side effect we must not
+        // duplicate, so hand back and let the interpreter do it exactly once.
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+
+    if awaited.state() == crate::vm::scheduler::TaskState::Completed {
+        // Path 2. `result()` may be unset on a completed task; the interpreter uses
+        // `unwrap_or(Value::null())`, and so must this.
+        return awaited.result().unwrap_or(Value::null()).raw();
+    }
+
+    // Path 3: still pending. The interpreter suspends; we cannot, so exit.
+    JIT_INTERPRETER_FALLBACK_SENTINEL
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic NodeCompat helpers (D4.7)
+// ---------------------------------------------------------------------------
+
+/// `DynGetKeyed` for the views that do not need field-index resolution.
+///
+/// `JSView::Str` and `JSView::Arr` are ordinary leaf reads and are handled here, as is
+/// **`JSView::Struct`** — which this helper does NOT blanket-decline.
+///
+/// **The rationale below used to be the opposite, and it was wrong.** D4.7 recorded
+/// that `Struct` field lookup "falls back to `structural_object_shapes`, a registry
+/// `JitRuntimeBridgeContext` does not carry". That is FALSE: the bridge carries
+/// `structural_layout_shapes` (the same registry under the name `SharedVmState` uses),
+/// plus `class_metadata` and `layouts`. `Struct` was handled in D4.10 through the shared
+/// `object_field_index`, and the re-review of PR #1 confirmed the arm reproduces the
+/// interpreter's resolution.
+///
+/// `Struct` still DECLINES on three paths, each for a real reason rather than a missing
+/// registry: a **proxy** receiver (the interpreter unwraps and reads the target's field),
+/// a property with a **getter** (the interpreter runs it as a frame), and — the case a
+/// cross-model review caught as a **P1 silent wrong value** — a receiver with a **nominal
+/// type** and no field index, where the interpreter falls through to a method-slot lookup
+/// and can return a *bound method* that `null` is not.
+///
+/// Everything else returns the interpreter-fallback sentinel.
+///
+/// Key parsing calls the interpreter's own `dyn_key_parts`, and the view split
+/// uses its own `js_classify`. Neither is reimplemented here: a hand-rolled key
+/// parser or view dispatch is exactly the shape of divergence that ships.
+///
+/// NOT YET LOWERED. See the note on the RefCell helpers.
+/// Allocate a structural object for `ObjectLiteral`, the way the interpreter's
+/// handler does: `Object::new_structural(layout_id, field_count)`.
+///
+/// Deliberately needs **no** layout registry and **no** module, unlike
+/// `helper_alloc_array` -- an object literal names a layout id it already carries, so
+/// there is nothing to resolve. Returns null on failure, matching
+/// `helper_alloc_object`'s convention rather than the sentinel convention.
+unsafe extern "C" fn helper_alloc_struct_object(
+    type_index: u32,
+    field_count: u32,
+    shared_state: *mut (),
+) -> *mut () {
+    if shared_state.is_null() {
+        return std::ptr::null_mut();
+    }
+    let bridge = &*(shared_state.cast::<JitRuntimeBridgeContext>());
+    if bridge.gc.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mut gc = (&*bridge.gc).lock();
+    // `LayoutId` is a `u32` alias, so `type_index` passes through unchanged. The
+    // compiler already emits a TAGGED structural layout id
+    // (`STRUCTURAL_LAYOUT_ID_TAG | n`), exactly as the interpreter's handler receives
+    // it, so nothing is added or stripped here.
+    //
+    // `type_index == 0` is the interpreter's "object literal is missing structural
+    // layout id" ERROR, checked here so the helper mirrors that validation rather than
+    // allocating an object against a layout id that names nothing -- which would build
+    // an object no later field lookup could read. Returning null sends the lowering
+    // down its existing fallback path.
+    if type_index == 0 {
+        return std::ptr::null_mut();
+    }
+    let allocated = gc.allocate(crate::vm::object::Object::new_structural(
+        type_index,
+        field_count as usize,
+    ));
+    NonNull::new(allocated.as_ptr()).map_or(std::ptr::null_mut(), |p| p.as_ptr().cast())
+}
+
+/// One `InitObject` slot write: a bounds-checked store into an object that is still
+/// BEING CONSTRUCTED. Returns [`JIT_STORE_SUCCESS`] or [`JIT_STORE_FALLBACK`].
+///
+/// The bounds check is the whole reason this is a helper and not a raw store: the
+/// interpreter's `checked_set_field` turns an out-of-range offset into a
+/// `RuntimeError`, which a leaf helper cannot raise, so the only correct response is
+/// to decline and let the interpreter raise the real message.
+///
+/// Distinct from `helper_object_set_field`, which belongs to `StoreFieldExact` and
+/// stays unwired: that one targets an EXISTING object, where a descriptor setter may
+/// apply. This one targets a brand-new object, where no property can have been defined
+/// yet — so there is no accessor to run and the raw slot write is the whole operation.
+unsafe extern "C" fn helper_init_object_field(
+    object_raw: u64,
+    offset: u64,
+    value_raw: u64,
+    shared_state: *mut (),
+) -> i8 {
+    if shared_state.is_null() {
+        return JIT_STORE_FALLBACK;
+    }
+    let bridge = &*(shared_state.cast::<JitRuntimeBridgeContext>());
+    if bridge.gc.is_null() {
+        return JIT_STORE_FALLBACK;
+    }
+    let object_value = Value::from_raw(object_raw);
+    let Some(object_ptr) = jit_object_ptr_checked(object_value) else {
+        return JIT_STORE_FALLBACK;
+    };
+    // The value is a plain immediate or pointer held across nothing -- a slot write
+    // allocates no GC objects, so unlike the array growing paths nothing needs a root
+    // scope here.
+    let value = Value::from_raw(value_raw);
+    let object = &mut *object_ptr.as_ptr();
+    match object.checked_set_field(offset as usize, value) {
+        Ok(()) => JIT_STORE_SUCCESS,
+        // Out of bounds. The interpreter raises; decline so it does.
+        Err(_) => JIT_STORE_FALLBACK,
+    }
+}
+
+/// `CastObjectMinFields` is a CHECKED PASS-THROUGH, not a boolean cast: on success the
+/// interpreter pushes `obj_val` back unchanged, and a field count that is too small is
+/// an ERROR rather than `false`. So there are only two outcomes, and one of them is a
+/// decline.
+pub const OBJECT_MIN_FIELDS_PASS: i8 = 1;
+pub const OBJECT_MIN_FIELDS_DECLINE: i8 = 0;
+
+/// `CastObjectMinFields`: does `object` have at least `required_fields`? If so, PASS.
+///
+/// Mirrors `exec_object_min_fields_cast` exactly: an `is_ptr` check, a `TypeId` check
+/// via `jit_object_ptr_checked`, then `field_count().max(dyn_map().len())`.
+///
+/// All THREE interpreter failure paths DECLINE, because all three are `TypeError`s a
+/// helper cannot raise: a non-pointer receiver, a wrong-`TypeId` receiver, and a field
+/// count below the requirement. **Returning a "false"-shaped answer for any of them
+/// would silently convert a `TypeError` into a failed cast**, which is the D4.3
+/// divergence shape. Note the third is also an ERROR and not `false` — that is the part
+/// a boolean-shaped mental model gets wrong.
+unsafe extern "C" fn helper_cast_object_min_fields(
+    object_raw: u64,
+    required_fields: u64,
+    shared_state: *mut (),
+) -> i8 {
+    if shared_state.is_null() {
+        return OBJECT_MIN_FIELDS_DECLINE;
+    }
+    let _bridge = &*(shared_state.cast::<JitRuntimeBridgeContext>());
+    let object_value = Value::from_raw(object_raw);
+    // BOXED by the caller: a heap `Value` in a register is untagged, and
+    // `jit_object_ptr_checked` reads the tag via `is_ptr()`.
+    let Some(object_ptr) = jit_object_ptr_checked(object_value) else {
+        return OBJECT_MIN_FIELDS_DECLINE;
+    };
+    let object = unsafe { &*object_ptr.as_ptr() };
+    let effective_field_count = object
+        .field_count()
+        .max(object.dyn_map().map(|m| m.len()).unwrap_or(0));
+    if effective_field_count >= required_fields as usize {
+        OBJECT_MIN_FIELDS_PASS
+    } else {
+        // The interpreter raises `Cannot cast object(field_count=N) to required field
+        // count M` here. Decline so it raises the real message.
+        OBJECT_MIN_FIELDS_DECLINE
+    }
+}
+
+unsafe extern "C" fn helper_dyn_get_keyed(
+    object_raw: u64,
+    key_raw: u64,
+    shared_state: *mut (),
+) -> u64 {
+    use crate::vm::json::view::{js_classify, JSView};
+
+    let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
+        Some(ptr) => &*ptr.as_ptr(),
+        None => return JIT_INTERPRETER_FALLBACK_SENTINEL,
+    };
+    if bridge.gc.is_null() {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+
+    // The interpreter raises on a malformed key, so a helper cannot invent an answer
+    // for one.
+    let (key_str, array_index) =
+        match crate::vm::interpreter::opcodes::types::dyn_key_parts(Value::from_raw(key_raw)) {
+            Ok(parts) => parts,
+            Err(_) => return JIT_INTERPRETER_FALLBACK_SENTINEL,
+        };
+
+    match js_classify(Value::from_raw(object_raw)) {
+        JSView::Arr(ptr) => {
+            let array = unsafe { &*ptr };
+            if let Some(index) = array_index {
+                // Out of range is a legitimate answer (null), not a failure.
+                array.get(index).unwrap_or(Value::null()).raw()
+            } else if key_str.as_deref() == Some("length") {
+                // The interpreter answers "length" on the array view as well. An
+                // earlier version of this helper matched only on `array_index` and
+                // returned null here, which is a silent wrong answer rather than a
+                // fallback.
+                Value::i32(array.len() as i32).raw()
+            } else {
+                // The interpreter's array view has no other keys, so null is correct.
+                Value::null().raw()
+            }
+        }
+        JSView::Str(ptr) => {
+            let string = unsafe { &*ptr };
+            if let Some(index) = array_index {
+                // Each character is a freshly allocated `RayaString`, with `string`
+                // held live across the allocation, so root it.
+                let Some(character) = string.data.chars().nth(index) else {
+                    // Out of range is a legitimate answer, not a failure.
+                    return Value::null().raw();
+                };
+                let string_value = Value::from_raw(object_raw);
+                let Some(_scope) = EphemeralRootScope::open(bridge, &[string_value]) else {
+                    return JIT_INTERPRETER_FALLBACK_SENTINEL;
+                };
+                let mut gc = (&*bridge.gc).lock();
+                let allocated = gc.allocate(crate::vm::object::RayaString::new(character.to_string()));
+                let pointer = NonNull::new(allocated.as_ptr()).unwrap();
+                Value::from_ptr(pointer).raw()
+            } else if key_str.as_deref() == Some("length") {
+                // BYTES, not characters. The interpreter uses `str::len`, and for
+                // "héllo" that is 6 while `chars().count()` is 5. This helper was
+                // written with `chars().count()` and the differential caught it on
+                // the first non-ASCII corpus case -- an ASCII-only corpus would
+                // have shipped it, because the two agree on every ASCII string.
+                Value::i32(string.data.len() as i32).raw()
+            } else {
+                // DECLINE rather than answer null. On a string, any other key goes
+                // through `builtin_handle_native_method_id` in the interpreter, so
+                // `"abc".toUpperCase` yields a bound native method -- not null.
+                // Returning null here would be a silent wrong answer; the sentinel
+                // routes it to the interpreter, which is the only thing that can
+                // resolve a native method id.
+                JIT_INTERPRETER_FALLBACK_SENTINEL
+            }
+        }
+        // `Struct` needs the registry the bridge lacks; everything else is the
+        // interpreter's business.
+        JSView::Struct { ptr, .. } => {
+            // Declines first, computes second. EVERY early return is a decline, so
+            // correctness never depends on the parts not implemented -- only speed does.
+            use crate::vm::reflect::is_proxy;
+
+            let object_value = Value::from_raw(object_raw);
+            // A proxy receiver DECLINES. The interpreter unwraps the proxy and reads
+            // the TARGET's field, never consulting the proxy handler; declining hands
+            // that back rather than reimplementing the unwrap here.
+            if is_proxy(object_value) {
+                return JIT_INTERPRETER_FALLBACK_SENTINEL;
+            }
+            let key = key_str.as_deref().unwrap_or_default();
+            // A getter exists -> DECLINE. The interpreter runs it as a FRAME, which a
+            // leaf helper cannot. Wrong either way is a correctness bug, not a
+            // performance one: answering natively would skip a user getter.
+            let has_getter = crate::vm::interpreter::opcodes::native::descriptor_accessor_for(
+                object_value,
+                key,
+                "get",
+                &*bridge.metadata,
+                &*bridge.class_metadata,
+                &*bridge.layouts,
+                &*bridge.structural_layout_shapes,
+            )
+            .is_some();
+            if has_getter {
+                return JIT_INTERPRETER_FALLBACK_SENTINEL;
+            }
+            let obj = unsafe { &*ptr };
+            if let Some(index) = crate::vm::interpreter::opcodes::native::object_field_index(
+                obj,
+                key,
+                &*bridge.class_metadata,
+                &*bridge.layouts,
+                &*bridge.structural_layout_shapes,
+            ) {
+                return obj.get_field(index).unwrap_or(Value::null()).raw();
+            }
+            // No field index. The interpreter then tries, in order: a METHOD SLOT on the
+            // nominal type (returns a bound method), and finally the object's dynamic
+            // property map, ending in `Value::null()`.
+            //
+            // **A missing field is NULL, not a TypeError** -- the earlier note in this
+            // repo claiming otherwise was wrong, and a differential caught it. The
+            // dynamic-map lookup is keyed by an INTERNED `PropKey`, which only the
+            // interpreter can produce via `intern_prop_key`, so:
+            //   * no dynamic map at all -> nothing to look up -> NULL, computed here;
+            //   * a dynamic map exists -> the lookup needs interning, so DECLINE and let
+            //     the interpreter do it.
+            // A NOMINAL receiver DECLINES, and a cross-model review of PR #1 caught
+            // this as a P1 silent wrong value. With no field index the interpreter
+            // falls through to a METHOD-SLOT lookup and returns a BOUND METHOD; this
+            // arm used to answer `null`, so a compiled function returned null for a
+            // method reference the interpreter resolves to something callable. The
+            // exit reported `Completed`, so nothing caught it.
+            //
+            // Only a receiver with no nominal type can be answered natively, because
+            // only then is `null` the interpreter's answer rather than a bound method.
+            if obj.nominal_type_id_usize().is_some() {
+                return JIT_INTERPRETER_FALLBACK_SENTINEL;
+            }
+            match obj.dyn_map() {
+                // No dynamic map means nothing to look up, and with no nominal type
+                // the interpreter also answers null here.
+                None => Value::null().raw(),
+                // A dynamic map is keyed by an INTERNED `PropKey`, which only the
+                // interpreter can mint, so hand back rather than reimplement it.
+                Some(_) => JIT_INTERPRETER_FALLBACK_SENTINEL,
+            }
+        }
+
+        _ => JIT_INTERPRETER_FALLBACK_SENTINEL,
+    }
+}
+
+/// `DynSetKeyed` against an array receiver. Returns [`JIT_STORE_SUCCESS`] when the
+/// store happened, or [`JIT_STORE_FALLBACK`] so the interpreter raises the real error.
+///
+/// Deliberately NOT `helper_array_store`, and the difference is the whole point:
+///
+/// | | `DynSetKeyed` (this) | `StoreElem` (`helper_array_store`) |
+/// |---|---|---|
+/// | out of range | **grows** via `resize(index + 1, null)` | `OutOfBounds` error |
+/// | element constraint | **not checked** | enforced by `checked_set` |
+///
+/// The interpreter's `DynSetKeyed` arm assigns `arr.elements[index] = value`
+/// directly after an optional `resize`, so it never validates the element type and
+/// never refuses an out-of-range index. Reusing `helper_array_store` here would have
+/// been a real miscompile -- refusing to grow, and rejecting values the interpreter
+/// accepts. "It should enforce the element type" is the shape of a bug report that
+/// is actually a divergence, and the differential pins this case.
+///
+/// A non-array receiver, and a string key that is not a valid index (`"length"`,
+/// say), both FALLBACK: the interpreter raises a `TypeError` in each case, and a
+/// helper cannot raise.
+unsafe extern "C" fn helper_dyn_set_keyed(
+    object_raw: u64,
+    key_raw: u64,
+    value_raw: u64,
+    shared_state: *mut (),
+) -> i8 {
+    if shared_state.is_null() {
+        return JIT_STORE_FALLBACK;
+    }
+    let bridge = &*(shared_state.cast::<JitRuntimeBridgeContext>());
+    if bridge.gc.is_null() {
+        return JIT_STORE_FALLBACK;
+    }
+    // The interpreter raises on a key that is neither an integer nor a numeric
+    // string, so there is no sentinel-free way to reproduce it here.
+    //
+    // NOTE on the `Struct` arm below: an earlier comment here said Struct "needs
+    // structural_object_shapes, which the bridge does not carry". That is FALSE -
+    // D4.10 established the bridge carries those registries, and DynGetKeyed's Struct
+    // read arm uses them. This arm is inert because `DynSetKeyed` is unpromoted for
+    // Struct (blocked on ALY-73), not because the registry is missing.
+    let Ok((_, array_index)) = crate::vm::interpreter::opcodes::types::dyn_key_parts(
+        Value::from_raw(key_raw),
+    ) else {
+        return JIT_STORE_FALLBACK;
+    };
+    let object_value = Value::from_raw(object_raw);
+    let value = Value::from_raw(value_raw);
+    use crate::vm::json::view::{js_classify, JSView};
+    let JSView::Arr(ptr) = js_classify(object_value) else {
+        // `Struct` declines -- but NOT because the bridge lacks a registry. It carries
+        // `structural_object_shapes`, `class_metadata` and `layouts`, and
+        // `DynGetKeyed`'s Struct arm uses all three. This arm is inert because
+        // `DynSetKeyed` is unpromoted for Struct (blocked on ALY-73), and because the
+        // write side additionally needs `is_field_writable_for` and
+        // `sync_descriptor_value_for`, which are extracted but not yet reachable here.
+        //
+        // Everything else -- including `Str`, which is a hard `TypeError` for
+        // `DynSetKeyed` -- raises in the interpreter.
+        return JIT_STORE_FALLBACK;
+    };
+    // `Arr` only: the interpreter requires a parseable index and raises otherwise.
+    let Some(index) = array_index else {
+        return JIT_STORE_FALLBACK;
+    };
+    // Root the receiver and the value across the resize. A `Vec` reallocation is not
+    // a GC event, so strictly nothing can move, but this mirrors
+    // `helper_array_push` and keeps the two growing paths honest if the collector
+    // ever changes.
+    let Some(_scope) = EphemeralRootScope::open(bridge, &[object_value, value]) else {
+        return JIT_STORE_FALLBACK;
+    };
+    // The pointer from `js_classify`, exactly as the interpreter uses it -- not a
+    // second `jit_array_ptr_checked`, which would re-derive the same header check.
+    // The interpreter does the same cast: `&mut *(ptr as *mut Array)`. The view
+    // classifier hands back a `*const`, and the mutation is in-place on a GC-owned
+    // object, so the const is cast away rather than the classifier being bypassed.
+    let array = &mut *(ptr as *mut crate::vm::object::Array);
+    if index >= array.elements.len() {
+        array.elements.resize(index + 1, Value::null());
+    }
+    array.elements[index] = value;
+    JIT_STORE_SUCCESS
+}
+
+// ---------------------------------------------------------------------------
+// Closure helpers (D4.4)
+//
+// NOT YET LOWERED. `lowering.rs` has no `MakeClosure` arm and the opcode stays
+// `Rejected`. The helpers are written and tested first so the semantics are settled
+// before anything can call them — the same order the RefCell helpers used.
+
+/// Bind a method on a nominal object, producing a `BoundMethod`.
+///
+/// This is the body that `7d211cd` removed from `helper_object_get_field`: the
+/// vtable lookup and `BoundMethod` allocation. It was dead there — that helper
+/// constructed its binding as `Field(...)` and matched on it, so the `Method` arm
+/// could never run. It is needed here, with the class-registry lookups actually
+/// wired. The machinery was not wrong, only unreachable and in the wrong place.
+///
+/// The interpreter's handler (`vm/interpreter/opcodes/objects.rs`) does, in order:
+/// `ensure_object_receiver`, then `nominal_type_id_usize`, then
+/// `classes.get_class`, then `class.vtable.get_method`, then build and allocate.
+/// All four failure points return `0` here rather than being raised, because a
+/// leaf helper cannot raise a catchable error; the lowering turns a zero result
+/// into the interpreter boundary exit, which produces the real diagnostic:
+///   * receiver is not an object -> `TypeError("Expected Object receiver for method binding")`
+///   * structural object          -> `TypeError("Cannot bind method on structural object value")`
+///   * unknown nominal type id    -> `RuntimeError("Invalid nominal type id: N")`
+///   * no method in that slot     -> `RuntimeError("Invalid method slot: N for class X")`
+///
+/// The receiver is a live value across the allocation, so it is rooted with
+/// `EphemeralRootScope` — native stack maps are empty.
+///
+/// NOT YET LOWERED. See the note on the RefCell helpers.
+unsafe extern "C" fn helper_bind_method(
+    object_raw: u64,
+    method_slot: u32,
+    shared_state: *mut (),
+) -> u64 {
+    let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
+        Some(ptr) => &*ptr.as_ptr(),
+        None => return 0,
+    };
+    if bridge.gc.is_null() || bridge.classes.is_null() {
+        return 0;
+    }
+
+    let object_value = Value::from_raw(object_raw);
+    // Deliberately the interpreter's weak `is_ptr()` check, not a TypeId
+    // comparison -- see ALY-54. A stronger check here would diverge.
+    if !object_value.is_ptr() {
+        return 0;
+    }
+    let Some(object_ptr) = object_value.as_ptr::<crate::vm::object::Object>() else {
+        return 0;
+    };
+    let object = &*object_ptr.as_ptr();
+
+    let Some(nominal_type_id) = object.nominal_type_id_usize() else {
+        // Structural object -- the interpreter's "Cannot bind method on structural
+        // object value".
+        return 0;
+    };
+
+    let (func_id, method_module) = {
+        let classes = (&*bridge.classes).read();
+        let Some(class) = classes.get_class(nominal_type_id) else {
+            return 0;
+        };
+        let Some(func_id) = class.vtable.get_method(method_slot as usize) else {
+            return 0;
+        };
+        (func_id, class.module.clone())
+    };
+
+    // Root the receiver across the allocation: it is a live heap value and native
+    // stack maps are empty.
+    let Some(_scope) = EphemeralRootScope::open(bridge, &[object_value]) else {
+        return 0;
+    };
+
+    let bound = crate::vm::object::BoundMethod {
+        receiver: object_value,
+        func_id,
+        module: method_module,
+    };
+    let mut gc = (&*bridge.gc).lock();
+    let ptr = gc.allocate(bound);
+    Value::from_ptr(NonNull::new(ptr.as_ptr()).unwrap()).raw()
+}
+
+/// Read one capture of the closure currently executing.
+///
+/// The active closure is NOT carried in the JIT frame. It is read from the task,
+/// exactly as the interpreter does: `Task::current_closure()` returns
+/// `closure_stack.last()`. That is the same path `helper_make_closure` uses for
+/// the current module, and it is deliberate — reading the interpreter's own
+/// accessor is what makes this faithful, including the edge cases. In particular
+/// `closure_stack.last()` is the *innermost* closure, so a `LoadCaptured` in
+/// natively-compiled code that is not a closure body would read whatever closure is
+/// on top. The interpreter behaves identically, so reproducing it is the correct
+/// outcome, not a bug to guard against here (ALY-52/ALY-54 are the places that
+/// would want fixing, separately).
+///
+/// Both interpreter failure modes are returned as the fallback sentinel rather than
+/// raised, because a leaf helper cannot raise a catchable error:
+///   * no active closure      -> `RuntimeError("LoadCaptured without active closure")`
+///   * capture index too high -> `RuntimeError("Capture index N out of bounds")`
+/// The lowering turns either into the interpreter boundary exit, which raises them
+/// for real.
+///
+/// NOT YET LOWERED. See the note on the RefCell helpers.
+unsafe extern "C" fn helper_load_captured(index: u32, shared_state: *mut ()) -> u64 {
+    let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
+        Some(ptr) => &*ptr.as_ptr(),
+        None => return JIT_INTERPRETER_FALLBACK_SENTINEL,
+    };
+    if bridge.task_arc.is_null() {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+    let Some(closure_val) = (&*bridge.task_arc).current_closure() else {
+        // Matches the interpreter's "LoadCaptured without active closure".
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    };
+    let Some(ptr) = closure_val.as_ptr::<crate::vm::object::Closure>() else {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    };
+    let closure = &*ptr.as_ptr();
+    // `get_captured` is bounds-checked and returns None, which is the interpreter's
+    // "Capture index N out of bounds".
+    match closure.get_captured(index as usize) {
+        Some(value) => value.raw(),
+        None => JIT_INTERPRETER_FALLBACK_SENTINEL,
+    }
+}
+
+/// Write one capture of the closure currently executing.
+///
+/// Reads the active closure from the task via `Task::current_closure()`, exactly as
+/// the interpreter does and as `helper_load_captured` does — the innermost closure
+/// on `closure_stack`, which is faithful to the handler including its edge cases.
+///
+/// Both interpreter failure modes return `JIT_STORE_FALLBACK` rather than being
+/// raised, since a leaf helper cannot raise a catchable error:
+///   * no active closure  -> `RuntimeError("StoreCaptured without active closure")`
+///   * capture index high -> the `set_captured` error string, a `RuntimeError`
+///
+/// The check happens before the write, so a fallback return means the closure was
+/// not modified and an interpreter fallback cannot double-apply the store.
+///
+/// NOT YET LOWERED. See the note on the RefCell helpers.
+unsafe extern "C" fn helper_store_captured(
+    index: u32,
+    value_raw: u64,
+    shared_state: *mut (),
+) -> i8 {
+    let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
+        Some(ptr) => &*ptr.as_ptr(),
+        None => return JIT_STORE_FALLBACK,
+    };
+    if bridge.task_arc.is_null() {
+        return JIT_STORE_FALLBACK;
+    }
+    let Some(closure_val) = (&*bridge.task_arc).current_closure() else {
+        // Matches the interpreter's "StoreCaptured without active closure".
+        return JIT_STORE_FALLBACK;
+    };
+    let Some(ptr) = closure_val.as_ptr::<crate::vm::object::Closure>() else {
+        return JIT_STORE_FALLBACK;
+    };
+    let closure = &mut *ptr.as_ptr();
+    match closure.set_captured(index as usize, Value::from_raw(value_raw)) {
+        Ok(()) => JIT_STORE_SUCCESS,
+        Err(_) => JIT_STORE_FALLBACK,
+    }
+}
+
+/// Patch one capture slot of an existing closure.
+///
+/// This is how recursive closures are wired up: `MakeClosure` runs first, then
+/// `SetClosureCapture` writes the closure into its own slot.
+///
+/// `JIT_STORE_FALLBACK` means nothing was mutated. That covers a non-pointer
+/// receiver, which the interpreter reports as `TypeError("Expected closure")`, and
+/// a capture index out of range, which `Closure::set_captured` reports as an error
+/// string the interpreter turns into a `RuntimeError`. Both are handed back rather
+/// than raised, because a leaf helper cannot raise a catchable error — the lowering
+/// turns a fallback into the interpreter boundary exit.
+///
+/// NOT YET LOWERED. See the note on the RefCell helpers.
+unsafe extern "C" fn helper_set_closure_capture(
+    closure_raw: u64,
+    index: u32,
+    value_raw: u64,
+    _shared_state: *mut (),
+) -> i8 {
+    let closure_value = Value::from_raw(closure_raw);
+    // Deliberately the interpreter's weak `is_ptr()` check, not a TypeId
+    // comparison. See ALY-54: strengthening it here would diverge from the
+    // interpreter rather than fix anything.
+    if !closure_value.is_ptr() {
+        return JIT_STORE_FALLBACK;
+    }
+    let Some(ptr) = closure_value.as_ptr::<crate::vm::object::Closure>() else {
+        return JIT_STORE_FALLBACK;
+    };
+    let closure = &mut *ptr.as_ptr();
+    // `set_captured` bounds-checks, so an out-of-range index lands here rather than
+    // writing past the capture vector.
+    match closure.set_captured(index as usize, Value::from_raw(value_raw)) {
+        Ok(()) => JIT_STORE_SUCCESS,
+        Err(_) => JIT_STORE_FALLBACK,
+    }
+}
+
+// Unused until the Cranelift lowering for MakeClosure exists; see the note on the
+// RefCell helpers above for why that is marked rather than left to warn.
+unsafe extern "C" fn helper_make_closure(
+    func_id: u32,
+    captures_ptr: *const u64,
+    capture_count: u32,
+    shared_state: *mut (),
+) -> u64 {
+    let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
+        Some(ptr) => &*ptr.as_ptr(),
+        None => return 0,
+    };
+    if bridge.gc.is_null() || bridge.task_arc.is_null() {
+        return 0;
+    }
+
+    // `Closure::with_module` needs an `Arc<Module>`, which cannot be reconstructed
+    // from the raw `*const Module` the lowering has. The bridge carries the current
+    // task, so the module comes from there — the same source the interpreter uses.
+    let module = {
+        let task_arc = &*bridge.task_arc;
+        task_arc.current_module()
+    };
+
+    let captures: Vec<Value> = if captures_ptr.is_null() || capture_count == 0 {
+        Vec::new()
+    } else {
+        (0..capture_count as usize)
+            .map(|i| Value::from_raw(*captures_ptr.add(i)))
+            .collect()
+    };
+
+    // Every capture is a live value across the allocation, and native stack maps are
+    // empty, so root them all — `EphemeralRootScope::open` filters to heap values
+    // itself. Fail closed to null, matching `helper_alloc_object`.
+    let Some(_scope) = EphemeralRootScope::open(bridge, &captures) else {
+        return 0;
+    };
+
+    let closure = crate::vm::object::Closure::with_module(func_id as usize, captures, module);
+    let mut gc = (&*bridge.gc).lock();
+    let ptr = gc.allocate(closure);
+    Value::from_ptr(NonNull::new(ptr.as_ptr()).unwrap()).raw()
+}
+
+/// Allocate a RefCell holding `initial_raw`.
+///
+/// Returns null when the root set is unavailable, so the allocation cannot happen
+/// with an unprotected operand: native stack maps are empty, so a collection during
+/// this allocation would not see `initial_raw`.
+///
+/// Null is the codebase's convention for an allocating helper failing —
+/// `helper_alloc_object` does the same, and the `NewObject` lowering tests
+/// `icmp_imm(Equal, ptr, 0)`. This originally returned `u64::MAX`, a bespoke
+/// sentinel sitting in tagged-pointer space; matching the convention means the
+/// lowering can reuse the established `is_null` test and there is one fewer magic
+/// value to reason about.
+// Unused until the Cranelift lowering for RefCell exists. Marked rather than left
+// to warn on every build: these are deliberately unreachable, and the alternative
+// -- wiring them now without a differential test -- is the thing D4.3 got wrong.
+unsafe extern "C" fn helper_new_refcell(initial_raw: u64, shared_state: *mut ()) -> u64 {
+    let bridge = match NonNull::new(shared_state.cast::<JitRuntimeBridgeContext>()) {
+        Some(ptr) => &*ptr.as_ptr(),
+        None => return 0,
+    };
+    if bridge.gc.is_null() {
+        return 0;
+    }
+    let initial = Value::from_raw(initial_raw);
+    // Root the initial value across the allocation, exactly as `helper_alloc_array`
+    // roots its operands, and fail closed if that is not possible.
+    let Some(_scope) = EphemeralRootScope::open(bridge, &[initial]) else {
+        return 0;
+    };
+    let mut gc = (&*bridge.gc).lock();
+    let ptr = gc.allocate(crate::vm::object::RefCell::new(initial));
+    Value::from_ptr(NonNull::new(ptr.as_ptr()).unwrap()).raw()
+}
+
+/// Read a RefCell's value.
+///
+/// Returns the interpreter-fallback sentinel for a non-pointer receiver, matching
+/// the interpreter's `TypeError("Expected RefCell")` by handing the error back
+/// rather than raising it: a leaf helper cannot raise a catchable error.
+unsafe extern "C" fn helper_load_refcell(refcell_raw: u64, _shared_state: *mut ()) -> u64 {
+    let refcell_value = Value::from_raw(refcell_raw);
+    if !refcell_value.is_ptr() {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+    let ptr = refcell_value.as_ptr::<crate::vm::object::RefCell>();
+    match ptr {
+        Some(ptr) => (&*ptr.as_ptr()).get().raw(),
+        None => JIT_INTERPRETER_FALLBACK_SENTINEL,
+    }
+}
+
+/// Write `value_raw` into a RefCell.
+///
+/// `JIT_STORE_FALLBACK` is returned for a non-pointer receiver. The check happens
+/// before the write, so a fallback return means nothing was mutated.
+// Unused until the Cranelift lowering for RefCell exists. Marked rather than left
+// to warn on every build: these are deliberately unreachable, and the alternative
+// -- wiring them now without a differential test -- is the thing D4.3 got wrong.
+unsafe extern "C" fn helper_store_refcell(
+    refcell_raw: u64,
+    value_raw: u64,
+    _shared_state: *mut (),
+) -> i8 {
+    let refcell_value = Value::from_raw(refcell_raw);
+    if !refcell_value.is_ptr() {
+        return JIT_STORE_FALLBACK;
+    }
+    let value = Value::from_raw(value_raw);
+    let Some(ptr) = refcell_value.as_ptr::<crate::vm::object::RefCell>() else {
+        return JIT_STORE_FALLBACK;
+    };
+    (&mut *ptr.as_ptr()).set(value);
+    JIT_STORE_SUCCESS
+}
+
+/// Exact field load.
+///
+/// This is **not** an implementation of the interpreter's `LoadFieldExact`. It
+/// omits two things the interpreter does, and the omission is why the opcode is
+/// `Rejected` in `jit/capability.rs` rather than `HelperExact`:
+///
+///  * it does not consult `__node_compat_descriptor` accessors, so a field
+///    installed with a `get` descriptor returns the raw slot instead of invoking
+///    the getter;
+///  * it does not unwrap a proxy receiver, so `jit_object_ptr_checked` returns
+///    `None` and the load yields null where the interpreter reads the target.
+///
+/// It also does not pass through `helper_object_get_shape_field`, which resolves
+/// slots through a shape adapter. Do not wire this helper to `LoadFieldExact`
+/// without all three, and do not promote the opcode on the strength of this
+/// comment — see /workspace/specs/2026-10-03-raya-d4-fixed-layout-objects.md.
 unsafe extern "C" fn helper_object_get_field(
     object_raw: u64,
     expected_slot: u32,
@@ -1703,43 +2573,34 @@ unsafe extern "C" fn helper_object_get_field(
     let _ = bridge;
     let _ = module_ptr;
     let _ = func_id;
-    let binding = StructuralSlotBinding::Field(expected_slot as usize);
+    let _ = object_val;
 
-    match binding {
-        StructuralSlotBinding::Field(slot) => object.get_field(slot).unwrap_or(Value::null()).raw(),
-        StructuralSlotBinding::Method(method_slot) => {
-            let Some(nominal_type_id) = object.nominal_type_id_usize() else {
-                return Value::null().raw();
-            };
-            let (func_id, method_module) = {
-                let classes = (&*bridge.classes).read();
-                let Some(class) = classes.get_class(nominal_type_id) else {
-                    return Value::null().raw();
-                };
-                let Some(fid) = class.vtable.get_method(method_slot) else {
-                    return Value::null().raw();
-                };
-                (fid, class.module.clone())
-            };
-
-            let bound = BoundMethod {
-                receiver: object_val,
-                func_id,
-                module: method_module,
-            };
-            let mut gc = (&*bridge.gc).lock();
-            let bm_ptr = gc.allocate(bound);
-            Value::from_ptr(NonNull::new(bm_ptr.as_ptr()).unwrap()).raw()
-        }
-        StructuralSlotBinding::Dynamic(key) => object
-            .dyn_map()
-            .and_then(|dyn_map| dyn_map.get(&key).copied())
-            .unwrap_or(Value::null())
-            .raw(),
-        StructuralSlotBinding::Missing => Value::null().raw(),
-    }
+    // A raw field read, matching the interpreter's `LoadFieldExact`. See
+    // `helper_object_set_field` for why there is no adapter resolution.
+    //
+    // The `Method`, `Dynamic` and `Missing` arms this used to carry were
+    // unreachable, since `binding` was constructed as `Field`. The `Method` arm
+    // also allocated a `BoundMethod` under the GC lock, which a plain field read
+    // has no reason to do. Gone.
+    object
+        .get_field(expected_slot as usize)
+        .unwrap_or(Value::null())
+        .raw()
 }
 
+/// Exact field store.
+///
+/// Unwired: nothing in `jit/backend/cranelift/lowering.rs` references
+/// `HELPER_OBJECT_SET_FIELD_OFFSET`, which is consistent with `StoreFieldExact`
+/// being `InterpreterBoundary`.
+///
+/// It is also **not** a faithful implementation of that opcode. The interpreter's
+/// `StoreFieldExact` consults `__node_compat_descriptor` and, for a setter-backed
+/// field, invokes the setter as a callable frame plus the writability checks
+/// (`vm/interpreter/opcodes/objects.rs:763-800`). That is not expressible as a
+/// leaf helper returning a value, which is why the classification is correct and
+/// why this helper must never be wired to close the gap. `StoreFieldExact` stays
+/// `InterpreterBoundary` permanently.
 unsafe extern "C" fn helper_object_set_field(
     object_raw: u64,
     expected_slot: u32,
@@ -1760,17 +2621,20 @@ unsafe extern "C" fn helper_object_set_field(
     let _ = bridge;
     let _ = module_ptr;
     let _ = func_id;
-    let binding = StructuralSlotBinding::Field(expected_slot as usize);
-    match binding {
-        StructuralSlotBinding::Field(slot) => {
-            object.set_field(slot, Value::from_raw(value_raw)).is_ok()
-        }
-        StructuralSlotBinding::Dynamic(key) => {
-            object.ensure_dyn_map().insert(key, Value::from_raw(value_raw));
-            true
-        }
-        StructuralSlotBinding::Method(_) | StructuralSlotBinding::Missing => false,
-    }
+    // A raw field write, matching the interpreter's `StoreFieldExact`, which also
+    // constructs `StructuralSlotBinding::Field(field_offset)` directly. There is
+    // deliberately no adapter resolution here: the opcode is
+    // `InterpreterBoundary` because its handler can invoke a descriptor setter as
+    // a callable frame, which a leaf helper cannot express, so a faithful
+    // implementation is not available to write.
+    //
+    // This previously carried `Dynamic`, `Method` and `Missing` arms behind a
+    // `match` on a value constructed as `Field` one line above. All three were
+    // unreachable, and the `Dynamic` arm carried an allocation the helper had no
+    // business performing. Removing them makes the helper honest about what it is.
+    object
+        .set_field(expected_slot as usize, Value::from_raw(value_raw))
+        .is_ok()
 }
 
 unsafe extern "C" fn helper_object_implements_shape(
@@ -1899,6 +2763,20 @@ unsafe extern "C" fn helper_object_get_shape_field(
     }
 }
 
+/// Structural shape field store.
+///
+/// Wired at `jit/backend/cranelift/lowering.rs:1325`, but the opcode is
+/// `Rejected` in `jit/capability.rs`, so this arm is not reachable from normal
+/// compilation. Kept wired so the helper stays covered by its lowering test.
+///
+/// Like `helper_object_get_field` it does not consult descriptor accessors or
+/// unwrap a proxy, and unlike `helper_object_get_field` it takes **no layout
+/// generation** — the store lowering bakes none, because the generation the load
+/// path uses comes from `any_layout_generation` on the compiled function. Adding
+/// one would change the helper ABI for a path that cannot currently be reached,
+/// so it is recorded as a precondition for re-promotion rather than done blind.
+/// See Gap 5 in
+/// /workspace/specs/2026-10-03-raya-d4-fixed-layout-objects.md.
 unsafe extern "C" fn helper_object_set_shape_field(
     object_raw: u64,
     required_shape: u64,
@@ -1926,7 +2804,18 @@ unsafe extern "C" fn helper_object_set_shape_field(
             .map(|_| JIT_STORE_SUCCESS)
             .unwrap_or(JIT_STORE_FALLBACK),
         StructuralSlotBinding::Dynamic(key) => {
-            object.ensure_dyn_map().insert(key, Value::from_raw(value_raw));
+            // See `helper_object_set_field`: `ensure_dyn_map` allocates inside a
+            // JIT helper with empty native stack maps. Root the operands across
+            // the allocation window before touching the map. Opening the scope
+            // first is what keeps the FALLBACK contract: if roots are
+            // unavailable we return before any mutation, so a caller falling back
+            // to the interpreter cannot double-apply the store.
+            let value = Value::from_raw(value_raw);
+            let Some(_scope) = EphemeralRootScope::open(bridge, &[object_val, value])
+            else {
+                return JIT_STORE_FALLBACK;
+            };
+            object.ensure_dyn_map().insert(key, value);
             JIT_STORE_SUCCESS
         }
         StructuralSlotBinding::Method(_) | StructuralSlotBinding::Missing => JIT_STORE_FALLBACK,
@@ -2377,6 +3266,630 @@ mod tests {
         }};
     }
 
+    /// D4.2 recorded, and D4.3 inherited, that `EphemeralRootScope` was never
+    /// asserted: helpers opened a scope, but nothing checked that the roots were
+    /// actually installed during the window or released afterwards. These two
+    /// tests close that, and both properties are safety-critical rather than
+    /// cosmetic.
+    ///
+    /// The window matters because JIT-compiled native frames publish empty stack
+    /// maps. A collection triggered by an allocation inside a helper cannot see
+    /// operands living only in machine registers, so they must be published as
+    /// ephemeral roots for the duration. A scope that failed to release would
+    /// silently grow the root set across every call.
+
+    #[test]
+    fn ephemeral_root_scope_releases_roots_after_a_scoped_push() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+            let module_ptr = Arc::as_ptr(&module) as *const ();
+
+            // Baseline: nothing rooted.
+            assert!(shared.ephemeral_gc_roots.read().is_empty());
+
+            let arr_ptr = unsafe { helper_alloc_array(6, Value::i32(2).raw(), module_ptr, ss) };
+            let arr_val = unsafe { Value::from_ptr(NonNull::new(arr_ptr.cast::<u8>()).unwrap()) };
+
+            assert_eq!(
+                unsafe { helper_array_push(arr_val.raw(), Value::i32(11).raw(), ss) },
+                JIT_STORE_SUCCESS
+            );
+
+            // The scope must have released exactly what it added, leaving the
+            // shared root list as it found it.
+            assert!(
+                shared.ephemeral_gc_roots.read().is_empty(),
+                "EphemeralRootScope leaked roots: {:?}",
+                shared.ephemeral_gc_roots.read()
+            );
+            // And the push really happened, so this is not passing vacuously.
+            assert_eq!(unsafe { helper_array_len(arr_val.raw(), ss) }, 3);
+        });
+    }
+
+    #[test]
+    fn scoped_helper_fails_closed_and_mutates_nothing_without_a_root_set() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let mut bridge = bridge;
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+            let module_ptr = Arc::as_ptr(&module) as *const ();
+
+            let arr_ptr = unsafe { helper_alloc_array(6, Value::i32(2).raw(), module_ptr, ss) };
+            let arr_val = unsafe { Value::from_ptr(NonNull::new(arr_ptr.cast::<u8>()).unwrap()) };
+            let len_before = unsafe { helper_array_len(arr_val.raw(), ss) };
+
+            // Deny the root set. `EphemeralRootScope::open` returns None here, and
+            // the helper must bail out rather than allocate with unprotected
+            // operands.
+            bridge.ephemeral_gc_roots = std::ptr::null();
+
+            assert_eq!(
+                unsafe { helper_array_push(arr_val.raw(), Value::i32(13).raw(), ss) },
+                JIT_STORE_FALLBACK,
+                "push must fail closed when the root set is unavailable"
+            );
+            // A fallback return has to mean "nothing was mutated", or a caller
+            // falling back to the interpreter could double-apply the operation.
+            assert_eq!(
+                unsafe { helper_array_len(arr_val.raw(), ss) },
+                len_before,
+                "failed-closed push must not mutate the array"
+            );
+        });
+    }
+
+    /// D4.4: the RefCell helpers exist and are tested before anything can call
+    /// them. They are NOT wired into the lowering, and `NewRefCell`,
+    /// `LoadRefCell` and `StoreRefCell` stay `Rejected` until it is.
+    /// D4.4: `helper_make_closure`, tested before anything can call it. NOT lowered
+    /// yet, and `MakeClosure` stays `Rejected`.
+    #[test]
+    fn make_closure_helper_builds_a_closure_over_the_given_captures() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // Captures must arrive in capture order: the interpreter pops them off
+            // the stack and reverses, so the JIT passes them already ordered.
+            let captures: Vec<u64> = vec![
+                Value::i32(7).raw(),
+                Value::i32(8).raw(),
+                Value::i32(9).raw(),
+            ];
+
+            let raw = unsafe {
+                helper_make_closure(42, captures.as_ptr(), captures.len() as u32, ss)
+            };
+            assert_ne!(raw, 0, "closure allocation must not fail closed here");
+
+            // Read the closure back out of the GC and check what was captured.
+            let closure = unsafe {
+                let value = Value::from_raw(raw);
+                let ptr = value.as_ptr::<crate::vm::object::Closure>().unwrap();
+                &*ptr.as_ptr()
+            };
+            assert_eq!(closure.func_id, 42);
+            let got: Vec<i32> = closure
+                .captures
+                .iter()
+                .map(|value| value.as_i32().unwrap_or(i32::MIN))
+                .collect();
+            assert_eq!(
+                got,
+                vec![7, 8, 9],
+                "captures must survive in the order supplied"
+            );
+        });
+    }
+
+    /// `helper_set_closure_capture`, tested before anything can call it.
+    /// `helper_load_captured`, tested before anything can call it. NOT lowered yet.
+    /// `helper_bind_method`, tested before anything can call it. NOT lowered yet.
+    ///
+    /// The failure cases matter more than the success case here: the interpreter
+    /// has four distinct diagnostics for this opcode and every one of them has to
+    /// collapse to a zero return so the boundary exit can raise the right thing.
+    /// D4.6 `Await`, paths 1 and 2. NOT lowered yet.
+    ///
+    /// The first test is the one that matters: `Value::as_u64` is **tag-gated**, so
+    /// `await` on a boxed `i32 42` must push that exact value back. A payload-based
+    /// "is this a task id" test would read 42 as a task id, and a guard that rejected
+    /// integer-looking values would break ordinary `await 42`.
+    #[test]
+    fn await_helper_pushes_back_a_non_task_value() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // Path 1, the tagged-integer case: unchanged, not read as task id 42.
+            for value in [
+                Value::i32(42),
+                Value::i64(42),
+                Value::bool(true),
+                Value::null(),
+            ] {
+                assert_eq!(
+                    unsafe { helper_await_task(value.raw(), ss) },
+                    value.raw(),
+                    "a non-task value must be pushed back unchanged: {value:?}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn await_helper_returns_a_completed_task_result_and_refuses_otherwise() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // Path 2: a completed task yields its result.
+            let completed = std::sync::Arc::new(
+                crate::vm::scheduler::Task::new(1, module.clone(), None),
+            );
+            completed.complete(Value::i32(99));
+            let id = completed.id();
+            let as_u64 = {
+                // Task ids are carried as tagged u64 Values, which is exactly what `Await`
+                // reads: `TaskId::as_u64` -> `Value::u64` -> tag-gated `as_u64()` back.
+                crate::vm::value::Value::u64(id.as_u64()).raw()
+            };
+            {
+                let mut tasks = unsafe { (&*bridge.tasks).write() };
+                tasks.insert(id, completed.clone());
+            }
+            assert_eq!(
+                unsafe { helper_await_task(as_u64, ss) },
+                Value::i32(99).raw(),
+                "a completed task must yield its result"
+            );
+
+            // A pending task must fall back rather than inventing a value: the
+            // interpreter suspends, and the JIT has no AwaitTask suspend reason.
+            let pending = std::sync::Arc::new(
+                crate::vm::scheduler::Task::new(2, module.clone(), None),
+            );
+            let pending_id = pending.id();
+            let pending_as_u64 = {
+                crate::vm::value::Value::u64(pending_id.as_u64()).raw()
+            };
+            {
+                let mut tasks = unsafe { (&*bridge.tasks).write() };
+                tasks.insert(pending_id, pending.clone());
+            }
+            assert_eq!(
+                unsafe { helper_await_task(pending_as_u64, ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL,
+                "a pending task must fall back so the interpreter suspends"
+            );
+
+            // An unknown id falls back too, so the interpreter raises its own error.
+            let unknown = {
+                crate::vm::value::Value::u64(u64::MAX >> 4).raw()
+            };
+            assert_eq!(
+                unsafe { helper_await_task(unknown, ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL
+            );
+        });
+    }
+
+    /// D4.7 `DynGetKeyed`: the two views a helper can honestly reproduce, and the
+    /// one it must decline.
+    ///
+    /// The `Struct` case is the important half, and its expected answer has CHANGED.
+    /// This test used to assert that an unknown `Struct` field returns the fallback
+    /// sentinel because "the bridge does not carry `structural_object_shapes`" — that
+    /// was false (D4.10), and the assertion was also wrong for the fixture it used: a
+    /// `new_nominal` object. A cross-model review of PR #1 found the real divergence —
+    /// the interpreter answers a **bound method** there via method-slot lookup, and this
+    /// helper answered `null`, a silent wrong value reported as `Completed`.
+    ///
+    /// So the fixture's shape and the assertion had to agree, and they now do: a NOMINAL
+    /// receiver declines, a STRUCTURAL one computes null. A test that only exercised
+    /// `Arr` would still pass while any of that regressed.
+    #[test]
+    fn dyn_get_keyed_helper_handles_arr_and_str_and_defers_the_rest() {
+        use crate::vm::object::{Array, Object, RayaString};
+        use std::sync::Arc;
+
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // Arrange an array and a string in the shared GC.
+            let (arr_raw, str_raw, obj_raw) = {
+                let mut gc = shared.gc.lock();
+
+                let mut array = Array::new(0, 2);
+                array.set(0, Value::i32(7)).unwrap();
+                array.set(1, Value::i32(8)).unwrap();
+                let array_ptr = gc.allocate(array);
+                let arr_raw = unsafe {
+                    Value::from_ptr(NonNull::new(array_ptr.as_ptr()).unwrap()).raw()
+                };
+
+                let string_ptr = gc.allocate(RayaString::new("hello".to_string()));
+                let str_raw =
+                    unsafe { Value::from_ptr(NonNull::new(string_ptr.as_ptr()).unwrap()).raw() };
+
+                // A nominal object: a `Struct` view for the keyed path.
+                let obj_ptr = gc.allocate(Object::new_nominal(1, 5, 1));
+                let obj_raw =
+                    unsafe { Value::from_ptr(NonNull::new(obj_ptr.as_ptr()).unwrap()).raw() };
+
+                (arr_raw, str_raw, obj_raw)
+            };
+            let _ = Arc::strong_count(&shared);
+
+            // Arr, in range.
+            let arr_key = Value::i32(1);
+            assert_eq!(
+                unsafe { helper_dyn_get_keyed(arr_raw, arr_key.raw(), ss) },
+                Value::i32(8).raw(),
+                "an in-range array index must read the element"
+            );
+            // Arr, out of range: a legitimate null, not a fallback.
+            let oob = Value::i32(99);
+            assert_eq!(
+                unsafe { helper_dyn_get_keyed(arr_raw, oob.raw(), ss) },
+                Value::null().raw(),
+                "an out-of-range array index is null, not a fallback"
+            );
+
+            // Str, char index — each char is a freshly allocated RayaString.
+            let idx = Value::i32(1);
+            let char_value =
+                unsafe { Value::from_raw(helper_dyn_get_keyed(str_raw, idx.raw(), ss)) };
+            let Some(char_ptr) = (unsafe { char_value.as_ptr::<RayaString>() }) else {
+                panic!("expected an allocated RayaString for the character");
+            };
+            assert_eq!(unsafe { char_ptr.as_ref().data.as_str() }, "e");
+
+            // Str, "length".
+            let length_key = unsafe {
+                let mut gc = shared.gc.lock();
+                let k = gc.allocate(RayaString::new("length".to_string()));
+                Value::from_raw(Value::from_ptr(NonNull::new(k.as_ptr()).unwrap()).raw())
+            };
+            assert_eq!(
+                unsafe { helper_dyn_get_keyed(str_raw, length_key.raw(), ss) },
+                Value::i32(5).raw()
+            );
+
+            // Struct, unknown key. This assertion used to demand a DECLINE, on the
+            // reasoning that a Struct lookup "needs structural_object_shapes, which
+            // the bridge lacks". Both halves of that were wrong, and the engine-level
+            // differential caught it:
+            //
+            //   * the bridge DOES carry the registries the lookup needs;
+            //   * and an unknown Struct field is **null, not a TypeError** -- the
+            //     interpreter falls back to the object's dynamic property map, ending
+            //     in `Value::null()`.
+            //
+            // `obj_raw` here is `Object::new_nominal(1, 5, 1)` -- a NOMINAL object --
+            // and a cross-model review of PR #1 found that asserting null for it was
+            // wrong: with no field index the interpreter falls through to a METHOD-SLOT
+            // lookup and returns a BOUND METHOD, so a compiled function returned null for
+            // a callable. The helper now DECLINES any nominal receiver.
+            //
+            // This test asserted the bug until that fix, which is worth remembering:
+            // the fixture's shape and the assertion disagreed, and the suite was green.
+            let zero = Value::i32(0);
+            assert_eq!(
+                unsafe { helper_dyn_get_keyed(obj_raw, zero.raw(), ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL,
+                "a NOMINAL receiver with no field index must decline: the interpreter \
+                 may resolve a bound method there"
+            );
+
+            // The STRUCTURAL case is the one that computes null: no nominal type means
+            // no method slot, so with no dynamic map there is nothing to look up and
+            // null IS the interpreter's answer.
+            let structural_raw = {
+                let mut gc = shared.gc.lock();
+                let p = gc.allocate(Object::new_structural(1, 1));
+                unsafe { Value::from_raw(Value::from_ptr(NonNull::new(p.as_ptr()).unwrap()).raw()) }
+            };
+            let raw = unsafe { helper_dyn_get_keyed(structural_raw.raw(), zero.raw(), ss) };
+            assert!(
+                unsafe { Value::from_raw(raw) }.is_null(),
+                "a STRUCTURAL receiver with no field index and no dynamic map must \
+                 answer null, got 0x{raw:016X}"
+            );
+
+            // Non-node target also defers.
+            assert_eq!(
+                unsafe { helper_dyn_get_keyed(Value::i32(5).raw(), Value::i32(0).raw(), ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL
+            );
+        });
+    }
+
+    #[test]
+    fn bind_method_helper_binds_and_rejects() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // Register the class first: `register_class` assigns the nominal type
+            // id, and the object must carry that same id.
+            let nominal_type_id = {
+                let mut classes = unsafe { (&*bridge.classes).write() };
+                let mut class = crate::vm::object::Class::new(0, "Point".to_string(), 2);
+                class.module = Some(module.clone());
+                class.vtable.add_method(42);
+                classes.register_class(class)
+            };
+
+            let object_raw = {
+                let mut gc = shared.gc.lock();
+                let mut object =
+                    crate::vm::object::Object::new_nominal(1, nominal_type_id as u32, 2);
+                object.set_field(0, Value::i32(99)).unwrap();
+                let ptr = gc.allocate(object);
+                unsafe { Value::from_ptr(NonNull::new(ptr.as_ptr()).unwrap()).raw() }
+            };
+            {
+                let mut classes = unsafe { (&*bridge.classes).write() };
+                // `register_class` assigns the type id, so build a class carrying the
+                // one we need and register it; the object below uses that id.
+                let mut class = crate::vm::object::Class::new(0, "Point".to_string(), 2);
+                class.module = Some(module.clone());
+                class.vtable.add_method(42);
+                let id = classes.register_class(class);
+            }
+
+            // Success: a BoundMethod carrying the receiver and the resolved func_id.
+            let bound = unsafe { helper_bind_method(object_raw, 0, ss) };
+            assert_ne!(bound, 0, "binding method slot 0 must succeed");
+            let bm = unsafe {
+                let value = Value::from_raw(bound);
+                let ptr = value
+                    .as_ptr::<crate::vm::object::BoundMethod>()
+                    .expect("result must be a BoundMethod");
+                &*ptr.as_ptr()
+            };
+            assert_eq!(bm.func_id, 42, "vtable slot must resolve to the func id");
+            assert_eq!(bm.receiver.raw(), object_raw, "receiver must be carried");
+
+            // Failure cases, each of which is a distinct interpreter diagnostic.
+            assert_eq!(
+                unsafe { helper_bind_method(Value::i32(1).raw(), 0, ss) },
+                0,
+                "a non-pointer receiver must be refused"
+            );
+            assert_eq!(
+                unsafe { helper_bind_method(object_raw, 99, ss) },
+                0,
+                "an unknown method slot must be refused"
+            );
+        });
+    }
+
+    #[test]
+    fn load_captured_helper_reads_the_active_closure() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // A closure capturing [7, 8], installed as the task's active closure.
+            let closure_raw = {
+                let mut gc = shared.gc.lock();
+                let closure =
+                    crate::vm::object::Closure::new(0, vec![Value::i32(7), Value::i32(8)]);
+                let ptr = gc.allocate(closure);
+                unsafe { Value::from_ptr(NonNull::new(ptr.as_ptr()).unwrap()).raw() }
+            };
+            task.push_closure(unsafe { Value::from_raw(closure_raw) });
+
+            // The helper reads the active closure from the task, not from a frame.
+            assert_eq!(
+                unsafe { helper_load_captured(0, ss) },
+                Value::i32(7).raw()
+            );
+            assert_eq!(
+                unsafe { helper_load_captured(1, ss) },
+                Value::i32(8).raw()
+            );
+
+            // Out of range: bounds-checked, so a fallback rather than a read past
+            // the capture vector.
+            assert_eq!(
+                unsafe { helper_load_captured(9, ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL
+            );
+
+            // With no active closure the interpreter raises "LoadCaptured without
+            // active closure", so the helper must refuse rather than invent a value.
+            task.pop_closure();
+            assert_eq!(
+                unsafe { helper_load_captured(0, ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL
+            );
+        });
+    }
+
+    /// `helper_store_captured`, tested before anything can call it. NOT lowered yet.
+    #[test]
+    fn store_captured_helper_writes_through_the_active_closure() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            let closure_raw = {
+                let mut gc = shared.gc.lock();
+                let closure =
+                    crate::vm::object::Closure::new(0, vec![Value::i32(7), Value::i32(8)]);
+                let ptr = gc.allocate(closure);
+                unsafe { Value::from_ptr(NonNull::new(ptr.as_ptr()).unwrap()).raw() }
+            };
+            task.push_closure(unsafe { Value::from_raw(closure_raw) });
+
+            assert_eq!(
+                unsafe { helper_store_captured(0, Value::i32(42).raw(), ss) },
+                JIT_STORE_SUCCESS
+            );
+            // The write must be visible through the load helper, which reads the
+            // same active closure.
+            assert_eq!(
+                unsafe { helper_load_captured(0, ss) },
+                Value::i32(42).raw()
+            );
+
+            // Out of range falls back without mutating.
+            assert_eq!(
+                unsafe { helper_store_captured(9, Value::i32(1).raw(), ss) },
+                JIT_STORE_FALLBACK
+            );
+            assert_eq!(
+                unsafe { helper_load_captured(1, ss) },
+                Value::i32(8).raw(),
+                "a rejected store must leave the capture untouched"
+            );
+
+            // With no active closure the interpreter raises, so the helper refuses
+            // rather than writing to whatever happens to be on the stack.
+            task.pop_closure();
+            assert_eq!(
+                unsafe { helper_store_captured(0, Value::i32(1).raw(), ss) },
+                JIT_STORE_FALLBACK
+            );
+        });
+    }
+
+    #[test]
+    fn set_closure_capture_helper_patches_a_slot() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // A closure with one capture, holding 7.
+            let mut gc = shared.gc.lock();
+            let closure = crate::vm::object::Closure::new(0, vec![Value::i32(7)]);
+            let ptr = gc.allocate(closure);
+            let closure_raw =
+                unsafe { Value::from_ptr(NonNull::new(ptr.as_ptr()).unwrap()).raw() };
+            drop(gc);
+
+            // Patch the slot, then read it back.
+            assert_eq!(
+                unsafe { helper_set_closure_capture(closure_raw, 0, Value::i32(11).raw(), ss) },
+                JIT_STORE_SUCCESS
+            );
+            assert_eq!(
+                unsafe {
+                    let value = Value::from_raw(closure_raw);
+                    let c = &*value.as_ptr::<crate::vm::object::Closure>().unwrap().as_ptr();
+                    c.get_captured(0).unwrap().as_i32()
+                },
+                Some(11)
+            );
+
+            // Out of range: bounds-checked, so a fallback and no mutation rather
+            // than a write past the capture vector.
+            assert_eq!(
+                unsafe { helper_set_closure_capture(closure_raw, 9, Value::i32(1).raw(), ss) },
+                JIT_STORE_FALLBACK
+            );
+            // Non-pointer receiver: the interpreter's weak check, refused.
+            assert_eq!(
+                unsafe { helper_set_closure_capture(Value::i32(5).raw(), 0, Value::i32(1).raw(), ss) },
+                JIT_STORE_FALLBACK
+            );
+        });
+    }
+
+    #[test]
+    fn make_closure_helper_fails_closed_without_a_root_set() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let mut bridge = bridge;
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            let captures: Vec<u64> = vec![Value::i32(7).raw()];
+
+            // Native stack maps are empty, so allocating with unprotected captures
+            // could collect them.
+            bridge.ephemeral_gc_roots = std::ptr::null();
+
+            assert_eq!(
+                unsafe { helper_make_closure(42, captures.as_ptr(), 1, ss) },
+                0,
+                "closure allocation must fail closed without a root set"
+            );
+        });
+    }
+
+    #[test]
+    fn refcell_helpers_roundtrip_and_reject_non_pointers() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // allocate a RefCell holding 7, read it back, overwrite, read again.
+            let cell = unsafe { helper_new_refcell(Value::i32(7).raw(), ss) };
+            assert_ne!(cell, 0, "allocation must not fail closed here");
+            // `cell` is the RefCell's address, not its contents; the 7 lives
+            // inside it and comes back through the load helper.
+            assert_eq!(
+                unsafe { helper_load_refcell(cell, ss) },
+                Value::i32(7).raw()
+            );
+            assert_eq!(
+                unsafe { helper_store_refcell(cell, Value::i32(9).raw(), ss) },
+                JIT_STORE_SUCCESS
+            );
+            assert_eq!(
+                unsafe { Value::from_raw(helper_load_refcell(cell, ss)).as_i32() },
+                Some(9)
+            );
+        });
+    }
+
+    #[test]
+    fn refcell_helpers_reject_non_pointers() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // An immediate is not a pointer, so both must refuse. This is the
+            // interpreter's weak `is_ptr()` check reproduced exactly -- a heap
+            // value of the wrong type is still accepted, as it is in the
+            // interpreter today (ALY-54).
+            let immediate = Value::i32(5).raw();
+            assert_eq!(
+                unsafe { helper_load_refcell(immediate, ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL
+            );
+            assert_eq!(
+                unsafe { helper_store_refcell(immediate, Value::i32(1).raw(), ss) },
+                JIT_STORE_FALLBACK
+            );
+        });
+    }
+
+    #[test]
+    fn new_refcell_fails_closed_without_a_root_set() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let mut bridge = bridge;
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+
+            // Deny the root set. Native stack maps are empty, so allocating here
+            // with an unprotected operand could collect the initial value.
+            bridge.ephemeral_gc_roots = std::ptr::null();
+
+            assert_eq!(
+                unsafe { helper_new_refcell(Value::i32(7).raw(), ss) },
+                0,
+                "RefCell allocation must fail closed without a root set"
+            );
+        });
+    }
+
     #[test]
     fn jit_array_helpers_roundtrip_and_reject_non_arrays() {
         let (shared, module, code_cache, task) = array_helper_fixture();
@@ -2385,31 +3898,98 @@ mod tests {
             let module_ptr = Arc::as_ptr(&module) as *const ();
 
             // Dynamic array (AnyValue element id 6), capacity 2.
-            let arr_ptr = unsafe { helper_alloc_array(6, 2, module_ptr, ss) };
+            let arr_ptr = unsafe { helper_alloc_array(6, Value::i32(2).raw(), module_ptr, ss) };
             assert!(!arr_ptr.is_null());
             let arr_val = unsafe { Value::from_ptr(NonNull::new(arr_ptr.cast::<u8>()).unwrap()) };
 
             // len == 2, slots start null.
             assert_eq!(unsafe { helper_array_len(arr_val.raw(), ss) }, 2);
-            assert!(unsafe { Value::from_raw(helper_array_load(arr_val.raw(), 0, ss)) }.is_null());
+            assert!(unsafe { Value::from_raw(helper_array_load(arr_val.raw(), Value::i32(0).raw(), ss)) }.is_null());
 
             // store then load.
             assert_eq!(
-                unsafe { helper_array_store(arr_val.raw(), 0, Value::i32(7).raw(), ss) },
+                unsafe { helper_array_store(arr_val.raw(), Value::i32(0).raw(), Value::i32(7).raw(), ss) },
                 JIT_STORE_SUCCESS
             );
             assert_eq!(
-                unsafe { Value::from_raw(helper_array_load(arr_val.raw(), 0, ss)).as_i32() },
+                unsafe { Value::from_raw(helper_array_load(arr_val.raw(), Value::i32(0).raw(), ss)).as_i32() },
                 Some(7)
             );
 
+            // ---- The index coercion, through the helper --------------------------
+            //
+            // These four cases are the reason `array_load`/`array_store` take a boxed
+            // `Value` instead of an `i64`. Every one of them looks like a bug and is
+            // the interpreter's actual behaviour; a "sanitising" helper that clamped,
+            // rejected or defaulted would fail here rather than diverge in production.
+            {
+                // A non-numeric index means element 0. It does NOT decline — this is
+                // the case an i64 signature could not even represent.
+                assert_eq!(
+                    unsafe {
+                        Value::from_raw(helper_array_load(
+                            arr_val.raw(),
+                            Value::null().raw(),
+                            ss,
+                        ))
+                        .as_i32()
+                    },
+                    Some(7),
+                    "a null index must read element 0, matching the interpreter"
+                );
+                // A negative i32 wraps to usize::MAX, so the read is out of bounds and
+                // the helper declines for the interpreter to raise.
+                assert_eq!(
+                    unsafe { helper_array_load(arr_val.raw(), Value::i32(-1).raw(), ss) },
+                    JIT_INTERPRETER_FALLBACK_SENTINEL,
+                    "a negative i32 index wraps out of bounds and must decline"
+                );
+                assert_eq!(
+                    unsafe {
+                        helper_array_store(
+                            arr_val.raw(),
+                            Value::i32(-1).raw(),
+                            Value::i32(1).raw(),
+                            ss,
+                        )
+                    },
+                    JIT_STORE_FALLBACK,
+                    "a negative i32 index must not wrap around into a write"
+                );
+                // A negative f64 truncates toward zero and SUCCEEDS at element 0. This
+                // is the asymmetry that makes the coercion genuinely dangerous: the
+                // same negative offset errors as an i32 and works as an f64.
+                assert_eq!(
+                    unsafe {
+                        Value::from_raw(helper_array_load(
+                            arr_val.raw(),
+                            Value::f64(-0.5).raw(),
+                            ss,
+                        ))
+                        .as_i32()
+                    },
+                    Some(7),
+                    "a negative f64 index truncates to 0 and must read element 0"
+                );
+            }
+
             // out-of-bounds store falls back; load falls back with the sentinel.
             assert_eq!(
-                unsafe { helper_array_store(arr_val.raw(), 5, Value::i32(1).raw(), ss) },
+                unsafe { helper_array_store(arr_val.raw(), Value::i32(5).raw(), Value::i32(1).raw(), ss) },
                 JIT_STORE_FALLBACK
             );
+            // A REJECTED store must leave the array untouched. `StoreElem` does not
+            // grow -- `checked_set` reports OutOfBounds -- and this is the assertion
+            // that would catch an implementation which resized before discovering the
+            // index was invalid. `DynSetKeyed`'s Arr arm DOES resize, so conflating
+            // the two is exactly the miscompile this pins shut.
             assert_eq!(
-                unsafe { helper_array_load(arr_val.raw(), 5, ss) },
+                unsafe { helper_array_len(arr_val.raw(), ss) },
+                2,
+                "a rejected out-of-bounds store must not grow the array"
+            );
+            assert_eq!(
+                unsafe { helper_array_load(arr_val.raw(), Value::i32(5).raw(), ss) },
                 JIT_INTERPRETER_FALLBACK_SENTINEL
             );
 
@@ -2435,11 +4015,11 @@ mod tests {
                 JIT_ARRAY_LEN_FALLBACK_SENTINEL
             );
             assert_eq!(
-                unsafe { helper_array_load(string_val.raw(), 0, ss) },
+                unsafe { helper_array_load(string_val.raw(), Value::i32(0).raw(), ss) },
                 JIT_INTERPRETER_FALLBACK_SENTINEL
             );
             assert_eq!(
-                unsafe { helper_array_store(string_val.raw(), 0, Value::i32(1).raw(), ss) },
+                unsafe { helper_array_store(string_val.raw(), Value::i32(0).raw(), Value::i32(1).raw(), ss) },
                 JIT_STORE_FALLBACK
             );
             assert_eq!(
@@ -2457,19 +4037,19 @@ mod tests {
             let module_ptr = Arc::as_ptr(&module) as *const ();
 
             // Bool-typed array (element id 2): storing a bool succeeds, an i32 falls back.
-            let arr_ptr = unsafe { helper_alloc_array(2, 1, module_ptr, ss) };
+            let arr_ptr = unsafe { helper_alloc_array(2, Value::i32(1).raw(), module_ptr, ss) };
             let arr_val = unsafe { Value::from_ptr(NonNull::new(arr_ptr.cast::<u8>()).unwrap()) };
             assert_eq!(
-                unsafe { helper_array_store(arr_val.raw(), 0, Value::bool(true).raw(), ss) },
+                unsafe { helper_array_store(arr_val.raw(), Value::i32(0).raw(), Value::bool(true).raw(), ss) },
                 JIT_STORE_SUCCESS
             );
             assert_eq!(
-                unsafe { helper_array_store(arr_val.raw(), 0, Value::i32(1).raw(), ss) },
+                unsafe { helper_array_store(arr_val.raw(), Value::i32(0).raw(), Value::i32(1).raw(), ss) },
                 JIT_STORE_FALLBACK
             );
             // null is always accepted, even into a typed slot.
             assert_eq!(
-                unsafe { helper_array_store(arr_val.raw(), 0, Value::null().raw(), ss) },
+                unsafe { helper_array_store(arr_val.raw(), Value::i32(0).raw(), Value::null().raw(), ss) },
                 JIT_STORE_SUCCESS
             );
         });

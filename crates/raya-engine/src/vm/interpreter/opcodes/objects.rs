@@ -15,7 +15,12 @@ use crate::vm::value::Value;
 use crate::vm::VmError;
 use std::sync::Arc;
 
-const NODE_DESCRIPTOR_METADATA_KEY: &str = "__node_compat_descriptor";
+/// The metadata key under which a Node-compat property descriptor is stored.
+///
+/// Previously duplicated verbatim in `native.rs`. One definition now: two private
+/// copies of the same magic string is exactly the drift this milestone exists to
+/// remove, and a rename that updated one and not the other would be silent.
+pub(crate) const NODE_DESCRIPTOR_METADATA_KEY: &str = "__node_compat_descriptor";
 
 impl<'a> Interpreter<'a> {
     fn load_shape_field_on_non_object(
@@ -173,28 +178,6 @@ impl<'a> Interpreter<'a> {
         (field_offset < field_count).then(|| name.to_string())
     }
 
-    fn legacy_field_index_for_layout(field_name: &str, field_count: usize) -> Option<usize> {
-        let idx = match field_name {
-            "message" => 0,
-            "name" => 1,
-            "stack" => 2,
-            "cause" => 3,
-            "code" => 4,
-            "errno" => 5,
-            "syscall" => 6,
-            "path" => 7,
-            "errors" => 8,
-            "value" => 0,
-            "writable" => 1,
-            "configurable" => 2,
-            "enumerable" => 3,
-            "get" => 4,
-            "set" => 5,
-            _ => return None,
-        };
-        (idx < field_count).then_some(idx)
-    }
-
     fn field_name_for_offset(&self, obj: &Object, field_offset: usize) -> Option<String> {
         let nominal_type_id = obj.nominal_type_id_usize();
         let class_metadata = self.class_metadata.read();
@@ -218,23 +201,28 @@ impl<'a> Interpreter<'a> {
     }
 
     fn field_index_for_value(&self, obj_val: Value, field_name: &str) -> Option<usize> {
+        // Delegates to the shared resolver. This body was a SECOND, inline copy of the
+        // same three-step resolution that `get_field_index_for_value` had -- 24 callers
+        // on this one, 20 on that -- so the interpreter had two code paths that could
+        // drift. It is now one.
+        //
+        // It also used a differently-NAMED backstop, `legacy_field_index_for_layout`,
+        // which read as though it must behave differently from
+        // `legacy_object_literal_field_index`. Having compared both bodies they are
+        // the same name->index table and the same `(idx < field_count)` bound, so
+        // routing through the shared function is behaviour-preserving. **The name
+        // difference was the only warning sign, and it pointed the wrong way** -- a
+        // plausible-looking difference that would have made consolidating these two
+        // look like a P0.
         let obj_ptr = unsafe { obj_val.as_ptr::<Object>() }?;
         let obj = unsafe { &*obj_ptr.as_ptr() };
-        let nominal_type_id = obj.nominal_type_id_usize();
-        let class_metadata = self.class_metadata.read();
-        let from_metadata = nominal_type_id
-            .and_then(|nominal_type_id| class_metadata.get(nominal_type_id))
-            .and_then(|meta| meta.get_field_index(field_name));
-        if from_metadata.is_some() {
-            return from_metadata;
-        }
-        if let Some(index) = self
-            .layout_field_names_for_object(obj)
-            .and_then(|names| names.iter().position(|name| name == field_name))
-        {
-            return Some(index);
-        }
-        Self::legacy_field_index_for_layout(field_name, obj.field_count())
+        crate::vm::interpreter::opcodes::native::object_field_index(
+            obj,
+            field_name,
+            &self.class_metadata,
+            &self.layouts,
+            self.structural_object_shapes,
+        )
     }
 
     pub(in crate::vm::interpreter) fn build_shape_slot_map_for_object(
@@ -404,39 +392,31 @@ impl<'a> Interpreter<'a> {
     }
 
     pub(crate) fn is_field_writable(&self, obj_val: Value, field_name: &str) -> bool {
-        let metadata = self.metadata.lock();
-        let Some(descriptor) =
-            metadata.get_metadata_property(NODE_DESCRIPTOR_METADATA_KEY, obj_val, field_name)
-        else {
-            return true;
-        };
-        let Some(writable) = self.get_value_field_by_name(descriptor, "writable") else {
-            return true;
-        };
-        if let Some(b) = writable.as_bool() {
-            b
-        } else if let Some(i) = writable.as_i32() {
-            i != 0
-        } else {
-            true
-        }
+        // Delegates to the shared function so a JIT helper asks the identical
+        // question. Its three permissive defaults are part of the contract -- see the
+        // doc comment there.
+        crate::vm::interpreter::opcodes::native::is_field_writable_for(
+            obj_val,
+            field_name,
+            &self.metadata,
+            &self.class_metadata,
+            &self.layouts,
+            self.structural_object_shapes,
+        )
     }
 
     pub(crate) fn sync_descriptor_value(&self, obj_val: Value, field_name: &str, value: Value) {
-        let descriptor = {
-            let metadata = self.metadata.lock();
-            metadata.get_metadata_property(NODE_DESCRIPTOR_METADATA_KEY, obj_val, field_name)
-        };
-        let Some(descriptor) = descriptor else {
-            return;
-        };
-        let Some(value_index) = self.field_index_for_value(descriptor, "value") else {
-            return;
-        };
-        if let Some(desc_ptr) = unsafe { descriptor.as_ptr::<Object>() } {
-            let desc = unsafe { &mut *desc_ptr.as_ptr() };
-            let _ = desc.set_field(value_index, value);
-        }
+        // Delegates to the shared function; its middle step is already the shared
+        // `object_field_index`, so this extraction adds no new resolution logic.
+        crate::vm::interpreter::opcodes::native::sync_descriptor_value_for(
+            obj_val,
+            field_name,
+            value,
+            &self.metadata,
+            &self.class_metadata,
+            &self.layouts,
+            self.structural_object_shapes,
+        );
     }
 
     pub(crate) fn descriptor_accessor(
@@ -445,17 +425,41 @@ impl<'a> Interpreter<'a> {
         field_name: &str,
         accessor_name: &str,
     ) -> Option<Value> {
-        let descriptor = {
-            let metadata = self.metadata.lock();
-            metadata.get_metadata_property(NODE_DESCRIPTOR_METADATA_KEY, obj_val, field_name)
-        }?;
-        let accessor = self.get_value_field_by_name(descriptor, accessor_name)?;
-        if accessor.is_null() {
-            return None;
-        }
-        Some(accessor)
+        // Delegates to the shared function, which the JIT keyed-access helpers will
+        // call. A JIT helper CANNOT run an accessor -- the interpreter calls it as a
+        // frame -- so for that caller the useful part is only `.is_some()`, meaning
+        // "decline and let the interpreter run the frame".
+        crate::vm::interpreter::opcodes::native::descriptor_accessor_for(
+            obj_val,
+            field_name,
+            accessor_name,
+            &self.metadata,
+            &self.class_metadata,
+            &self.layouts,
+            self.structural_object_shapes,
+        )
     }
 
+    /// Narrow a receiver to something the field accessors can work on.
+    ///
+    /// **This rejects proxies, and that makes every `unwrap_proxy_target` call in
+    /// this file unreachable for them.** The field handlers call this *before*
+    /// their `unwrap_proxy_target`, so a proxy receiver raises
+    /// `TypeError: Expected Object receiver for <context>, got UnknownGcType` and
+    /// the unwrap never runs. Proxy field access does not work in either engine —
+    /// the JIT helpers do not unwrap either, and return null instead of raising.
+    ///
+    /// So treat those eight unwrap sites as aspirational until a proxy receiver is
+    /// admitted here. Whether it should be admitted at all is an open design
+    /// question, not a missing `if`: unwrapping silently bypasses the proxy
+    /// handler, and the TODO at the first unwrap site says full trap support would
+    /// call `handler.get(target, fieldName)`. Adding a Proxy arm here without
+    /// settling that would make a proxy read the target's field and never consult
+    /// the handler, which may be worse than the current honest error.
+    ///
+    /// See /workspace/specs/2026-10-03-raya-d4-fixed-layout-objects.md and the
+    /// characterization test
+    /// `field_access_through_a_proxy_currently_raises_and_that_is_a_defect`.
     pub(in crate::vm::interpreter) fn ensure_object_receiver(
         value: Value,
         context: &'static str,
@@ -798,8 +802,8 @@ impl<'a> Interpreter<'a> {
                         )));
                     }
                 }
-                if let Err(e) = obj.set_field(field_offset, value) {
-                    return OpcodeResult::Error(VmError::RuntimeError(e));
+                if let Err(e) = obj.checked_set_field(field_offset, value) {
+                    return OpcodeResult::Error(VmError::RuntimeError(e.to_string()));
                 }
                 if let Some(field_name) = self.field_name_for_offset(obj, field_offset) {
                     self.sync_descriptor_value(actual_obj, &field_name, value);
@@ -890,8 +894,8 @@ impl<'a> Interpreter<'a> {
                         )));
                     }
                 }
-                if let Err(e) = obj.set_field(field_offset, value) {
-                    return OpcodeResult::Error(VmError::RuntimeError(e));
+                if let Err(e) = obj.checked_set_field(field_offset, value) {
+                    return OpcodeResult::Error(VmError::RuntimeError(e.to_string()));
                 }
                 if let Some(field_name) = self.field_name_for_offset(obj, field_offset) {
                     self.sync_descriptor_value(actual_obj, &field_name, value);
@@ -1086,8 +1090,8 @@ impl<'a> Interpreter<'a> {
 
                 let obj_ptr = unsafe { obj_val.as_ptr::<Object>() };
                 let obj = unsafe { &mut *obj_ptr.unwrap().as_ptr() };
-                if let Err(e) = obj.set_field(field_offset, value) {
-                    return OpcodeResult::Error(VmError::RuntimeError(e));
+                if let Err(e) = obj.checked_set_field(field_offset, value) {
+                    return OpcodeResult::Error(VmError::RuntimeError(e.to_string()));
                 }
                 OpcodeResult::Continue
             }

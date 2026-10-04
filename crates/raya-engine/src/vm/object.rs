@@ -265,17 +265,39 @@ impl Object {
         self.fields.get(index).copied()
     }
 
-    /// Set a field value by index
+    /// Set a field value by index.
+    ///
+    /// A thin wrapper over [`Object::checked_set_field`] that renders the error as
+    /// a `String`. It exists so the many existing call sites keep their current
+    /// behaviour and message; new callers, and anything that needs to tell a
+    /// bounds failure apart from a binding failure, should use the checked form.
     pub fn set_field(&mut self, index: usize, value: Value) -> Result<(), String> {
+        self.checked_set_field(index, value)
+            .map_err(|error| error.to_string())
+    }
+
+    /// The single checked path for writing an object field.
+    ///
+    /// Mirrors the `checked_set` / `checked_push` / `checked_splice` family that
+    /// D4.2 introduced for arrays: opcode handlers and built-in mutators go
+    /// through here so an out-of-range offset is a typed, inspectable value rather
+    /// than a formatted string that has to be matched on. Binding failures —
+    /// a non-object receiver, a missing field, a descriptor setter — are decided
+    /// one level up in the opcode handlers, so a caller of this method can tell
+    /// "the offset was wrong" from "this field is not storable" without parsing.
+    pub fn checked_set_field(
+        &mut self,
+        index: usize,
+        value: Value,
+    ) -> Result<(), ObjectFieldStoreError> {
         if index < self.fields.len() {
             self.fields[index] = value;
             Ok(())
         } else {
-            Err(format!(
-                "Field index {} out of bounds (object has {} fields)",
+            Err(ObjectFieldStoreError::OutOfBounds {
                 index,
-                self.fields.len()
-            ))
+                field_count: self.fields.len(),
+            })
         }
     }
 
@@ -464,6 +486,36 @@ impl Default for VTable {
         Self::new()
     }
 }
+
+/// Why an object field store was rejected.
+///
+/// Deliberately parallel to [`ArrayStoreError`], which D4.2 introduced for array
+/// stores, so the two families read the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjectFieldStoreError {
+    /// The offset was outside the object's field range.
+    OutOfBounds {
+        /// Requested field offset.
+        index: usize,
+        /// Field count at the time of the attempted store.
+        field_count: usize,
+    },
+}
+
+impl std::fmt::Display for ObjectFieldStoreError {
+    /// Renders byte-for-byte the message `Object::set_field` produced before this
+    /// type existed, so the delegating wrapper is a behaviour-preserving refactor.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ObjectFieldStoreError::OutOfBounds { index, field_count } => write!(
+                f,
+                "Field index {index} out of bounds (object has {field_count} fields)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ObjectFieldStoreError {}
 
 /// Failure modes of a checked array store.
 ///

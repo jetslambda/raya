@@ -380,10 +380,12 @@ impl BytecodeWriter {
         self.emit_u16(field_count);
     }
 
-    /// Emit INIT_OBJECT instruction
-    pub fn emit_init_object(&mut self, count: u16) {
+    /// Emit INIT_OBJECT: store the top value into the object beneath it at
+    /// `field_offset`, leaving the object on the stack. The operand is a field
+    /// offset, not a count of values to consume.
+    pub fn emit_init_object(&mut self, field_offset: u16) {
         self.emit_opcode(Opcode::InitObject);
-        self.emit_u16(count);
+        self.emit_u16(field_offset);
     }
 
     /// Emit OPTIONAL_FIELD instruction
@@ -505,12 +507,6 @@ impl BytecodeWriter {
         self.emit_opcode(Opcode::MakeClosure);
         self.emit_u32(func_index);
         self.emit_u16(capture_count);
-    }
-
-    /// Emit CLOSE_VAR instruction
-    pub fn emit_close_var(&mut self, local_index: u16) {
-        self.emit_opcode(Opcode::CloseVar);
-        self.emit_u16(local_index);
     }
 
     /// Emit LOAD_CAPTURED instruction

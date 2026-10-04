@@ -130,10 +130,6 @@ pub const HELPER_NATIVE_CALL_OFFSET: i32 =
 pub const HELPER_INTERPRETER_CALL_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET
         + std::mem::offset_of!(RuntimeHelperTable, interpreter_call) as i32;
-pub const HELPER_THROW_OFFSET: i32 =
-    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, throw_exception) as i32;
-pub const HELPER_DEOPT_OFFSET: i32 =
-    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, deoptimize) as i32;
 pub const HELPER_STRING_CONCAT_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, string_concat) as i32;
 pub const HELPER_GENERIC_EQUALS_OFFSET: i32 =
@@ -159,6 +155,10 @@ pub const HELPER_VALUE_TO_STRING_OFFSET: i32 =
 pub const HELPER_CONST_STRING_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, const_string) as i32;
 /// Byte offset of the array-load helper in [`RuntimeContext`].
+/// Byte offset of the array-allocation helper in [`RuntimeContext`].
+pub const HELPER_ALLOC_ARRAY_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, alloc_array) as i32;
+
 pub const HELPER_ARRAY_LOAD_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, array_load) as i32;
 /// Byte offset of the array-store helper in [`RuntimeContext`].
@@ -174,6 +174,100 @@ pub const HELPER_ARRAY_POP_OFFSET: i32 =
 pub const HELPER_ARRAY_LEN_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, array_len) as i32;
 
+/// Byte offset of the await helper in [`RuntimeContext`].
+///
+/// Returns the value unchanged for a non-task, the task's result once completed,
+/// or the interpreter-fallback sentinel when the interpreter must raise or suspend.
+pub const HELPER_AWAIT_TASK_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, await_task) as i32;
+
+/// Byte offset of the dynamic keyed-set helper in [`RuntimeContext`].
+///
+/// Returns [`JIT_STORE_SUCCESS`] or [`JIT_STORE_FALLBACK`]; the interpreter raises
+/// whatever error the fallback stands for.
+pub const HELPER_DYN_SET_KEYED_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, dyn_set_keyed) as i32;
+
+/// Byte offset of the `CastObjectMinFields` helper in [`RuntimeContext`].
+///
+/// Returns -1 to decline, 0 for false, 1 for true.
+pub const HELPER_CAST_OBJECT_MIN_FIELDS_OFFSET: i32 = RUNTIME_CONTEXT_HELPERS_OFFSET
+    + std::mem::offset_of!(RuntimeHelperTable, cast_object_min_fields) as i32;
+
+/// Byte offset of the `InitObject` slot-write helper in [`RuntimeContext`].
+///
+/// Returns [`JIT_STORE_SUCCESS`] or [`JIT_STORE_FALLBACK`].
+pub const HELPER_INIT_OBJECT_FIELD_OFFSET: i32 = RUNTIME_CONTEXT_HELPERS_OFFSET
+    + std::mem::offset_of!(RuntimeHelperTable, init_object_field) as i32;
+
+/// Byte offset of the structural-object allocator in [`RuntimeContext`].
+///
+/// Returns the object pointer, or null on failure.
+pub const HELPER_ALLOC_STRUCT_OBJECT_OFFSET: i32 = RUNTIME_CONTEXT_HELPERS_OFFSET
+    + std::mem::offset_of!(RuntimeHelperTable, alloc_struct_object) as i32;
+
+/// Byte offset of the dynamic keyed-get helper in [`RuntimeContext`].
+///
+/// Returns the value unchanged for `Str`/`Arr`, or the interpreter-fallback
+/// sentinel for `Struct` and anything else.
+pub const HELPER_DYN_GET_KEYED_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, dyn_get_keyed) as i32;
+
+/// Byte offset of the RefCell-load helper in [`RuntimeContext`].
+///
+/// Appended after the array helpers: `RuntimeHelperTable` is layout-sensitive
+/// because offsets are computed from it, so new fields go at the end.
+pub const HELPER_REFCELL_LOAD_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, refcell_load) as i32;
+/// Byte offset of the RefCell-store helper in [`RuntimeContext`].
+///
+/// 1 = `JIT_STORE_SUCCESS`, 0 = `JIT_STORE_FALLBACK`.
+pub const HELPER_REFCELL_STORE_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, refcell_store) as i32;
+/// Byte offset of the RefCell-allocate helper in [`RuntimeContext`].
+///
+/// Returns null when the root set is unavailable, matching the convention every
+/// other allocating helper here follows.
+pub const HELPER_REFCELL_NEW_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, refcell_new) as i32;
+
+/// Byte offset of the closure-capture-patch helper in [`RuntimeContext`].
+///
+/// 1 = `JIT_STORE_SUCCESS`, 0 = `JIT_STORE_FALLBACK`.
+pub const HELPER_SET_CLOSURE_CAPTURE_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET
+        + std::mem::offset_of!(RuntimeHelperTable, set_closure_capture) as i32;
+
+/// Byte offset of the closure-allocate helper in [`RuntimeContext`].
+///
+/// Captures are passed as a pointer plus a count because a `Vec` cannot cross the
+/// trampoline function-pointer ABI. Returns null when the root set is unavailable.
+pub const HELPER_MAKE_CLOSURE_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, make_closure) as i32;
+
+/// Byte offset of the captured-value load helper in [`RuntimeContext`].
+///
+/// Returns the interpreter-fallback sentinel for a missing active closure or an
+/// out-of-range capture index, since a leaf helper cannot raise those.
+pub const HELPER_LOAD_CAPTURED_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET
+        + std::mem::offset_of!(RuntimeHelperTable, load_captured) as i32;
+
+/// Byte offset of the captured-value store helper in [`RuntimeContext`].
+///
+/// 1 = `JIT_STORE_SUCCESS`, 0 = `JIT_STORE_FALLBACK`.
+pub const HELPER_STORE_CAPTURED_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET
+        + std::mem::offset_of!(RuntimeHelperTable, store_captured) as i32;
+
+/// Byte offset of the method-binding helper in [`RuntimeContext`].
+///
+/// Returns the bound method, or null when any of the interpreter's four checks
+/// refuses. A null result becomes the interpreter boundary exit, which raises the
+/// real diagnostic.
+pub const HELPER_BIND_METHOD_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, bind_method) as i32;
+
 const _: () = assert!(std::mem::align_of::<RuntimeContext>() >= 8);
 const _: () = assert!(std::mem::size_of::<RuntimeContext>() >= std::mem::size_of::<RuntimeHelperTable>());
 
@@ -186,7 +280,9 @@ pub struct RuntimeHelperTable {
     /// Allocate a new nominal object: (local_nominal_type_index, module_ptr, shared_state) -> obj_ptr
     pub alloc_object: unsafe extern "C" fn(u32, *const (), *mut ()) -> *mut (),
     /// Allocate a new array: (element_type_index, capacity, module_ptr, shared_state) -> array_ptr
-    pub alloc_array: unsafe extern "C" fn(u32, usize, *const (), *mut ()) -> *mut (),
+    /// `len` is a boxed `Value` for the same reason as `array_load`: the
+    /// interpreter coerces the length through `array_index_operand`.
+    pub alloc_array: unsafe extern "C" fn(u32, u64, *const (), *mut ()) -> *mut (),
     /// Allocate a new string: (data_ptr, len, shared_state) -> string_ptr
     pub alloc_string: unsafe extern "C" fn(*const u8, usize, *mut ()) -> *mut (),
     /// GC safepoint poll: (shared_state)
@@ -199,10 +295,6 @@ pub struct RuntimeHelperTable {
     /// (opcode, operand_u64, operand_u32, receiver, args_ptr, arg_count, module_ptr, shared_state) -> result/sentinel
     pub interpreter_call:
         unsafe extern "C" fn(u8, u64, u32, u64, *const u64, u16, *const (), *mut ()) -> u64,
-    /// Throw an exception: (exception_value, shared_state) -> !
-    pub throw_exception: unsafe extern "C" fn(u64, *mut ()),
-    /// Deoptimize: (bytecode_offset, shared_state) -> !
-    pub deoptimize: unsafe extern "C" fn(u32, *mut ()),
     /// String concatenation: (left_val, right_val, shared_state) -> result_val
     pub string_concat: unsafe extern "C" fn(u64, u64, *mut ()) -> u64,
     /// Generic equality: (left_val, right_val, shared_state) -> bool
@@ -231,15 +323,59 @@ pub struct RuntimeHelperTable {
     /// Interned constant string: (pool_index, module, shared_state) -> raw string pointer
     pub const_string: unsafe extern "C" fn(u32, *const (), *mut ()) -> *mut (),
     /// Array element load: (array_val, index, shared_state) -> element_val or fallback sentinel
-    pub array_load: unsafe extern "C" fn(u64, i64, *mut ()) -> u64,
+    /// `index` is a boxed `Value`, not an `i64`: the interpreter's array index
+    /// coercion accepts non-numeric operands (meaning index 0), which an `i64`
+    /// cannot represent. See `array_index_operand`.
+    pub array_load: unsafe extern "C" fn(u64, u64, *mut ()) -> u64,
     /// Array element store: (array_val, index, value, shared_state) -> 1 success / 0 fallback
-    pub array_store: unsafe extern "C" fn(u64, i64, u64, *mut ()) -> i8,
+    /// `index` is a boxed `Value` for the same reason as `array_load`.
+    pub array_store: unsafe extern "C" fn(u64, u64, u64, *mut ()) -> i8,
     /// Array push: (array_val, value, shared_state) -> 1 success / 0 fallback
     pub array_push: unsafe extern "C" fn(u64, u64, *mut ()) -> i8,
     /// Array pop: (array_val, shared_state) -> popped_val (null if empty) or fallback sentinel
     pub array_pop: unsafe extern "C" fn(u64, *mut ()) -> u64,
     /// Array length: (array_val, shared_state) -> len or i32::MIN fallback sentinel
     pub array_len: unsafe extern "C" fn(u64, *mut ()) -> i32,
+    /// RefCell load: (refcell_val, shared_state) -> contained value, or the
+    /// interpreter-fallback sentinel for a receiver that is not a pointer.
+    pub refcell_load: unsafe extern "C" fn(u64, *mut ()) -> u64,
+    /// RefCell store: (refcell_val, value, shared_state) -> 1 success / 0 fallback
+    pub refcell_store: unsafe extern "C" fn(u64, u64, *mut ()) -> i8,
+    /// RefCell allocate: (initial_value, shared_state) -> RefCell pointer, or null
+    /// when the root set is unavailable.
+    pub refcell_new: unsafe extern "C" fn(u64, *mut ()) -> u64,
+    /// Patch one capture slot of an existing closure:
+    /// (closure, capture_index, value, shared_state) -> 1 success / 0 fallback
+    pub set_closure_capture: unsafe extern "C" fn(u64, u32, u64, *mut ()) -> i8,
+    /// Closure allocate: (func_id, captures_ptr, capture_count, shared_state)
+    /// -> closure pointer, or null when the root set is unavailable
+    pub make_closure: unsafe extern "C" fn(u32, *const u64, u32, *mut ()) -> u64,
+    /// Captured-value load: (capture_index, shared_state) -> value, or the
+    /// interpreter-fallback sentinel.
+    pub load_captured: unsafe extern "C" fn(u32, *mut ()) -> u64,
+    /// Captured-value store: (capture_index, value, shared_state)
+    /// -> 1 success / 0 fallback
+    pub store_captured: unsafe extern "C" fn(u32, u64, *mut ()) -> i8,
+    /// Method binding: (object, method_slot, shared_state) -> BoundMethod, or null
+    pub bind_method: unsafe extern "C" fn(u64, u32, *mut ()) -> u64,
+    /// Await: (value, shared_state) -> value unchanged / task result, or the
+    /// interpreter-fallback sentinel.
+    pub await_task: unsafe extern "C" fn(u64, *mut ()) -> u64,
+    /// Dynamic keyed get: (object, key, shared_state) -> value, or the
+    /// interpreter-fallback sentinel for the views this declines.
+    pub dyn_get_keyed: unsafe extern "C" fn(u64, u64, *mut ()) -> u64,
+    /// Dynamic keyed set: (object, key, value, shared_state) -> status. Unlike
+    /// `array_store` this GROWS the receiver and does not enforce the element
+    /// constraint, because the interpreter's `DynSetKeyed` arm does neither.
+    pub dyn_set_keyed: unsafe extern "C" fn(u64, u64, u64, *mut ()) -> i8,
+    /// Structural-object allocator: (type_index, field_count, shared_state) -> ptr or null.
+    pub alloc_struct_object: unsafe extern "C" fn(u32, u32, *mut ()) -> *mut (),
+    /// One `InitObject` slot write: (object, offset, value, shared_state) -> status.
+    /// Declines when the offset is out of range so the interpreter can raise.
+    pub init_object_field: unsafe extern "C" fn(u64, u64, u64, *mut ()) -> i8,
+    /// Field-count cast: (object, required_fields, shared_state) -> -1 decline, 0 false,
+    /// 1 pass. NOT tri-state and never -1: both interpreter failure paths are errors, not `false`.
+    pub cast_object_min_fields: unsafe extern "C" fn(u64, u64, *mut ()) -> i8,
 }
 
 /// Validate the boxed arguments at a JIT entry boundary against a verified

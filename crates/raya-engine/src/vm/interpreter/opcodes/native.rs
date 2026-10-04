@@ -23,7 +23,7 @@ use crate::vm::value::Value;
 use crate::vm::VmError;
 use std::sync::Arc;
 
-const NODE_DESCRIPTOR_METADATA_KEY: &str = "__node_compat_descriptor";
+use super::objects::NODE_DESCRIPTOR_METADATA_KEY;
 const IMPORTED_CLASS_TYPE_HANDLE_KEY: &str = "__raya_type_handle__";
 
 fn value_as_string(arg: Value) -> Result<String, VmError> {
@@ -273,22 +273,16 @@ impl<'a> Interpreter<'a> {
     ) -> Option<usize> {
         let obj_ptr = unsafe { obj_val.as_ptr::<Object>() }?;
         let obj = unsafe { &*obj_ptr.as_ptr() };
-        let nominal_type_id = obj.nominal_type_id_usize();
-        let class_metadata = self.class_metadata.read();
-        let metadata_index = nominal_type_id
-            .and_then(|nominal_type_id| class_metadata.get(nominal_type_id))
-            .and_then(|meta| meta.get_field_index(field_name));
-        if metadata_index.is_some() {
-            return metadata_index;
-        }
-        if let Some(index) = self
-            .layout_field_names_for_object(obj)
-            .and_then(|names| names.iter().position(|name| name == field_name))
-        {
-            return Some(index);
-        }
-        // Backstop for builtin values still emitted as generic object literals.
-        Self::legacy_object_literal_field_index(field_name, obj.field_count())
+        object_field_index(
+            obj,
+            field_name,
+            &self.class_metadata,
+            &self.layouts,
+            // NB: the field is `structural_object_shapes` on `Interpreter` but
+            // `structural_layout_shapes` on `SharedVmState` -- same registry, two
+            // names. Worth knowing before grepping for it.
+            &self.structural_object_shapes,
+        )
     }
 
     fn get_field_value_by_name(&self, obj_val: Value, field_name: &str) -> Option<Value> {
@@ -3301,4 +3295,231 @@ impl<'a> Interpreter<'a> {
             ))),
         }
     }
+}
+
+
+/// Resolve the canonical field names for `layout_id`.
+///
+/// One implementation, three callers: `Interpreter::structural_layout_names`,
+/// `SharedVmState::structural_layout_names` (these two were byte-identical duplicates)
+/// and `object_field_index`. Extracting it is what stops the field-index work from
+/// adding a *third* copy of the same three-step fallback.
+///
+/// The order is the contract, for the same reason as in `object_field_index`: the
+/// registry first, then the structural-shape table, then the process-wide table.
+pub(crate) fn structural_layout_names_from(
+    layout_id: crate::vm::object::LayoutId,
+    layouts: &parking_lot::RwLock<
+        crate::vm::interpreter::class_registry::RuntimeLayoutRegistry,
+    >,
+    structural_layout_shapes: &parking_lot::RwLock<
+        rustc_hash::FxHashMap<crate::vm::object::LayoutId, Vec<String>>,
+    >,
+) -> Option<Vec<String>> {
+    if let Some(names) = layouts
+        .read()
+        .layout_field_names(layout_id)
+        .map(|names| names.to_vec())
+    {
+        return Some(names);
+    }
+    if let Some(names) = structural_layout_shapes.read().get(&layout_id).cloned() {
+        return Some(names);
+    }
+    crate::vm::object::global_layout_names(layout_id)
+}
+
+/// Look up a Node-compat descriptor's `accessor_name` value on `obj_val.field_name`.
+///
+/// `pub(crate)` and free-standing so a JIT helper can ask *whether* an accessor exists
+/// without reimplementing the lookup. That question is the whole point: the
+/// interpreter, on finding a getter or setter, **calls it as a frame**, which a leaf
+/// helper cannot do — so a JIT helper's only correct response is to decline and let the
+/// interpreter run the frame. Deciding that wrongly in either direction is a
+/// correctness bug, not a performance one: answering natively would skip a user
+/// getter, and declining everything would make every `defineProperty` object
+/// un-JIT-able.
+///
+/// The registries are explicit for the same reason as `object_field_index`: the
+/// `Interpreter` passes its own `&'a` refs, a helper passes the bridge's.
+pub(crate) fn descriptor_accessor_for(
+    obj_val: Value,
+    field_name: &str,
+    accessor_name: &str,
+    metadata: &parking_lot::Mutex<crate::vm::reflect::MetadataStore>,
+    class_metadata: &parking_lot::RwLock<crate::vm::reflect::ClassMetadataRegistry>,
+    layouts: &parking_lot::RwLock<crate::vm::interpreter::class_registry::RuntimeLayoutRegistry>,
+    structural_layout_shapes: &parking_lot::RwLock<
+        rustc_hash::FxHashMap<crate::vm::object::LayoutId, Vec<String>>,
+    >,
+) -> Option<Value> {
+    let descriptor = {
+        let metadata = metadata.lock();
+        metadata.get_metadata_property(NODE_DESCRIPTOR_METADATA_KEY, obj_val, field_name)
+    }?;
+    let descriptor_ptr = unsafe { descriptor.as_ptr::<Object>() }?;
+    let descriptor_obj = unsafe { &*descriptor_ptr.as_ptr() };
+    let index = object_field_index(
+        descriptor_obj,
+        accessor_name,
+        class_metadata,
+        layouts,
+        structural_layout_shapes,
+    )?;
+    let accessor = descriptor_obj.get_field(index)?;
+    if accessor.is_null() {
+        return None;
+    }
+    Some(accessor)
+}
+
+/// Is `field_name` writable on `obj_val`?
+///
+/// `pub(crate)` and free-standing so a JIT helper can ask the same question the
+/// interpreter does, rather than approximating it.
+///
+/// **The permissive defaults ARE the contract, and each one looks like an oversight:**
+///
+///   * no descriptor at all -> writable
+///   * no `writable` field on the descriptor -> writable
+///   * a `writable` that is neither bool nor i32 -> writable
+///
+/// That last one is a genuine "cannot tell, so allow" rather than a bug. **Tightening
+/// any of the three turns a permitted write into a decline** — a silent behaviour
+/// change shaped exactly like a bug fix, which is the D4.3 failure mode.
+pub(crate) fn is_field_writable_for(
+    obj_val: Value,
+    field_name: &str,
+    metadata: &parking_lot::Mutex<crate::vm::reflect::MetadataStore>,
+    class_metadata: &parking_lot::RwLock<crate::vm::reflect::ClassMetadataRegistry>,
+    layouts: &parking_lot::RwLock<crate::vm::interpreter::class_registry::RuntimeLayoutRegistry>,
+    structural_layout_shapes: &parking_lot::RwLock<
+        rustc_hash::FxHashMap<crate::vm::object::LayoutId, Vec<String>>,
+    >,
+) -> bool {
+    let descriptor = {
+        let metadata = metadata.lock();
+        metadata.get_metadata_property(NODE_DESCRIPTOR_METADATA_KEY, obj_val, field_name)
+    };
+    let Some(descriptor) = descriptor else {
+        return true;
+    };
+    let Some(descriptor_ptr) = (unsafe { descriptor.as_ptr::<Object>() }) else {
+        return true;
+    };
+    let descriptor_obj = unsafe { &*descriptor_ptr.as_ptr() };
+    let Some(index) = object_field_index(descriptor_obj, "writable", class_metadata, layouts, structural_layout_shapes) else {
+        return true;
+    };
+    let Some(writable) = descriptor_obj.get_field(index) else {
+        return true;
+    };
+    if let Some(b) = writable.as_bool() {
+        b
+    } else if let Some(i) = writable.as_i32() {
+        i != 0
+    } else {
+        true
+    }
+}
+
+/// Write `value` through the Node-compat descriptor for `field_name`, if one exists.
+///
+/// No-op when there is no descriptor or it has no `value` slot — which is what makes
+/// it safe to call unconditionally after a plain field write. Its middle step is
+/// already the shared `object_field_index`, so this is the shortest of the three
+/// descriptor extractions.
+pub(crate) fn sync_descriptor_value_for(
+    obj_val: Value,
+    field_name: &str,
+    value: Value,
+    metadata: &parking_lot::Mutex<crate::vm::reflect::MetadataStore>,
+    class_metadata: &parking_lot::RwLock<crate::vm::reflect::ClassMetadataRegistry>,
+    layouts: &parking_lot::RwLock<crate::vm::interpreter::class_registry::RuntimeLayoutRegistry>,
+    structural_layout_shapes: &parking_lot::RwLock<
+        rustc_hash::FxHashMap<crate::vm::object::LayoutId, Vec<String>>,
+    >,
+) {
+    let descriptor = {
+        let metadata = metadata.lock();
+        metadata.get_metadata_property(NODE_DESCRIPTOR_METADATA_KEY, obj_val, field_name)
+    };
+    let Some(descriptor) = descriptor else {
+        return;
+    };
+    let Some(descriptor_ptr) = (unsafe { descriptor.as_ptr::<Object>() }) else {
+        return;
+    };
+    let descriptor_obj = unsafe { &*descriptor_ptr.as_ptr() };
+    let Some(value_index) = object_field_index(
+        descriptor_obj,
+        "value",
+        class_metadata,
+        layouts,
+        structural_layout_shapes,
+    ) else {
+        return;
+    };
+    // The interpreter discards this result too; a descriptor whose `value` slot is out
+    // of range is a malformed descriptor, not a reason to fail the write. The cast is
+    // the same `as_ptr::<Object>() -> &mut` the interpreter performs.
+    let descriptor_mut = unsafe { &mut *(descriptor_ptr.as_ptr() as *mut Object) };
+    let _ = descriptor_mut.checked_set_field(value_index, value);
+}
+
+/// Resolve `field_name` to a field index on `obj`.
+///
+/// `pub(crate)` and free-standing so a JIT helper and the interpreter share **one**
+/// implementation. The registries are passed explicitly precisely so that: an
+/// `Interpreter` hands over its own `&'a` refs, and `helper_dyn_get_keyed` hands over
+/// the bridge's raw pointers. That is the same reasoning that made `dyn_key_parts`
+/// shared, and for the same reason — a second copy of this resolution order is how a
+/// JIT silently disagrees with the interpreter about which field index wins.
+///
+/// **The order is the contract.** `class_metadata` first, then the layout names, then the
+/// legacy backstop. Reordering it changes which index wins for a name present in more
+/// than one place, and would be a divergence rather than a cleanup.
+pub(crate) fn object_field_index(
+    obj: &Object,
+    field_name: &str,
+    class_metadata: &parking_lot::RwLock<
+        crate::vm::reflect::ClassMetadataRegistry,
+    >,
+    layouts: &parking_lot::RwLock<crate::vm::interpreter::class_registry::RuntimeLayoutRegistry>,
+    // NOT the same registry as `SharedVmState`'s `structural_layout_shapes`, whatever the
+    // parameter name suggests. `get_field_index_for_value` passes
+    // `&self.structural_object_shapes` -- a field on `Interpreter` (`core.rs:301`), a
+    // distinct `&RwLock` from the one `SharedVmState` owns.
+    //
+    // DO NOT "consolidate" these two. `shared_state.rs` documents that an earlier attempt
+    // nearly did exactly that, and that doing so "would have changed which shapes
+    // resolve"; there is a regression test there to keep the two apart. A layout
+    // registered only on `SharedVmState` is invisible to this function, and resolution
+    // then falls through to the positional `legacy_object_literal_field_index`, which
+    // can resolve to the WRONG SLOT. Compiled programs are shielded only because
+    // `RuntimeLayoutRegistry::register_layout_shape` happens to call
+    // `register_global_layout_names` as a side effect -- an undocumented coupling, and
+    // the only thing standing between that latent bug and any caller that registers
+    // shapes on the shared state alone (a JIT harness, for one).
+    structural_layout_shapes: &parking_lot::RwLock<
+        rustc_hash::FxHashMap<crate::vm::object::LayoutId, Vec<String>>,
+    >,
+) -> Option<usize> {
+    let nominal_type_id = obj.nominal_type_id_usize();
+    // The guard must be held across the lookup: `get` returns a reference into the
+    // registry, so `.read().get(..)` inline would borrow a temporary.
+    let class_metadata = class_metadata.read();
+    let metadata_index = nominal_type_id
+        .and_then(|id| class_metadata.get(id))
+        .and_then(|meta| meta.get_field_index(field_name));
+    if metadata_index.is_some() {
+        return metadata_index;
+    }
+    drop(class_metadata);
+    let names = structural_layout_names_from(obj.layout_id(), layouts, structural_layout_shapes);
+    if let Some(index) = names.and_then(|names| names.iter().position(|n| n == field_name)) {
+        return Some(index);
+    }
+    // Backstop for builtin values still emitted as generic object literals.
+    Interpreter::legacy_object_literal_field_index(field_name, obj.field_count())
 }

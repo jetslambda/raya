@@ -543,6 +543,24 @@ impl Vm {
     }
 
     /// Get the shared VM state
+
+    /// The shared VM state as an `Arc`.
+    ///
+    /// [`Self::shared_state`] returns a plain `&SharedVmState`, which is fine for
+    /// reading but **not** for a JIT test harness that must register something on the
+    /// state and then hand the *same* state to the interpreter.
+    ///
+    /// Added for ALY-76. Without it a harness and the `Vm` under test get two different
+    /// `SharedVmState`s, so anything one registers — a module layout, say — is invisible
+    /// to the other, and the "differential" is comparing two engines that never observed
+    /// the same program. That exact shape cost an entire diagnosis in ALY-75.
+    ///
+    /// [`Scheduler::shared_state`](crate::vm::scheduler::Scheduler::shared_state)
+    /// already returns the `Arc`; this only re-exposes it above the `Vm` facade.
+    pub fn shared_state_arc(&self) -> &std::sync::Arc<super::SharedVmState> {
+        self.scheduler.shared_state()
+    }
+
     pub fn shared_state(&self) -> &super::SharedVmState {
         self.scheduler.shared_state()
     }

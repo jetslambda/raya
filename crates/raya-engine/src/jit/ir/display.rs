@@ -255,6 +255,22 @@ impl fmt::Display for JitInstr {
                 offset,
                 value,
             } => write!(f, "store.field {}.{}, {}", object, offset, value),
+            JitInstr::CastObjectMinFields {
+                dest,
+                object,
+                required_fields,
+                ..
+            } => write!(
+                f,
+                "{} = object.minFields({}, {})",
+                dest, object, required_fields
+            ),
+            JitInstr::InitObjectField {
+                object,
+                offset,
+                value,
+                ..
+            } => write!(f, "initObject.field {}.{}, {}", object, offset, value),
             JitInstr::StoreFieldShape {
                 object,
                 shape_id,
@@ -507,28 +523,64 @@ impl fmt::Display for JitInstr {
                 dest,
                 func_index,
                 captures,
+                ..
             } => {
                 write!(f, "{} = make.closure @{} [", dest, func_index)?;
                 format_args_list(f, captures)?;
                 write!(f, "]")
             }
-            JitInstr::LoadCaptured { dest, index } => {
+            JitInstr::LoadCaptured { dest, index, .. } => {
                 write!(f, "{} = load.captured {}", dest, index)
             }
-            JitInstr::StoreCaptured { index, value } => {
+            JitInstr::StoreCaptured { index, value, .. } => {
                 write!(f, "store.captured {}, {}", index, value)
             }
             JitInstr::SetClosureCapture {
                 closure,
                 index,
                 value,
+                ..
             } => write!(f, "set.capture {}.{}, {}", closure, index, value),
-            JitInstr::CloseVar { index } => write!(f, "close.var {}", index),
+            JitInstr::BindMethod {
+                dest,
+                object,
+                method_slot,
+                ..
+            } => write!(f, "{} = bind.method {}.{}", dest, object, method_slot),
 
             // RefCell
-            JitInstr::NewRefCell { dest, value } => write!(f, "{} = new.refcell {}", dest, value),
-            JitInstr::LoadRefCell { dest, cell } => write!(f, "{} = load.refcell {}", dest, cell),
-            JitInstr::StoreRefCell { cell, value } => {
+            JitInstr::NewRefCell {
+                dest,
+                value,
+                stack,
+                bytecode_offset,
+            } => write!(
+                f,
+                "{} = new.refcell {} @{} {:?}",
+                dest,
+                value,
+                bytecode_offset,
+                stack
+            ),
+            JitInstr::LoadRefCell {
+                dest,
+                cell,
+                stack,
+                bytecode_offset,
+            } => write!(
+                f,
+                "{} = load.refcell {} @{} {:?}",
+                dest,
+                cell,
+                bytecode_offset,
+                stack
+            ),
+            JitInstr::StoreRefCell {
+                cell,
+                value,
+                stack,
+                ..
+            } => {
                 write!(f, "store.refcell {}, {}", cell, value)
             }
 
@@ -551,7 +603,7 @@ impl fmt::Display for JitInstr {
                 format_args_list(f, args)?;
                 write!(f, ")")
             }
-            JitInstr::Await { dest, task } => write!(f, "{} = await {}", dest, task),
+            JitInstr::Await { dest, task, .. } => write!(f, "{} = await {}", dest, task),
             JitInstr::Yield => write!(f, "yield"),
             JitInstr::Sleep { duration } => write!(f, "sleep {}", duration),
             JitInstr::NewMutex { dest } => write!(f, "{} = new.mutex", dest),
@@ -572,9 +624,11 @@ impl fmt::Display for JitInstr {
             JitInstr::ObjectLiteral {
                 dest,
                 type_index,
+                field_count,
                 fields,
+                ..
             } => {
-                write!(f, "{} = object.literal @{} {{", dest, type_index)?;
+                write!(f, "{} = object.literal @{}/{} {{", dest, type_index, field_count)?;
                 format_args_list(f, fields)?;
                 write!(f, "}}")
             }
@@ -623,11 +677,13 @@ impl fmt::Display for JitInstr {
                 dest,
                 object,
                 index,
+                ..
             } => write!(f, "{} = json.index {}[{}]", dest, object, index),
             JitInstr::DynSetKeyed {
                 object,
                 index,
                 value,
+                ..
             } => write!(f, "json.index_set {}[{}], {}", object, index, value),
             JitInstr::DynArrayPush { array, value } => write!(f, "json.push {}, {}", array, value),
             JitInstr::DynArrayPop { dest, array } => write!(f, "{} = json.pop {}", dest, array),
@@ -665,8 +721,8 @@ impl fmt::Display for JitInstr {
                 Ok(())
             }
             JitInstr::EndTry => write!(f, "end.try"),
-            JitInstr::Throw { value } => write!(f, "throw {}", value),
-            JitInstr::Rethrow => write!(f, "rethrow"),
+            JitInstr::Throw { value, .. } => write!(f, "throw {}", value),
+            JitInstr::Rethrow { .. } => write!(f, "rethrow"),
         }
     }
 }

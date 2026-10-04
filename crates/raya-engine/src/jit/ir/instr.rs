@@ -456,6 +456,39 @@ pub enum JitInstr {
         offset: u16,
         value: Reg,
     },
+    /// A slot write on an object that is still BEING CONSTRUCTED, from `InitObject`.
+    ///
+    /// Deliberately distinct from `StoreFieldExact`, which stays an
+    /// `InterpreterBoundary` because a descriptor setter needs an interpreter frame.
+    /// That reason does not apply here: the object is brand new and cannot have a
+    /// property defined on it yet, so there is no accessor to run.
+    ///
+    /// `stack` and `bytecode_offset` are required, not optional: `checked_set_field`
+    /// turns an out-of-range offset into a `RuntimeError`, which a leaf helper cannot
+    /// raise, so the arm MUST be able to hand control back.
+    /// `CastObjectMinFields`: does this object have at least `required_fields`?
+    ///
+    /// The interpreter counts `field_count().max(dyn_map().len())` and compares. It
+    /// consults **no descriptor accessor and invokes no frame** — unlike
+    /// `StoreFieldShape`, which is why this one is promotable and that one is not.
+    ///
+    /// `stack`/`bytecode_offset` are required because both failure paths are
+    /// interpreter `TypeError`s: a non-pointer receiver and a wrong-`TypeId` receiver.
+    /// A helper cannot raise either, so the only correct response is to decline.
+    CastObjectMinFields {
+        dest: Reg,
+        object: Reg,
+        required_fields: u16,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
+    },
+    InitObjectField {
+        object: Reg,
+        offset: u16,
+        value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
+    },
     StoreFieldShape {
         object: Reg,
         shape_id: u64,
@@ -648,40 +681,85 @@ pub enum JitInstr {
     },
 
     // ===== Closures =====
+    //
+    // `stack` and `bytecode_offset` are for the interpreter fallback, as on the
+    // RefCell family: without them a lowering arm cannot call
+    // `emit_interpreter_boundary_exit`, and a capture-index bounds error would have
+    // to be raised from a leaf helper, which cannot raise a catchable error.
+    //
+    // Note what `LoadCaptured` and `StoreCaptured` still lack: any
+    // operand identifying the closure they act on. The interpreter resolves them
+    // against `task.current_closure()`, and the JIT has no notion of an active
+    // closure at all (`current_closure` has no occurrence under `jit/`). These
+    // three remain unlowerable for that reason, and no amount of fallback metadata
+    // fixes it -- see the D4.4 spec, "The closures are blocked on something bigger
+    // than helpers".
     MakeClosure {
         dest: Reg,
         func_index: u32,
         captures: Vec<Reg>,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     LoadCaptured {
         dest: Reg,
         index: u16,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     StoreCaptured {
         index: u16,
         value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     SetClosureCapture {
         closure: Reg,
         index: u16,
         value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
-    CloseVar {
-        index: u16,
+    // ===== Bound methods =====
+    //
+    // Pops the receiver, pushes a `BoundMethod`. The stack effect is net zero but
+    // the *value* on top changes, which is why the lifter must model it rather
+    // than skip it: the previous arm consumed no operand and touched no stack, so
+    // the lifted `ip` never advanced past the operand and every instruction after
+    // it was misaligned.
+    BindMethod {
+        dest: Reg,
+        object: Reg,
+        method_slot: u16,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
 
     // ===== RefCell (closure-captured mutable variables) =====
+    //
+    // `stack` and `bytecode_offset` exist so a lowering arm can call
+    // `emit_interpreter_boundary_exit` and hand control back. Without them these
+    // instructions cannot express a fallback at all: the RefCell helpers return
+    // `JIT_INTERPRETER_FALLBACK_SENTINEL` / `JIT_STORE_FALLBACK` for a receiver
+    // that is not a pointer, and there would be no way to observe that and exit.
+    // `LoadFieldExact` and friends have carried both for exactly this reason.
     NewRefCell {
         dest: Reg,
         value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     LoadRefCell {
         dest: Reg,
         cell: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     StoreRefCell {
         cell: Reg,
         value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
 
     // ===== Concurrency (always exit to runtime) =====
@@ -695,9 +773,16 @@ pub enum JitInstr {
         closure: Reg,
         args: Vec<Reg>,
     },
+    /// `stack` and `bytecode_offset` are required, not optional: `Await` has three
+    /// paths, and the two non-suspending ones can still decline — a cancelled,
+    /// pending or unknown task id returns the interpreter-fallback sentinel. Without
+    /// these the lowering arm has no way to hand back to the interpreter, and would
+    /// have to invent a value instead.
     Await {
         dest: Reg,
         task: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     Yield,
     Sleep {
@@ -740,7 +825,20 @@ pub enum JitInstr {
     ObjectLiteral {
         dest: Reg,
         type_index: u32,
+        /// Number of slots to allocate. REQUIRED, because
+        /// `Object::new_structural(layout_id, field_count)` sizes its `fields` vector
+        /// from it, and the `InitObjectField` writes that follow are bounds-checked
+        /// against it. Allocating zero slots would make every one of those writes fail
+        /// and the whole literal fall back.
+        field_count: u16,
+        /// Always EMPTY. The field values arrive as the separate `InitObjectField`
+        /// instructions that follow, one per slot -- not as part of this instruction.
         fields: Vec<Reg>,
+        /// Required, not optional: `type_index == 0` is an error in the interpreter
+        /// ("object literal is missing structural layout id"), and the allocation can
+        /// fail, so this instruction must be able to hand control back.
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     TupleLiteral {
         dest: Reg,
@@ -777,15 +875,28 @@ pub enum JitInstr {
         object: Reg,
         key_index: u32,
     },
+    // `stack` and `bytecode_offset` are required, not optional: the `Struct`
+    // view cannot be resolved here and returns the interpreter-fallback
+    // sentinel, so the lowering needs somewhere to hand control back to. The
+    // same is true of a malformed key, which raises in the interpreter.
     DynGetKeyed {
         dest: Reg,
         object: Reg,
         index: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
+    /// `stack` and `bytecode_offset` are REQUIRED, not optional: every path this
+    /// helper cannot complete -- `Struct`, any non-array receiver, a non-index key --
+    /// is an interpreter error, and `emit_interpreter_boundary_exit` needs both to
+    /// hand control back. Without them the fail-closed returns would be unobservable
+    /// and the whole arm dead. Same shape as the gap the RefCell opcodes had in D4.4.
     DynSetKeyed {
         object: Reg,
         index: Reg,
         value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     DynArrayPush {
         array: Reg,
@@ -834,10 +945,22 @@ pub enum JitInstr {
         finally_block: Option<JitBlockId>,
     },
     EndTry,
+    // ===== Exceptions =====
+    //
+    // `stack` and `bytecode_offset` are what let these reach the interpreter. An
+    // exception is a control transfer with no return value, so unlike every other
+    // arm there is no merged result: the arm writes the outgoing stack into
+    // `exit_info_ptr` and returns through `emit_interpreter_boundary_exit`, and the
+    // interpreter resumes at `bytecode_offset` to find the handler.
     Throw {
         value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
-    Rethrow,
+    Rethrow {
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
+    },
 
     // ===== Optional Field =====
     OptionalFieldExact {
@@ -970,7 +1093,9 @@ impl JitInstr {
             }
 
             // Closures
-            JitInstr::MakeClosure { dest, .. } | JitInstr::LoadCaptured { dest, .. } => Some(*dest),
+            JitInstr::MakeClosure { dest, .. }
+            | JitInstr::LoadCaptured { dest, .. }
+            | JitInstr::BindMethod { dest, .. } => Some(*dest),
 
             // RefCell
             JitInstr::NewRefCell { dest, .. } | JitInstr::LoadRefCell { dest, .. } => Some(*dest),
@@ -1013,10 +1138,11 @@ impl JitInstr {
             | JitInstr::StoreFieldShape { .. }
             | JitInstr::StoreElem { .. }
             | JitInstr::ArrayPush { .. }
+            | JitInstr::CastObjectMinFields { .. }
+            | JitInstr::InitObjectField { .. }
             | JitInstr::InitArray { .. }
             | JitInstr::StoreCaptured { .. }
             | JitInstr::SetClosureCapture { .. }
-            | JitInstr::CloseVar { .. }
             | JitInstr::StoreRefCell { .. }
             | JitInstr::Yield
             | JitInstr::Sleep { .. }
@@ -1031,7 +1157,7 @@ impl JitInstr {
             | JitInstr::SetupTry { .. }
             | JitInstr::EndTry
             | JitInstr::Throw { .. }
-            | JitInstr::Rethrow
+            | JitInstr::Rethrow { .. }
             | JitInstr::DynDelete { .. }
             | JitInstr::DynSetKeyed { .. }
             | JitInstr::DynArrayPush { .. } => None,
@@ -1122,7 +1248,20 @@ impl JitInstr {
             | JitInstr::Phi { .. }
             | JitInstr::Move { .. } => false,
 
-            // Everything else has side effects
+            // Everything else has side effects.
+            //
+            // This default is load-bearing, and deliberately conservative. The DCE
+            // in `jit/pipeline/optimize.rs` skips any instruction this returns
+            // true for, so an instruction missing from the list above is kept
+            // rather than deleted. That is what protects allocating and writing
+            // instructions that nobody has enumerated here yet -- `NewRefCell`
+            // (an allocation), `StoreRefCell` (a heap write) and `StoreCaptured`
+            // are all absent from the list above and are safe only because of
+            // this arm.
+            //
+            // Do not "optimise" this to `_ => false`. Doing so would let the DCE
+            // delete any allocation or store whose destination is unused, which
+            // is silent miscompilation rather than a missed optimisation.
             _ => true,
         }
     }
@@ -1135,6 +1274,21 @@ pub struct JitBlock {
     pub instrs: Vec<JitInstr>,
     pub terminator: JitTerminator,
     pub predecessors: Vec<JitBlockId>,
+    /// Bytecode offset this block begins at, or [`JitBlock::UNKNOWN_START_OFFSET`]
+    /// when the producer did not know.
+    ///
+    /// The sentinel is deliberately not `0`. Offset 0 is the first instruction of
+    /// a function, so defaulting to it would make an unpopulated block
+    /// indistinguishable from the entry block — and the shared-block-splitting
+    /// work that needs this field compares partitions, where one wrong block
+    /// silently means a jump into the wrong code. `usize::MAX` cannot be a real
+    /// offset, so "unknown" is unambiguous.
+    pub start_offset: usize,
+}
+
+impl JitBlock {
+    /// `start_offset` value meaning "the producer did not record this".
+    pub const UNKNOWN_START_OFFSET: usize = usize::MAX;
 }
 
 /// How a JIT IR block terminates
@@ -1245,8 +1399,42 @@ impl JitFunction {
             instrs: vec![],
             terminator: JitTerminator::None,
             predecessors: vec![],
+            start_offset: JitBlock::UNKNOWN_START_OFFSET,
         });
         id
+    }
+
+    /// Add a new block that begins at a known bytecode offset.
+    ///
+    /// Prefer this over [`JitFunction::add_block`] wherever the offset is known —
+    /// it is what makes a block's partition reconstructable.
+    pub fn add_block_at(&mut self, start_offset: usize) -> JitBlockId {
+        let id = self.add_block();
+        self.blocks[id.0 as usize].start_offset = start_offset;
+        id
+    }
+
+    /// The block beginning at a bytecode offset, or `None` if there is none.
+    ///
+    /// Used to resolve `Try` handler targets. Returns `None` rather than
+    /// defaulting to the entry block, so an unresolvable target is an error at the
+    /// call site instead of a jump into unrelated code.
+    pub fn block_at_offset(&self, offset: usize) -> Option<JitBlockId> {
+        self.blocks
+            .iter()
+            .find(|block| block.start_offset == offset)
+            .map(|block| block.id)
+    }
+
+    /// A block's start offset, or `None` when it was never recorded.
+    ///
+    /// Returning `Option` rather than the raw value means a consumer cannot read
+    /// [`JitBlock::UNKNOWN_START_OFFSET`] as if it were an offset.
+    pub fn block_start_offset(&self, id: JitBlockId) -> Option<usize> {
+        match self.blocks[id.0 as usize].start_offset {
+            JitBlock::UNKNOWN_START_OFFSET => None,
+            offset => Some(offset),
+        }
     }
 
     /// Total number of instructions across all blocks

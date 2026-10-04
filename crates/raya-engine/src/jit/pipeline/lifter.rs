@@ -21,6 +21,13 @@ pub enum LiftError {
     StackUnderflow { offset: usize },
     #[error("Unsupported opcode {opcode:?} at offset {offset}")]
     UnsupportedOpcode { opcode: Opcode, offset: usize },
+    /// A `Try` handler target that maps to no lifted block.
+    ///
+    /// Deliberately an error rather than a default. Defaulting to `BlockId(0)` —
+    /// which `cfg.rs` does in places — turns a missing target into a jump into the
+    /// entry block, which is silent miscompilation rather than a build failure.
+    #[error("Try handler target at bytecode offset {offset} maps to no block")]
+    UnresolvedTryTarget { offset: usize },
 }
 
 /// Abstract stack state during lifting
@@ -264,7 +271,11 @@ pub fn lift_function_with_signature(
     // Create JIT blocks corresponding to CFG blocks
     let mut cfg_to_jit: FxHashMap<BlockId, JitBlockId> = FxHashMap::default();
     for cfg_block in &cfg.blocks {
-        let jit_block = jit_func.add_block();
+        // The lifter does not compute its own partition — it derives one JIT block
+        // per CFG block, so `CfgBlock::start_offset` is the offset-to-block map
+        // `Try` needs, and it already exists. Recording it here is what makes the
+        // lifted partition reconstructable and comparable.
+        let jit_block = jit_func.add_block_at(cfg_block.start_offset);
         cfg_to_jit.insert(cfg_block.id, jit_block);
     }
 
@@ -1147,8 +1158,12 @@ fn lift_instruction(
                 stack.push(dest);
             }
         }
+        // `CastObjectMinFields` was in this rejection list and has been lifted and
+        // lowered (D4.10). It is a CHECKED PASS-THROUGH with no descriptor accessor and
+        // no frame invocation -- structurally unlike `StoreFieldShape`, which is why
+        // that one stays demoted and this one does not. Keeping it here would have made
+        // its lifter arm unreachable, since this arm matches first.
         Opcode::CastTupleLen
-        | Opcode::CastObjectMinFields
         | Opcode::CastArrayElemKind
         | Opcode::CastKindMask => {
             return Err(LiftError::UnsupportedOpcode {
@@ -1548,39 +1563,61 @@ fn lift_instruction(
                 capture_count,
             } = instr.operands
             {
+                let pre_stack = stack.clone_state();
                 let mut captures = Vec::new();
                 for _ in 0..capture_count {
                     captures.push(stack.pop(instr.offset)?);
                 }
                 captures.reverse();
+                // The interpreter polls a safepoint here before allocating
+                // (vm/interpreter/opcodes/closures.rs). Emit the matching
+                // `GcSafepoint`, as the `NewType` arm does for `NewObject` -- a
+                // collection must be able to stop the world at this allocation,
+                // and compiled code has no other place to offer it.
+                func.block_mut(block).instrs.push(JitInstr::GcSafepoint {
+                    bytecode_offset: instr.offset as u32,
+                });
                 let dest = func.alloc_reg(JitType::Ptr);
                 func.block_mut(block).instrs.push(JitInstr::MakeClosure {
                     dest,
                     func_index: target,
                     captures,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
                 });
                 stack.push(dest);
             }
         }
         Opcode::LoadCaptured => {
             if let Operands::U16(index) = instr.operands {
+                let pre_stack = stack.clone_state();
                 let dest = func.alloc_reg(JitType::Value);
                 func.block_mut(block)
                     .instrs
-                    .push(JitInstr::LoadCaptured { dest, index });
+                    .push(JitInstr::LoadCaptured {
+                        dest,
+                        index,
+                        stack: pre_stack,
+                        bytecode_offset: instr.offset as u32,
+                    });
                 stack.push(dest);
             }
         }
         Opcode::StoreCaptured => {
             if let Operands::U16(index) = instr.operands {
+                let pre_stack = stack.clone_state();
                 let value = stack.pop(instr.offset)?;
-                func.block_mut(block)
-                    .instrs
-                    .push(JitInstr::StoreCaptured { index, value });
+                func.block_mut(block).instrs.push(JitInstr::StoreCaptured {
+                    index,
+                    value,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
+                });
             }
         }
         Opcode::SetClosureCapture => {
             if let Operands::U16(index) = instr.operands {
+                let pre_stack = stack.clone_state();
                 let value = stack.pop(instr.offset)?;
                 let closure = stack.pop(instr.offset)?;
                 func.block_mut(block)
@@ -1589,40 +1626,49 @@ fn lift_instruction(
                         closure,
                         index,
                         value,
+                        stack: pre_stack,
+                        bytecode_offset: instr.offset as u32,
                     });
-            }
-        }
-        Opcode::CloseVar => {
-            if let Operands::U16(index) = instr.operands {
-                func.block_mut(block)
-                    .instrs
-                    .push(JitInstr::CloseVar { index });
             }
         }
 
         // ===== RefCell =====
         Opcode::NewRefCell => {
+            // Snapshot before the pops: a fallback needs the interpreter's stack as
+            // it was on entry, not after this instruction consumed its operands.
+            let pre_stack = stack.clone_state();
             let value = stack.pop(instr.offset)?;
             let dest = func.alloc_reg(JitType::Ptr);
-            func.block_mut(block)
-                .instrs
-                .push(JitInstr::NewRefCell { dest, value });
+            func.block_mut(block).instrs.push(JitInstr::NewRefCell {
+                dest,
+                value,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
             stack.push(dest);
         }
         Opcode::LoadRefCell => {
+            let pre_stack = stack.clone_state();
             let cell = stack.pop(instr.offset)?;
             let dest = func.alloc_reg(JitType::Value);
-            func.block_mut(block)
-                .instrs
-                .push(JitInstr::LoadRefCell { dest, cell });
+            func.block_mut(block).instrs.push(JitInstr::LoadRefCell {
+                dest,
+                cell,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
             stack.push(dest);
         }
         Opcode::StoreRefCell => {
+            let pre_stack = stack.clone_state();
             let value = stack.pop(instr.offset)?;
             let cell = stack.pop(instr.offset)?;
-            func.block_mut(block)
-                .instrs
-                .push(JitInstr::StoreRefCell { cell, value });
+            func.block_mut(block).instrs.push(JitInstr::StoreRefCell {
+                cell,
+                value,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
         }
 
         // ===== Concurrency =====
@@ -1664,11 +1710,15 @@ fn lift_instruction(
             }
         }
         Opcode::Await => {
+            let pre_stack = stack.clone_state();
             let task = stack.pop(instr.offset)?;
             let dest = func.alloc_reg(JitType::Value);
-            func.block_mut(block)
-                .instrs
-                .push(JitInstr::Await { dest, task });
+            func.block_mut(block).instrs.push(JitInstr::Await {
+                dest,
+                task,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
             stack.push(dest);
         }
         Opcode::Yield => {
@@ -1753,14 +1803,23 @@ fn lift_instruction(
         Opcode::ObjectLiteral => {
             if let Operands::Call {
                 func_index: type_index,
-                arg_count: _,
+                // The decoder reuses `Call` to carry ObjectLiteral's `u32 type_index`
+                // + `u16 field_count` pair, so the slot count arrives as `arg_count`.
+                arg_count,
             } = instr.operands
             {
+                // Snapshot BEFORE the push: `ObjectLiteral` pushes rather than pops,
+                // and an interpreter resuming at `bytecode_offset` re-executes it with
+                // the same operand stack it had.
+                let pre_stack = stack.clone_state();
                 let dest = func.alloc_reg(JitType::Ptr);
                 func.block_mut(block).instrs.push(JitInstr::ObjectLiteral {
                     dest,
                     type_index,
+                    field_count: arg_count,
                     fields: Vec::new(),
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
                 });
                 stack.push(dest);
             }
@@ -1793,16 +1852,44 @@ fn lift_instruction(
                 .push(JitInstr::TupleGet { dest, tuple });
             stack.push(dest);
         }
+        Opcode::CastObjectMinFields => {
+            if let Operands::U16(required_fields) = instr.operands {
+                // Snapshot BEFORE the pop: the interpreter resuming at
+                // `bytecode_offset` re-executes this opcode and must find the receiver
+                // on the stack again.
+                let pre_stack = stack.clone_state();
+                let object = stack.pop(instr.offset)?;
+                let dest = func.alloc_reg(JitType::Value);
+                func.block_mut(block).instrs.push(JitInstr::CastObjectMinFields {
+                    dest,
+                    object,
+                    required_fields,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
+                });
+                stack.push(dest);
+            }
+        }
         Opcode::InitObject => {
             if let Operands::U16(field_offset) = instr.operands {
+                // Snapshot BEFORE the pop: the interpreter resuming at
+                // `bytecode_offset` re-executes this opcode and must find `[obj, value]`
+                // still on the stack, because `InitObject` POPS the value and PEEKS the
+                // object.
+                let pre_stack = stack.clone_state();
                 let value = stack.pop(instr.offset)?;
                 let object = stack
                     .peek()
                     .ok_or(LiftError::StackUnderflow { offset: instr.offset })?;
-                func.block_mut(block).instrs.push(JitInstr::StoreFieldExact {
+                // `InitObjectField`, NOT `StoreFieldExact`: the object is under
+                // construction, so no descriptor accessor can apply, and an
+                // out-of-range offset has to reach the interpreter to raise.
+                func.block_mut(block).instrs.push(JitInstr::InitObjectField {
                     object,
                     offset: field_offset,
                     value,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
                 });
             }
         }
@@ -1841,17 +1928,37 @@ fn lift_instruction(
                 finally_offset,
             } = instr.operands
             {
-                let _catch_target = ((instr.offset as i64) + (catch_offset as i64)) as usize;
-                let _finally_target = if finally_offset > 0 {
-                    Some(((instr.offset as i64) + (finally_offset as i64)) as usize)
+                // THE TWO BASES DIFFER, and that is the whole trap. The
+                // interpreter computes each target with `*ip` as it stands at that
+                // moment: `catch_abs` after reading only `catch_rel`
+                // (`instr.offset` + 1 opcode byte + 4 operand bytes), and
+                // `finally_abs` after reading both (another 4 bytes).
+                //
+                // Unifying them puts a handler four bytes out. See the D4.5 spec —
+                // several turns were lost to exactly this.
+                let catch_base = instr.offset + 1 + 4;
+                let catch_abs = catch_base.wrapping_add_signed(catch_offset as isize) as usize;
+                let catch_block = func.block_at_offset(catch_abs).ok_or(
+                    LiftError::UnresolvedTryTarget { offset: catch_abs },
+                )?;
+
+                // `finally_rel > 0` selects a finally target; anything else means
+                // there is none. Matching the interpreter's test exactly.
+                let finally_block = if finally_offset > 0 {
+                    let finally_base = instr.offset + 1 + 8;
+                    let finally_abs = finally_base.wrapping_add_signed(finally_offset as isize) as usize;
+                    Some(
+                        func.block_at_offset(finally_abs).ok_or(LiftError::UnresolvedTryTarget {
+                            offset: finally_abs,
+                        })?,
+                    )
                 } else {
                     None
                 };
-                // We'd need offset_to_block mapping here, but for now emit a simplified version
-                // The catch/finally blocks will be resolved later
+
                 func.block_mut(block).instrs.push(JitInstr::SetupTry {
-                    catch_block: JitBlockId(0), // placeholder
-                    finally_block: None,
+                    catch_block,
+                    finally_block,
                 });
             }
         }
@@ -1859,15 +1966,25 @@ fn lift_instruction(
             func.block_mut(block).instrs.push(JitInstr::EndTry);
         }
         Opcode::Throw => {
+            let pre_stack = stack.clone_state();
             let value = stack.pop(instr.offset)?;
-            func.block_mut(block).instrs.push(JitInstr::Throw { value });
+            func.block_mut(block).instrs.push(JitInstr::Throw {
+                value,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
         }
         Opcode::Rethrow => {
-            func.block_mut(block).instrs.push(JitInstr::Rethrow);
+            let pre_stack = stack.clone_state();
+            func.block_mut(block).instrs.push(JitInstr::Rethrow {
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
+            });
         }
 
         // ===== Dynamic keyed operations =====
         Opcode::DynGetKeyed => {
+            let pre_stack = stack.clone_state();
             let index = stack.pop(instr.offset)?;
             let object = stack.pop(instr.offset)?;
             let dest = func.alloc_reg(JitType::Value);
@@ -1875,10 +1992,16 @@ fn lift_instruction(
                 dest,
                 object,
                 index,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
             });
             stack.push(dest);
         }
         Opcode::DynSetKeyed => {
+            // Snapshot BEFORE the three pops: the interpreter resuming at
+            // `bytecode_offset` re-executes this opcode and must find all three
+            // operands on the stack.
+            let pre_stack = stack.clone_state();
             let value = stack.pop(instr.offset)?;
             let index = stack.pop(instr.offset)?;
             let object = stack.pop(instr.offset)?;
@@ -1886,6 +2009,8 @@ fn lift_instruction(
                 object,
                 index,
                 value,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
             });
         }
 
@@ -1917,7 +2042,25 @@ fn lift_instruction(
 
         // ===== Bound Methods =====
         Opcode::BindMethod => {
-            // Falls back to interpreter — bound method creation requires GC allocation
+            if let Operands::U16(method_slot) = instr.operands {
+                // Previously this arm was empty. The interpreter reads the operand,
+                // pops the receiver and pushes a `BoundMethod`, so an arm that does
+                // nothing leaves the lifted `ip` un-advanced and the stack model
+                // disagreeing with the interpreter from this instruction onward.
+                // Modelling the effect here is what makes a lowering arm possible
+                // at all; the allocation itself happens in the helper.
+                let pre_stack = stack.clone_state();
+                let object = stack.pop(instr.offset)?;
+                let dest = func.alloc_reg(JitType::Ptr);
+                func.block_mut(block).instrs.push(JitInstr::BindMethod {
+                    dest,
+                    object,
+                    method_slot,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
+                });
+                stack.push(dest);
+            }
         }
     }
 

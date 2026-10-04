@@ -256,7 +256,9 @@ pub enum Opcode {
     StoreFieldShape = 0xB4,
     /// Create object literal (operands: u32 typeIndex, u16 fieldCount)
     ObjectLiteral = 0xB5,
-    /// Initialize object fields: pop N values (operand: u16 count)
+    /// Initialize one object field: pop value, peek object, store at the field
+    /// offset, leave the object on the stack (operand: u16 fieldOffset).
+    /// One opcode initializes one field; an N-field literal emits N of these.
     InitObject = 0xB6,
     /// Optional chaining field access (operand: u16 offset)
     OptionalFieldExact = 0xB7,
@@ -371,7 +373,6 @@ pub enum Opcode {
     /// Create closure object (operands: u32 funcIndex, u16 captureCount)
     MakeClosure = 0xF0,
     /// Capture local variable (operand: u16 localIndex)
-    CloseVar = 0xF1,
     /// Load captured variable (operand: u16 index)
     LoadCaptured = 0xF2,
     /// Store to captured variable (operand: u16 index)
@@ -592,7 +593,6 @@ impl Opcode {
             0xEE => Some(Self::IsNominal),
             // Closures & modules
             0xF0 => Some(Self::MakeClosure),
-            0xF1 => Some(Self::CloseVar),
             0xF2 => Some(Self::LoadCaptured),
             0xF3 => Some(Self::StoreCaptured),
             0xF4 => Some(Self::LoadModule),
@@ -757,7 +757,6 @@ impl Opcode {
             Self::CastNominal => "CAST_NOMINAL",
             Self::CastShape => "CAST_SHAPE",
             Self::MakeClosure => "MAKE_CLOSURE",
-            Self::CloseVar => "CLOSE_VAR",
             Self::LoadCaptured => "LOAD_CAPTURED",
             Self::StoreCaptured => "STORE_CAPTURED",
             Self::LoadModule => "LOAD_MODULE",
@@ -1100,7 +1099,6 @@ mod tests {
             Opcode::CastNominal,
             Opcode::TaskCancel,
             Opcode::MakeClosure,
-            Opcode::CloseVar,
             Opcode::LoadCaptured,
             Opcode::StoreCaptured,
             Opcode::LoadModule,
