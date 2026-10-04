@@ -2023,6 +2023,62 @@ unsafe extern "C" fn helper_dyn_get_keyed(
         }
         // `Struct` needs the registry the bridge lacks; everything else is the
         // interpreter's business.
+        JSView::Struct { ptr, .. } => {
+            // Declines first, computes second. EVERY early return is a decline, so
+            // correctness never depends on the parts not implemented -- only speed does.
+            use crate::vm::reflect::is_proxy;
+
+            let object_value = Value::from_raw(object_raw);
+            // A proxy receiver DECLINES. The interpreter unwraps the proxy and reads
+            // the TARGET's field, never consulting the proxy handler; declining hands
+            // that back rather than reimplementing the unwrap here.
+            if is_proxy(object_value) {
+                return JIT_INTERPRETER_FALLBACK_SENTINEL;
+            }
+            let key = key_str.as_deref().unwrap_or_default();
+            // A getter exists -> DECLINE. The interpreter runs it as a FRAME, which a
+            // leaf helper cannot. Wrong either way is a correctness bug, not a
+            // performance one: answering natively would skip a user getter.
+            let has_getter = crate::vm::interpreter::opcodes::native::descriptor_accessor_for(
+                object_value,
+                key,
+                "get",
+                &*bridge.metadata,
+                &*bridge.class_metadata,
+                &*bridge.layouts,
+                &*bridge.structural_layout_shapes,
+            )
+            .is_some();
+            if has_getter {
+                return JIT_INTERPRETER_FALLBACK_SENTINEL;
+            }
+            let obj = unsafe { &*ptr };
+            if let Some(index) = crate::vm::interpreter::opcodes::native::object_field_index(
+                obj,
+                key,
+                &*bridge.class_metadata,
+                &*bridge.layouts,
+                &*bridge.structural_layout_shapes,
+            ) {
+                return obj.get_field(index).unwrap_or(Value::null()).raw();
+            }
+            // No field index. The interpreter then tries, in order: a METHOD SLOT on the
+            // nominal type (returns a bound method), and finally the object's dynamic
+            // property map, ending in `Value::null()`.
+            //
+            // **A missing field is NULL, not a TypeError** -- the earlier note in this
+            // repo claiming otherwise was wrong, and a differential caught it. The
+            // dynamic-map lookup is keyed by an INTERNED `PropKey`, which only the
+            // interpreter can produce via `intern_prop_key`, so:
+            //   * no dynamic map at all -> nothing to look up -> NULL, computed here;
+            //   * a dynamic map exists -> the lookup needs interning, so DECLINE and let
+            //     the interpreter do it.
+            match obj.dyn_map() {
+                None => Value::null().raw(),
+                Some(_) => JIT_INTERPRETER_FALLBACK_SENTINEL,
+            }
+        }
+
         _ => JIT_INTERPRETER_FALLBACK_SENTINEL,
     }
 }
@@ -3458,14 +3514,26 @@ mod tests {
                 Value::i32(5).raw()
             );
 
-            // Struct: MUST decline. This is the whole reason the helper is shaped
-            // this way.
+            // Struct, unknown key. This assertion used to demand a DECLINE, on the
+            // reasoning that a Struct lookup "needs structural_object_shapes, which
+            // the bridge lacks". Both halves of that were wrong, and the engine-level
+            // differential caught it:
+            //
+            //   * the bridge DOES carry the registries the lookup needs;
+            //   * and an unknown Struct field is **null, not a TypeError** -- the
+            //     interpreter falls back to the object's dynamic property map, ending
+            //     in `Value::null()`.
+            //
+            // So the helper now COMPUTES null here: the key resolves to no field
+            // index, and this object has no dynamic map, so there is nothing to look
+            // up. The decline path that remains is a receiver that HAS a dynamic map,
+            // because that lookup needs an interned `PropKey` only the interpreter can
+            // mint.
             let zero = Value::i32(0);
-            assert_eq!(
-                unsafe { helper_dyn_get_keyed(obj_raw, zero.raw(), ss) },
-                JIT_INTERPRETER_FALLBACK_SENTINEL,
-                "a Struct lookup needs structural_object_shapes, which the bridge \
-                 lacks, so the helper must defer to the interpreter"
+            let raw = unsafe { helper_dyn_get_keyed(obj_raw, zero.raw(), ss) };
+            assert!(
+                unsafe { Value::from_raw(raw) }.is_null(),
+                "an unknown Struct field with no dynamic map must answer null, got 0x{raw:016X}"
             );
 
             // Non-node target also defers.

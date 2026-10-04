@@ -7724,3 +7724,114 @@ fn cast_object_min_fields_matches_interpreter() {
         assert_eq!(reason, JitSuspendReason::InterpreterBoundary as u32);
     }
 }
+
+
+/// D4.10: `DynGetKeyed`'s **`Struct` view**, differentially.
+///
+/// It was blocked for three steps because no compiled function could *construct* a
+/// `Struct`. `CastObjectMinFields`, `ObjectLiteral` and `InitObject` are now promoted,
+/// which removed that wall; the nominal-type opcodes never could have, because they
+/// test **nominal** type and `ObjectLiteral` produces a **structural** object.
+///
+/// | case | helper | expected |
+/// |---|---|---|
+/// | ordinary field | computes | `Completed`, value read back |
+/// | **missing** field | computes | `Completed`, **`null`** |
+///
+/// **A missing `Struct` field is `null`, not a `TypeError`.** An earlier note in this
+/// repo asserted the opposite and a differential caught it: the interpreter's fallback
+/// for an unknown field is the object's **dynamic property map**, ending in
+/// `Value::null()`. The asymmetry that IS real runs the other way — `Str` and `Arr`
+/// yield null on out-of-range, while `DynSetKeyed`'s out-of-range array index is a
+/// `TypeError`.
+#[test]
+fn dyn_get_keyed_struct_view_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // `ObjectLiteral <u32 layout_id><u16 field_count>`, then `InitObject <u16 offset>`
+    // with `[obj, value]` on the stack, then `DynGetKeyed` with the given key.
+    fn program(field_key: &str) -> std::sync::Arc<Module> {
+        let mut module = make_vm_module(Vec::new(), 0, 0);
+        let key_idx = module.constants.add_string(field_key.to_string());
+        let mut code: Vec<u8> = Vec::new();
+        emit(&mut code, Opcode::ObjectLiteral);
+        code.extend_from_slice(&1u32.to_le_bytes());
+        code.extend_from_slice(&1u16.to_le_bytes()); // one slot
+        emit_i32(&mut code, 11);
+        emit(&mut code, Opcode::InitObject);
+        code.extend_from_slice(&0u16.to_le_bytes());
+        emit_const_str(&mut code, key_idx);
+        emit(&mut code, Opcode::DynGetKeyed);
+        emit(&mut code, Opcode::Return);
+        module.functions[0].code = code;
+        module.functions[0].name = "main".to_string();
+        finalize_module(module)
+    }
+
+    fn jit_side(module: std::sync::Arc<Module>) -> (u32, u64) {
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+        (exit.kind, raw_bits)
+    }
+
+    // --- Case 1: an ordinary field -> computed, both engines read the same slot.
+    {
+        let module = program("value");
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm
+            .execute(module.as_ref())
+            .expect("interpreter must resolve an ordinary field");
+        assert_eq!(interpreted.as_i32(), Some(11), "the interpreter baseline is wrong");
+
+        let (kind, raw_bits) = jit_side(module);
+        assert_eq!(
+            kind,
+            JitExitKind::Completed as u32,
+            "an ordinary Struct field must be computed natively, not declined"
+        );
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert_eq!(
+            native.as_i32(),
+            Some(11),
+            "the JIT must read the same slot the interpreter did"
+        );
+    }
+
+    // --- Case 2: a MISSING field -> null in BOTH engines, computed natively.
+    {
+        let module = program("nope");
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm
+            .execute(module.as_ref())
+            .expect("a missing field is null, not an error");
+        assert!(
+            interpreted.is_null(),
+            "the interpreter must answer null for an unknown Struct field"
+        );
+
+        let (kind, raw_bits) = jit_side(module);
+        assert_eq!(
+            kind,
+            JitExitKind::Completed as u32,
+            "with no dynamic map there is nothing to look up, so the helper computes null"
+        );
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert!(
+            native.is_null(),
+            "the JIT must also answer null, not decline and not invent a value"
+        );
+    }
+}
