@@ -229,7 +229,15 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // its fallback comparison cannot swallow a real answer. The other six stay
         // `Rejected` and `array_opcodes_are_rejected_until_exact` is updated below.
         | Opcode::NewArray
-        | Opcode::ArrayLen => JitSupport::HelperExact,
+        | Opcode::ArrayLen
+        // D4.8, slice 2: element access. `LoadElem`'s out-of-bounds is a RAISE
+        // in the interpreter, so the arm hands back rather than inventing a value.
+        // `StoreElem` and `InitArray` both go through `helper_array_store`, so both
+        // inherit the element-constraint check AND the refusal to grow -- which is
+        // the opposite of `DynSetKeyed`'s Arr arm and must never be conflated with it.
+        | Opcode::LoadElem
+        | Opcode::StoreElem
+        | Opcode::InitArray => JitSupport::HelperExact,
         Opcode::StoreFieldExact => JitSupport::InterpreterBoundary,
         Opcode::LoadFieldExact
         | Opcode::OptionalFieldExact
@@ -666,23 +674,30 @@ mod tests {
         // The promoted pair is asserted explicitly below rather than being quietly
         // dropped from this list: a guard that silently shrinks is how `BindMethod`
         // and `EndTry` were excluded by accident.
-        for op in [
-            Opcode::LoadElem,
-            Opcode::StoreElem,
-            Opcode::ArrayPush,
-            Opcode::ArrayPop,
-            Opcode::ArrayLiteral,
-            Opcode::InitArray,
-        ] {
+        // Slice 3 of D4.8: not yet promoted. `ArrayPush` can grow the backing Vec, so
+        // it needs its rooting verified in an arm; `ArrayLiteral` is the only opcode
+        // with no helper at all.
+        for op in [Opcode::ArrayPush, Opcode::ArrayPop, Opcode::ArrayLiteral] {
             assert_eq!(jit_support(op), JitSupport::Rejected, "{op:?}");
             assert!(!opcode_supported_for_jit(op), "{op:?} must not be selectable");
         }
 
-        // The pair D4.8 promoted, pinned with the reason it is safe to pin.
-        assert_eq!(jit_support(Opcode::NewArray), JitSupport::HelperExact);
-        assert!(opcode_supported_for_jit(Opcode::NewArray));
-        assert_eq!(jit_support(Opcode::ArrayLen), JitSupport::HelperExact);
-        assert!(opcode_supported_for_jit(Opcode::ArrayLen));
+        // What D4.8 has promoted so far, pinned explicitly with the reason each is
+        // safe to pin rather than quietly dropped from the list above.
+        for op in [
+            Opcode::NewArray,
+            Opcode::ArrayLen,
+            Opcode::LoadElem,
+            Opcode::StoreElem,
+            Opcode::InitArray,
+        ] {
+            assert_eq!(
+                jit_support(op),
+                JitSupport::HelperExact,
+                "{op:?} is promoted with a JIT-active differential"
+            );
+            assert!(opcode_supported_for_jit(op), "{op:?}");
+        }
     }
 
     #[test]

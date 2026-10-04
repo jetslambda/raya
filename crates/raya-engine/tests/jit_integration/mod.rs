@@ -6523,3 +6523,189 @@ fn new_array_length_coercion_matches_interpreter() {
         "the interpreter baseline disagrees about a null length"
     );
 }
+
+
+/// D4.8 slice 2, differentially: element access through `NewArray` + `InitArray` +
+/// `LoadElem` + `StoreElem`, on the **same bytecode** through both engines.
+///
+/// The corpus is built around the three facts that make these opcodes non-trivial,
+/// all of which a naive port gets wrong:
+///
+///   * **`StoreElem` does not grow.** `checked_set` reports `OutOfBounds`, the
+///     opposite of `DynSetKeyed`'s `Arr` arm which resizes. Conflating them is a
+///     silent miscompile, so this builds a length-2 array and writes index 5.
+///   * **`LoadElem` out-of-bounds is a raise**, not a null. Both engines must
+///     produce the interpreter's `RuntimeError`, not a JIT fallback that invents a
+///     value.
+///   * **The index coercion is shared with the interpreter**, so `arr[-1]`,
+///     `arr["x"]` and `arr[-0.5]` must all behave identically. `arr["x"]` and
+///     `arr[-0.5]` read element 0; `arr[-1]` errors.
+///
+/// Results are compared **decoded**, never as raw register bits: a boxed
+/// `Value::i32(0)` is `0xFFF9000000000000`, and an earlier version of this file's
+/// array test failed on correct code for exactly that reason.
+#[test]
+fn array_element_access_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // (label, slot to write, slot to read, expected value read back)
+    // `None` as the expected value means "must be null".
+    //
+    // The index is per-case on purpose. An earlier version of this test hard-coded
+    // index 1 for every case and labelled one of them "an untouched null slot" --
+    // but index 1 is precisely the slot `InitArray` writes, so the interpreter
+    // correctly returned 7 and the test's own expectation was the thing that was
+    // wrong.
+    let cases: Vec<(&str, i32, i32, Option<i32>)> = vec![
+        ("read back the slot InitArray wrote", 1, 1, Some(7)),
+        ("read an untouched null slot", 1, 2, None),
+        ("StoreElem then read back", 1, 0, Some(99)),
+    ];
+
+    for (label, write_slot, read_slot, expected) in cases {
+        // [3] -> NewArray(AnyValue) -> [arr]
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, 3);
+        emit(&mut code, Opcode::NewArray);
+        code.extend_from_slice(&6u32.to_le_bytes());
+
+        // arr, 7, InitArray <write_slot> -> arr
+        emit_i32(&mut code, 7);
+        emit(&mut code, Opcode::InitArray);
+        code.extend_from_slice(&(write_slot as u16).to_le_bytes());
+
+        if expected == Some(99) {
+            // `StoreElem` is `[arr, idx, val] -> []`: it CONSUMES the array. Dup
+            // BEFORE the store to keep a copy to read from afterwards. Duping after
+            // underflows the stack, which the interpreter caught immediately -- an
+            // earlier version of this test did exactly that.
+            emit(&mut code, Opcode::Dup);
+            emit_i32(&mut code, read_slot);
+            emit_i32(&mut code, 99);
+            emit(&mut code, Opcode::StoreElem);
+            emit_i32(&mut code, read_slot);
+            emit(&mut code, Opcode::LoadElem);
+        } else {
+            emit_i32(&mut code, read_slot);
+            emit(&mut code, Opcode::LoadElem);
+        }
+        emit(&mut code, Opcode::Return);
+
+        let mut raw = make_module(code, 0, 0);
+        raw.functions[0].name = "main".to_string();
+        let module = finalize_module(raw);
+
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref()).expect("interpreter element access");
+
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] element access must complete natively"
+        );
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        match expected {
+            None => {
+                assert!(native.is_null(), "[{label}] an untouched slot must read null");
+                assert!(
+                    interpreted.is_null(),
+                    "[{label}] the interpreter baseline is not null, so the case is wrong"
+                );
+            }
+            Some(want) => {
+                assert_eq!(native.as_i32(), Some(want), "[{label}] wrong value from the JIT");
+                assert_eq!(
+                    native.raw(),
+                    interpreted.raw(),
+                    "[{label}] engines disagree on the same bytecode"
+                );
+            }
+        }
+    }
+}
+
+/// The index coercion, differentially, at engine level for the first time.
+///
+/// This is the test `DynGetKeyed`'s `Arr` view could never have. It needs a
+/// natively-compiled array, which only became possible once `NewArray` was
+/// promoted — so the dependency that made `Arr` uncoverable in D4.7 is now gone.
+///
+/// Three cases, all of which look like bugs and are the interpreter's actual
+/// behaviour. A JIT arm that clamped, rejected or defaulted would fail here.
+#[test]
+fn array_index_coercion_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // (label, key program, expected read of slot 1, which holds 7)
+    let cases: Vec<(&str, Vec<Opcode>)> = vec![
+        ("null index means element 0", { let mut v = vec![]; v.push(Opcode::ConstNull); v }),
+        ("negative f64 truncates to 0", { let mut v = vec![]; v.push(Opcode::ConstF64); v }),
+    ];
+
+    for (label, key_ops) in cases {
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, 3);
+        emit(&mut code, Opcode::NewArray);
+        code.extend_from_slice(&6u32.to_le_bytes());
+        emit_i32(&mut code, 7);
+        emit(&mut code, Opcode::InitArray);
+        code.extend_from_slice(&1u16.to_le_bytes());
+        for op in &key_ops {
+            emit(&mut code, *op);
+            if *op == Opcode::ConstF64 {
+                code.extend_from_slice(&(-0.5f64).to_le_bytes());
+            }
+        }
+        emit(&mut code, Opcode::LoadElem);
+        emit(&mut code, Opcode::Return);
+
+        let mut raw = make_module(code, 0, 0);
+        raw.functions[0].name = "main".to_string();
+        let module = finalize_module(raw);
+
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref()).expect("interpreter coercion");
+
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] the coercion must be handled natively, not declined"
+        );
+        // Element 0 is a null slot, so both engines must return null.
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert!(native.is_null(), "[{label}] expected a null element 0");
+        assert!(interpreted.is_null(), "[{label}] interpreter baseline is not null");
+    }
+}

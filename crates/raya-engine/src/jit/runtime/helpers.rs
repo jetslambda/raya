@@ -57,7 +57,7 @@ thread_local! {
         const { RefCell::new(Vec::new()) };
 }
 
-const JIT_STORE_SUCCESS: i8 = 1;
+pub const JIT_STORE_SUCCESS: i8 = 1;
 const JIT_STORE_FALLBACK: i8 = 0;
 
 #[repr(C)]

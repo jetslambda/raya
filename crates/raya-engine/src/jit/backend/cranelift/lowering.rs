@@ -63,6 +63,8 @@ pub struct LoweringContext<'a> {
     sig_await_task: Option<ir::SigRef>,
     sig_dyn_get_keyed: Option<ir::SigRef>,
     sig_array_len: Option<ir::SigRef>,
+    sig_array_store: Option<ir::SigRef>,
+    sig_array_load: Option<ir::SigRef>,
     sig_alloc_array: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.object_get_shape_field
     sig_object_get_shape_field: Option<ir::SigRef>,
@@ -207,6 +209,8 @@ impl<'a> LoweringContext<'a> {
             sig_await_task: None,
             sig_dyn_get_keyed: None,
             sig_array_len: None,
+            sig_array_store: None,
+            sig_array_load: None,
             sig_alloc_array: None,
             sig_object_get_shape_field: None,
             sig_object_set_shape_field: None,
@@ -1062,6 +1066,231 @@ impl<'a> LoweringContext<'a> {
                 builder.switch_to_block(done);
                 let merged = builder.block_params(done)[0];
                 self.def_reg(builder, *dest, merged);
+            }
+            JitInstr::LoadElem {
+                dest,
+                array,
+                index,
+                stack,
+                bytecode_offset,
+            } => {
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "load elem exit stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let null_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let done = builder.create_block();
+                builder.append_block_param(done, types::I64);
+                builder
+                    .ins()
+                    .brif(is_ctx_null, null_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+                builder.seal_block(null_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_ARRAY_LOAD_OFFSET,
+                );
+                let sig = self.array_load_sig(builder);
+                // Both operands boxed. The index especially: the interpreter runs it
+                // through `array_index_operand`, and the helper now shares that
+                // function, so `arr["x"]` reads element 0 in the JIT exactly as it
+                // does in the interpreter.
+                let array_val = self.boxed_reg_value(builder, *array);
+                let index_val = self.boxed_reg_value(builder, *index);
+                let call =
+                    builder
+                        .ins()
+                        .call_indirect(sig, fn_ptr, &[array_val, index_val, shared_state]);
+                let result = builder.inst_results(call)[0];
+
+                let sentinel = builder
+                    .ins()
+                    .iconst(types::I64, crate::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL as i64);
+                let is_fallback =
+                    builder
+                        .ins()
+                        .icmp(condcodes::IntCC::Equal, result, sentinel);
+                builder
+                    .ins()
+                    .brif(is_fallback, fallback_block, &[], done, &[ir::BlockArg::Value(result)]);
+                builder.seal_block(fallback_block);
+
+                builder.switch_to_block(fallback_block);
+                // Out-of-bounds is a RAISE in the interpreter ("Array index N out of
+                // bounds"), not a null, so this must reach the interpreter to produce
+                // the message rather than inventing an answer here.
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.switch_to_block(null_block);
+                let null = abi::emit_null(builder);
+                builder.ins().jump(done, &[ir::BlockArg::Value(null)]);
+
+                builder.seal_block(done);
+                builder.switch_to_block(done);
+                let merged = builder.block_params(done)[0];
+                self.def_reg(builder, *dest, merged);
+            }
+            JitInstr::StoreElem {
+                array,
+                index,
+                value,
+                stack,
+                bytecode_offset,
+            } => {
+                // No `dest`: the array stays on the operand stack. Note this does NOT
+                // grow the array -- the interpreter's `checked_set` reports
+                // `OutOfBounds`, which is the opposite of `DynSetKeyed`'s Arr arm.
+                // Conflating the two would be a silent miscompile.
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "store elem exit stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let null_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let done = builder.create_block();
+                builder
+                    .ins()
+                    .brif(is_ctx_null, null_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+                builder.seal_block(null_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_ARRAY_STORE_OFFSET,
+                );
+                let sig = self.array_store_sig(builder);
+                let array_val = self.boxed_reg_value(builder, *array);
+                let index_val = self.boxed_reg_value(builder, *index);
+                let value_val = self.boxed_reg_value(builder, *value);
+                let call = builder.ins().call_indirect(
+                    sig,
+                    fn_ptr,
+                    &[array_val, index_val, value_val, shared_state],
+                );
+                let status = builder.inst_results(call)[0];
+
+                // Compare against `JIT_STORE_SUCCESS` (1) rather than testing
+                // `!= JIT_STORE_FALLBACK`. Both work today, but an explicit
+                // "did it succeed" compare keeps a future third status from being
+                // silently treated as failure.
+                let ok = builder.ins().icmp_imm(
+                    condcodes::IntCC::Equal,
+                    status,
+                    crate::jit::runtime::helpers::JIT_STORE_SUCCESS as i64,
+                );
+                builder.ins().brif(ok, done, &[], fallback_block, &[]);
+                builder.seal_block(fallback_block);
+
+                builder.switch_to_block(fallback_block);
+                // Either a non-array receiver, an out-of-bounds index, or an element
+                // constraint violation. All three are interpreter errors, so hand back.
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.switch_to_block(null_block);
+                // No argument: `done` has no block param for these two opcodes
+                // because neither produces a result (`StoreElem` leaves the array on
+                // the stack, `InitArray` too). Passing a value here is a Cranelift
+                // verifier error -- "mismatched argument count for jump" -- not a
+                // silently-ignored extra.
+                builder.ins().jump(done, &[]);
+
+                builder.seal_block(done);
+                builder.switch_to_block(done);
+            }
+            JitInstr::InitArray {
+                array,
+                index,
+                value,
+                stack,
+                bytecode_offset,
+            } => {
+                // Shares `helper_array_store` and therefore the interpreter's exact
+                // semantics, including the element-constraint check and the refusal to
+                // grow. The index here is a u16 OPERAND, not a stack `Value`, so no
+                // coercion is involved: boxing the constant reproduces
+                // `array_index_operand(Value::i32(index)) == index` exactly, for
+                // every `index` a u16 can hold.
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "init array exit stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let null_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let done = builder.create_block();
+                builder
+                    .ins()
+                    .brif(is_ctx_null, null_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+                builder.seal_block(null_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_ARRAY_STORE_OFFSET,
+                );
+                let sig = self.array_store_sig(builder);
+                let array_val = self.boxed_reg_value(builder, *array);
+                let index_const = builder.ins().iconst(types::I32, *index as i64);
+                let index_val = abi::emit_box_i32(builder, index_const);
+                let value_val = self.boxed_reg_value(builder, *value);
+                let call = builder.ins().call_indirect(
+                    sig,
+                    fn_ptr,
+                    &[array_val, index_val, value_val, shared_state],
+                );
+                let status = builder.inst_results(call)[0];
+                let ok = builder.ins().icmp_imm(
+                    condcodes::IntCC::Equal,
+                    status,
+                    crate::jit::runtime::helpers::JIT_STORE_SUCCESS as i64,
+                );
+                builder.ins().brif(ok, done, &[], fallback_block, &[]);
+                builder.seal_block(fallback_block);
+
+                builder.switch_to_block(fallback_block);
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.switch_to_block(null_block);
+                // No argument: `done` has no block param for these two opcodes
+                // because neither produces a result (`StoreElem` leaves the array on
+                // the stack, `InitArray` too). Passing a value here is a Cranelift
+                // verifier error -- "mismatched argument count for jump" -- not a
+                // silently-ignored extra.
+                builder.ins().jump(done, &[]);
+
+                builder.seal_block(done);
+                builder.switch_to_block(done);
             }
             JitInstr::ArrayLen {
                 dest,
@@ -3324,6 +3553,35 @@ impl<'a> LoweringContext<'a> {
         sig.returns.push(AbiParam::new(types::I64)); // array ptr, or null
         let sig_ref = builder.func.import_signature(sig);
         self.sig_alloc_array = Some(sig_ref);
+        sig_ref
+    }
+
+    fn array_load_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_array_load {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I64)); // array (boxed Value)
+        sig.params.push(AbiParam::new(types::I64)); // index (boxed Value)
+        sig.params.push(AbiParam::new(types::I64)); // shared_state ptr
+        sig.returns.push(AbiParam::new(types::I64)); // element or sentinel
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_array_load = Some(sig_ref);
+        sig_ref
+    }
+
+    fn array_store_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_array_store {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I64)); // array (boxed Value)
+        sig.params.push(AbiParam::new(types::I64)); // index (boxed Value)
+        sig.params.push(AbiParam::new(types::I64)); // value (boxed Value)
+        sig.params.push(AbiParam::new(types::I64)); // shared_state ptr
+        sig.returns.push(AbiParam::new(types::I8)); // JIT_STORE_SUCCESS or FALLBACK
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_array_store = Some(sig_ref);
         sig_ref
     }
 
