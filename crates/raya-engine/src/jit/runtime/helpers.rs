@@ -1806,14 +1806,25 @@ unsafe extern "C" fn helper_await_task(value_raw: u64, shared_state: *mut ()) ->
 
 /// `DynGetKeyed` for the views that do not need field-index resolution.
 ///
-/// `JSView::Str` and `JSView::Arr` are ordinary leaf reads and are handled here.
-/// **`JSView::Struct` and everything else return the interpreter-fallback
-/// sentinel**, deliberately: `Struct` field lookup goes through
-/// `field_index_for_value`, which falls back to `structural_object_shapes` — a
-/// registry `JitRuntimeBridgeContext` does not carry and `SharedVmState` does not
-/// have either (it has `structural_layout_shapes` instead). Reproducing that
-/// resolution here would diverge from the interpreter rather than match it, so the
-/// interpreter keeps that part. See the D4.7 spec.
+/// `JSView::Str` and `JSView::Arr` are ordinary leaf reads and are handled here, as is
+/// **`JSView::Struct`** — which this helper does NOT blanket-decline.
+///
+/// **The rationale below used to be the opposite, and it was wrong.** D4.7 recorded
+/// that `Struct` field lookup "falls back to `structural_object_shapes`, a registry
+/// `JitRuntimeBridgeContext` does not carry". That is FALSE: the bridge carries
+/// `structural_layout_shapes` (the same registry under the name `SharedVmState` uses),
+/// plus `class_metadata` and `layouts`. `Struct` was handled in D4.10 through the shared
+/// `object_field_index`, and the re-review of PR #1 confirmed the arm reproduces the
+/// interpreter's resolution.
+///
+/// `Struct` still DECLINES on three paths, each for a real reason rather than a missing
+/// registry: a **proxy** receiver (the interpreter unwraps and reads the target's field),
+/// a property with a **getter** (the interpreter runs it as a frame), and — the case a
+/// cross-model review caught as a **P1 silent wrong value** — a receiver with a **nominal
+/// type** and no field index, where the interpreter falls through to a method-slot lookup
+/// and can return a *bound method* that `null` is not.
+///
+/// Everything else returns the interpreter-fallback sentinel.
 ///
 /// Key parsing calls the interpreter's own `dyn_key_parts`, and the view split
 /// uses its own `js_classify`. Neither is reimplemented here: a hand-rolled key
@@ -2149,9 +2160,15 @@ unsafe extern "C" fn helper_dyn_set_keyed(
     let value = Value::from_raw(value_raw);
     use crate::vm::json::view::{js_classify, JSView};
     let JSView::Arr(ptr) = js_classify(object_value) else {
-        // `Struct` declines (it needs `structural_object_shapes`, which the bridge
-        // does not carry). Everything else -- including `Str`, which is a hard
-        // `TypeError` for `DynSetKeyed` -- raises in the interpreter.
+        // `Struct` declines -- but NOT because the bridge lacks a registry. It carries
+        // `structural_object_shapes`, `class_metadata` and `layouts`, and
+        // `DynGetKeyed`'s Struct arm uses all three. This arm is inert because
+        // `DynSetKeyed` is unpromoted for Struct (blocked on ALY-73), and because the
+        // write side additionally needs `is_field_writable_for` and
+        // `sync_descriptor_value_for`, which are extracted but not yet reachable here.
+        //
+        // Everything else -- including `Str`, which is a hard `TypeError` for
+        // `DynSetKeyed` -- raises in the interpreter.
         return JIT_STORE_FALLBACK;
     };
     // `Arr` only: the interpreter requires a parseable index and raises otherwise.
@@ -3462,11 +3479,17 @@ mod tests {
     /// D4.7 `DynGetKeyed`: the two views a helper can honestly reproduce, and the
     /// one it must decline.
     ///
-    /// The `Struct` case is the important half. Its field lookup falls back to
-    /// `structural_object_shapes`, a registry the bridge does not carry, so the
-    /// helper must return the fallback sentinel rather than approximate the
-    /// resolution. A test that only exercised `Arr` would pass while that
-    /// fallback silently regressed into a wrong answer.
+    /// The `Struct` case is the important half, and its expected answer has CHANGED.
+    /// This test used to assert that an unknown `Struct` field returns the fallback
+    /// sentinel because "the bridge does not carry `structural_object_shapes`" — that
+    /// was false (D4.10), and the assertion was also wrong for the fixture it used: a
+    /// `new_nominal` object. A cross-model review of PR #1 found the real divergence —
+    /// the interpreter answers a **bound method** there via method-slot lookup, and this
+    /// helper answered `null`, a silent wrong value reported as `Completed`.
+    ///
+    /// So the fixture's shape and the assertion had to agree, and they now do: a NOMINAL
+    /// receiver declines, a STRUCTURAL one computes null. A test that only exercised
+    /// `Arr` would still pass while any of that regressed.
     #[test]
     fn dyn_get_keyed_helper_handles_arr_and_str_and_defers_the_rest() {
         use crate::vm::object::{Array, Object, RayaString};
