@@ -1841,14 +1841,24 @@ fn lift_instruction(
         }
         Opcode::InitObject => {
             if let Operands::U16(field_offset) = instr.operands {
+                // Snapshot BEFORE the pop: the interpreter resuming at
+                // `bytecode_offset` re-executes this opcode and must find `[obj, value]`
+                // still on the stack, because `InitObject` POPS the value and PEEKS the
+                // object.
+                let pre_stack = stack.clone_state();
                 let value = stack.pop(instr.offset)?;
                 let object = stack
                     .peek()
                     .ok_or(LiftError::StackUnderflow { offset: instr.offset })?;
-                func.block_mut(block).instrs.push(JitInstr::StoreFieldExact {
+                // `InitObjectField`, NOT `StoreFieldExact`: the object is under
+                // construction, so no descriptor accessor can apply, and an
+                // out-of-range offset has to reach the interpreter to raise.
+                func.block_mut(block).instrs.push(JitInstr::InitObjectField {
                     object,
                     offset: field_offset,
                     value,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
                 });
             }
         }

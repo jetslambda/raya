@@ -456,6 +456,23 @@ pub enum JitInstr {
         offset: u16,
         value: Reg,
     },
+    /// A slot write on an object that is still BEING CONSTRUCTED, from `InitObject`.
+    ///
+    /// Deliberately distinct from `StoreFieldExact`, which stays an
+    /// `InterpreterBoundary` because a descriptor setter needs an interpreter frame.
+    /// That reason does not apply here: the object is brand new and cannot have a
+    /// property defined on it yet, so there is no accessor to run.
+    ///
+    /// `stack` and `bytecode_offset` are required, not optional: `checked_set_field`
+    /// turns an out-of-range offset into a `RuntimeError`, which a leaf helper cannot
+    /// raise, so the arm MUST be able to hand control back.
+    InitObjectField {
+        object: Reg,
+        offset: u16,
+        value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
+    },
     StoreFieldShape {
         object: Reg,
         shape_id: u64,
@@ -1092,6 +1109,7 @@ impl JitInstr {
             | JitInstr::StoreFieldShape { .. }
             | JitInstr::StoreElem { .. }
             | JitInstr::ArrayPush { .. }
+            | JitInstr::InitObjectField { .. }
             | JitInstr::InitArray { .. }
             | JitInstr::StoreCaptured { .. }
             | JitInstr::SetClosureCapture { .. }

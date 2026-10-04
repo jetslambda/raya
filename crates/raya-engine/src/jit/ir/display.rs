@@ -255,6 +255,12 @@ impl fmt::Display for JitInstr {
                 offset,
                 value,
             } => write!(f, "store.field {}.{}, {}", object, offset, value),
+            JitInstr::InitObjectField {
+                object,
+                offset,
+                value,
+                ..
+            } => write!(f, "initObject.field {}.{}, {}", object, offset, value),
             JitInstr::StoreFieldShape {
                 object,
                 shape_id,
