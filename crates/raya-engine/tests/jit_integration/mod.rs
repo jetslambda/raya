@@ -7835,3 +7835,109 @@ fn dyn_get_keyed_struct_view_matches_interpreter() {
         );
     }
 }
+
+
+/// ALY-75: a **nominal instance with no dynamic map**, keyed by a name that could be a
+/// method slot — the exact shape that produced the round-1 P1 on this PR.
+///
+/// The existing `dyn_get_keyed_struct_view_matches_interpreter` builds an
+/// `ObjectLiteral` **structural** object, so it never reaches the branch the P1 lived in.
+/// This one reaches it via `NewType`, which needs FOUR registrations, each found by
+/// reading what actually consumes it:
+///
+///   1. `ModuleRuntimeLayout` on the **shared state**, so `resolve_nominal_type_id`
+///      maps a local class index to a nominal type id. (ALY-76's seam — without it the
+///      interpreter and the JIT harness see different states and the error is
+///      "Invalid module-local nominal type id 0".)
+///   2. `ClassRegistry::register_nominal_layout` on the same state, so
+///      `nominal_allocation` can map that nominal id to a layout. **`layout_id` must
+///      be non-zero — `register_nominal_layout` returns early when it is 0.**
+///   3. `ClassDef` on the module, for the class name and shape.
+///   4. `register_module`, so the module is visible to the interpreter.
+///
+/// **It deliberately does NOT assert a value.** Whether the interpreter yields a bound
+/// method or `null` depends on whether the class has a method registered, and this
+/// fixture registers none. What is pinned is narrower and stronger: **the JIT declines
+/// and lets the interpreter resolve it.** A value-asserting test here could not have
+/// caught the P1 it exists to guard against.
+#[test]
+fn dyn_get_keyed_nominal_receiver_declines() {
+    use raya_engine::compiler::bytecode::module::{ClassDef, Method};
+    use raya_engine::jit::runtime::trampoline::{JitExitKind, JitSuspendReason};
+    use raya_engine::vm::interpreter::{ModuleRuntimeLayout, Vm};
+    use raya_engine::vm::ResolvedNatives;
+
+    let mut module = make_vm_module(Vec::new(), 0, 0);
+    // No methods: we want the no-slot path, which is the one the JIT must decline.
+    module.classes = vec![ClassDef {
+        name: "Target".to_string(),
+        field_count: 0,
+        parent_id: None,
+        methods: Vec::<Method>::new(),
+    }];
+    let key_idx = module.constants.add_string("value".to_string());
+    let mut code: Vec<u8> = Vec::new();
+    emit(&mut code, Opcode::NewType);
+    code.extend_from_slice(&0u16.to_le_bytes()); // local class index 0
+    emit_const_str(&mut code, key_idx);
+    emit(&mut code, Opcode::DynGetKeyed);
+    emit(&mut code, Opcode::Return);
+    module.functions[0].code = code;
+    module.functions[0].name = "main".to_string();
+    let module = finalize_module(module);
+
+    let mut vm = Vm::with_worker_count(1);
+    {
+        let shared = vm.shared_state_arc();
+        shared.module_layouts.write().insert(
+            module.checksum,
+            ModuleRuntimeLayout {
+                checksum: module.checksum,
+                global_base: 0,
+                global_len: 0,
+                nominal_type_base: 0,
+                nominal_type_len: 1,
+                resolved_natives: ResolvedNatives::empty(),
+                initialized: false,
+            },
+        );
+        // layout_id 1, NOT 0 -- register_nominal_layout silently returns on 0.
+        shared
+            .layouts
+            .write()
+            .register_nominal_layout(0, 1, 0, Some("Target".to_string()));
+        shared
+            .register_module(module.clone())
+            .expect("register module for NewType");
+    }
+    let interpreted = vm
+        .execute(module.as_ref())
+        .expect("the interpreter must answer a keyed read on a nominal instance");
+
+    let (safepoint, _own) = new_shared_vm_state();
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_rn, bridge) =
+        build_bridge_and_ctx(&safepoint, vm.shared_state_arc(), &task, &module);
+    let mut ctx =
+        raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = Vec::new();
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+    let (_raw, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+
+    assert_eq!(
+        exit.kind,
+        JitExitKind::Suspended as u32,
+        "a NOMINAL receiver with no field index must DECLINE, never answer itself"
+    );
+    assert_eq!(
+        exit.suspend_reason,
+        JitSuspendReason::InterpreterBoundary as u32,
+        "the decline must be an interpreter boundary"
+    );
+    // Recorded, not asserted.
+    eprintln!(
+        "ALY-75 nominal fixture: interpreter answered 0x{:016X}",
+        interpreted.raw()
+    );
+}
