@@ -23,7 +23,7 @@ use crate::vm::value::Value;
 use crate::vm::VmError;
 use std::sync::Arc;
 
-const NODE_DESCRIPTOR_METADATA_KEY: &str = "__node_compat_descriptor";
+use super::objects::NODE_DESCRIPTOR_METADATA_KEY;
 const IMPORTED_CLASS_TYPE_HANDLE_KEY: &str = "__raya_type_handle__";
 
 fn value_as_string(arg: Value) -> Result<String, VmError> {
@@ -3327,6 +3327,50 @@ pub(crate) fn structural_layout_names_from(
         return Some(names);
     }
     crate::vm::object::global_layout_names(layout_id)
+}
+
+/// Look up a Node-compat descriptor's `accessor_name` value on `obj_val.field_name`.
+///
+/// `pub(crate)` and free-standing so a JIT helper can ask *whether* an accessor exists
+/// without reimplementing the lookup. That question is the whole point: the
+/// interpreter, on finding a getter or setter, **calls it as a frame**, which a leaf
+/// helper cannot do — so a JIT helper's only correct response is to decline and let the
+/// interpreter run the frame. Deciding that wrongly in either direction is a
+/// correctness bug, not a performance one: answering natively would skip a user
+/// getter, and declining everything would make every `defineProperty` object
+/// un-JIT-able.
+///
+/// The registries are explicit for the same reason as `object_field_index`: the
+/// `Interpreter` passes its own `&'a` refs, a helper passes the bridge's.
+pub(crate) fn descriptor_accessor_for(
+    obj_val: Value,
+    field_name: &str,
+    accessor_name: &str,
+    metadata: &parking_lot::Mutex<crate::vm::reflect::MetadataStore>,
+    class_metadata: &parking_lot::RwLock<crate::vm::reflect::ClassMetadataRegistry>,
+    layouts: &parking_lot::RwLock<crate::vm::interpreter::class_registry::RuntimeLayoutRegistry>,
+    structural_layout_shapes: &parking_lot::RwLock<
+        rustc_hash::FxHashMap<crate::vm::object::LayoutId, Vec<String>>,
+    >,
+) -> Option<Value> {
+    let descriptor = {
+        let metadata = metadata.lock();
+        metadata.get_metadata_property(NODE_DESCRIPTOR_METADATA_KEY, obj_val, field_name)
+    }?;
+    let descriptor_ptr = unsafe { descriptor.as_ptr::<Object>() }?;
+    let descriptor_obj = unsafe { &*descriptor_ptr.as_ptr() };
+    let index = object_field_index(
+        descriptor_obj,
+        accessor_name,
+        class_metadata,
+        layouts,
+        structural_layout_shapes,
+    )?;
+    let accessor = descriptor_obj.get_field(index)?;
+    if accessor.is_null() {
+        return None;
+    }
+    Some(accessor)
 }
 
 /// Resolve `field_name` to a field index on `obj`.

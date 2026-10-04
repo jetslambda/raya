@@ -15,7 +15,12 @@ use crate::vm::value::Value;
 use crate::vm::VmError;
 use std::sync::Arc;
 
-const NODE_DESCRIPTOR_METADATA_KEY: &str = "__node_compat_descriptor";
+/// The metadata key under which a Node-compat property descriptor is stored.
+///
+/// Previously duplicated verbatim in `native.rs`. One definition now: two private
+/// copies of the same magic string is exactly the drift this milestone exists to
+/// remove, and a rename that updated one and not the other would be silent.
+pub(crate) const NODE_DESCRIPTOR_METADATA_KEY: &str = "__node_compat_descriptor";
 
 impl<'a> Interpreter<'a> {
     fn load_shape_field_on_non_object(
@@ -428,15 +433,19 @@ impl<'a> Interpreter<'a> {
         field_name: &str,
         accessor_name: &str,
     ) -> Option<Value> {
-        let descriptor = {
-            let metadata = self.metadata.lock();
-            metadata.get_metadata_property(NODE_DESCRIPTOR_METADATA_KEY, obj_val, field_name)
-        }?;
-        let accessor = self.get_value_field_by_name(descriptor, accessor_name)?;
-        if accessor.is_null() {
-            return None;
-        }
-        Some(accessor)
+        // Delegates to the shared function, which the JIT keyed-access helpers will
+        // call. A JIT helper CANNOT run an accessor -- the interpreter calls it as a
+        // frame -- so for that caller the useful part is only `.is_some()`, meaning
+        // "decline and let the interpreter run the frame".
+        crate::vm::interpreter::opcodes::native::descriptor_accessor_for(
+            obj_val,
+            field_name,
+            accessor_name,
+            &self.metadata,
+            &self.class_metadata,
+            &self.layouts,
+            self.structural_object_shapes,
+        )
     }
 
     /// Narrow a receiver to something the field accessors can work on.
