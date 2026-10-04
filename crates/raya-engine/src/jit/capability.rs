@@ -212,28 +212,43 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // the same module, and path 3 is unreachable from native code by design
         // because JitSuspendReason has no AwaitTask variant.
         | Opcode::Await
-        // D4.7, updated after D4.8. Exact for the Str and Arr views, where the
-        // helper either computes the answer or declines via the fallback sentinel.
+        // D4.7, updated twice since. ALL THREE VIEWS ARE NOW ENGINE-PROVEN and
+        // nothing about this opcode is narrowed any more.
         //
-        // The Struct view NEEDS `structural_object_shapes`, which the bridge does
-        // not carry, so it declines rather than guessing -- and declining is a
-        // deopt, not a wrong value. That is the ONLY remaining narrowing.
+        //  * `Str` -- proven in D4.7. Note the corpus had to be non-ASCII: an
+        //    ASCII-only one agreed with a `chars().count()` bug where the
+        //    interpreter uses `str::len()`.
+        //  * `Arr` -- promoted in D4.7 on HELPER-LEVEL evidence alone, because no
+        //    natively-compiled bytecode could construct an array. D4.8 removed that
+        //    dependency and it is engine-proven.
+        //  * `Struct` -- promoted in D4.10. The recorded reason for it declining
+        //    ("needs structural_object_shapes, which the bridge does not carry")
+        //    was FALSE: the bridge carries those registries. What actually blocked
+        //    it was that no compiled function could CONSTRUCT a Struct, which
+        //    `CastObjectMinFields` + `ObjectLiteral` + `InitObject` fixed.
         //
-        // Arr was promoted in D4.7 on HELPER-LEVEL evidence alone, because no
-        // natively-compiled bytecode could construct an array to read from. D4.8
-        // promoted the array family, which removed that dependency, and
-        // dyn_get_keyed_array_view_matches_interpreter now covers Arr at engine
-        // level. So the corpus is no longer narrowed: Str and Arr are both
-        // engine-proven, and Struct declines by design.
+        // It still declines on three paths, all of them correct: a proxy receiver
+        // (the interpreter unwraps and reads the TARGET's field), a property with a
+        // getter (the interpreter runs it as a FRAME), and an object that HAS a
+        // dynamic property map (that lookup needs an interned PropKey only the
+        // interpreter can mint). Declining is a deopt, never a wrong value.
         | Opcode::DynGetKeyed
-        // D4.9: `Arr` only, and only now that D4.8 made arrays constructible in
-        // compiled code -- D4.7 declined this opcode purely on reachability.
+        // D4.9: `Arr` only. The helper GROWS the receiver and does NOT enforce the
+        // element constraint, because the interpreter's arm assigns
+        // `elements[index]` directly after an optional `resize` and does neither --
+        // `dyn_set_keyed_constraint_is_not_enforced` pins that, and it is the one
+        // behaviour here that must NOT be "fixed".
         //
-        // The helper GROWS the receiver and does NOT enforce the element constraint,
-        // because the interpreter's arm assigns `elements[index]` directly after an
-        // optional `resize` and does neither. `Struct` still declines (no shape
-        // registry on the bridge); every non-array receiver, `Str` included, is a
-        // `TypeError` the helper cannot raise.
+        // `Struct` STILL declines, and the reason is the WRITE side, which the read
+        // side does not have: the interpreter's Struct arm calls `descriptor_accessor`
+        // for a SETTER (a frame it must run), `is_field_writable` TWICE with distinct
+        // messages, `sync_descriptor_value` to write back through descriptors, and
+        // `intern_prop_key` + `ensure_dyn_map().insert(...)` -- an ALLOCATION. The read
+        // path needed one of those (`descriptor_accessor`, already extracted in D4.10)
+        // and the rest never arise; the write path needs all of them.
+        //
+        // Every non-array receiver, `Str` included, is a `TypeError` the helper cannot
+        // raise, so those decline.
         // D4.10: the field-count cast, and object construction.
         //
         // `CastObjectMinFields` is a CHECKED PASS-THROUGH: it consults no descriptor
@@ -670,18 +685,23 @@ mod tests {
         }
     }
 
-    /// D4.7's two decisions, pinned so neither can be flipped silently.
+    /// The keyed-access decisions, pinned so neither can be flipped silently.
     ///
-    /// `DynGetKeyed` is promoted on a **narrowed corpus**: the `Str` view is proven
-    /// by an engine-level differential, the `Arr` view by a helper-level test only,
-    /// and the `Struct` view declines via the fallback sentinel. If someone widens
-    /// that corpus this test is where the claim has to be revisited, not a comment.
+    /// `DynGetKeyed` was promoted in D4.7 on a **narrowed corpus** — `Str`
+    /// engine-proven, `Arr` helper-level only, `Struct` declining — and both
+    /// narrowings have since closed. `Arr` in D4.8, once arrays became constructible
+    /// in compiled code; `Struct` in D4.10, and the recorded reason it declined was
+    /// false (the bridge *does* carry the registries — what was missing was any way
+    /// to construct a Struct natively).
+    ///
+    /// `DynSetKeyed` is `Arr`-only. Its `Struct` arm needs the write-side
+    /// descriptor machinery, which is a different and larger job than the read side.
     #[test]
     fn d4_7_keyed_access_decisions_are_pinned() {
         assert_eq!(
             jit_support(Opcode::DynGetKeyed),
             JitSupport::HelperExact,
-            "DynGetKeyed is promoted for the Str/Arr views, with Struct declining"
+            "DynGetKeyed is promoted for all three views: Str, Arr and Struct"
         );
         assert!(opcode_supported_for_jit(Opcode::DynGetKeyed));
 
