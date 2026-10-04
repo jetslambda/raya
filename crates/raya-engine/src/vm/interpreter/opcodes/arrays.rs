@@ -44,15 +44,7 @@ impl<'a> Interpreter<'a> {
                     Err(e) => return OpcodeResult::Error(e),
                 };
                 let len = match stack.pop() {
-                    Ok(v) => {
-                        if let Some(i) = v.as_i32() {
-                            i as usize
-                        } else if let Some(f) = v.as_f64() {
-                            f as usize
-                        } else {
-                            0
-                        }
-                    }
+                    Ok(v) => array_index_operand(v),
                     Err(e) => return OpcodeResult::Error(e),
                 };
 
@@ -68,15 +60,7 @@ impl<'a> Interpreter<'a> {
 
             Opcode::LoadElem => {
                 let index = match stack.pop() {
-                    Ok(v) => {
-                        if let Some(i) = v.as_i32() {
-                            i as usize
-                        } else if let Some(f) = v.as_f64() {
-                            f as usize
-                        } else {
-                            0
-                        }
-                    }
+                    Ok(v) => array_index_operand(v),
                     Err(e) => return OpcodeResult::Error(e),
                 };
                 let arr_val = match stack.pop() {
@@ -113,15 +97,7 @@ impl<'a> Interpreter<'a> {
                     Err(e) => return OpcodeResult::Error(e),
                 };
                 let index = match stack.pop() {
-                    Ok(v) => {
-                        if let Some(i) = v.as_i32() {
-                            i as usize
-                        } else if let Some(f) = v.as_f64() {
-                            f as usize
-                        } else {
-                            0
-                        }
-                    }
+                    Ok(v) => array_index_operand(v),
                     Err(e) => return OpcodeResult::Error(e),
                 };
                 let arr_val = match stack.pop() {
@@ -290,6 +266,36 @@ impl<'a> Interpreter<'a> {
     fn build_array(module: &Module, type_index: u32, length: usize) -> Array {
         let element_type = resolve_element_descriptor(module, type_index);
         Array::with_element_type(type_index as usize, element_type, length)
+    }
+}
+
+/// Coerce a stack operand into an array index or length.
+///
+/// `pub(crate)` so a JIT helper reproduces this coercion **exactly** instead of
+/// reimplementing it — the same reasoning that made `dyn_key_parts` shared in
+/// D4.7. There are exactly three call sites (`NewArray`'s length, `LoadElem`'s
+/// index and `StoreElem`'s index); `ArrayLiteral` and `InitArray` read their
+/// index from a `u32`/`u16` *operand*, not a stack `Value`, so their `as usize`
+/// is a plain widening and deliberately does not come through here.
+///
+/// The behaviour is surprising and is **not** a bug:
+///
+///   * a negative `i32` wraps to a huge `usize`, so `arr[-1]` reports
+///     "index 18446744073709551615 out of bounds"
+///   * a **non-numeric** operand becomes index 0, so `arr["x"]` reads `arr[0]`
+///   * a negative `f64` truncates toward zero, so `arr[-0.5]` reads `arr[0]`
+///
+/// Clamping negatives or rejecting non-numerics here would be a silent divergence
+/// from the interpreter, not a fix. That is the whole reason this function exists
+/// and the reason the differential corpus must carry `arr[-1]`, `arr["x"]` and
+/// `arr[-0.5]` even though all three look like nonsense.
+pub(crate) fn array_index_operand(value: Value) -> usize {
+    if let Some(i) = value.as_i32() {
+        i as usize
+    } else if let Some(f) = value.as_f64() {
+        f as usize
+    } else {
+        0
     }
 }
 
@@ -471,4 +477,39 @@ mod tests {
         code.push(Opcode::Return as u8);
         assert_eq!(run(code).unwrap().as_i32(), Some(11));
     }
+
+
+/// Pins the index coercion's surprising behaviour as a **contract**, not a bug.
+///
+/// Every case here looks like something a well-meaning cleanup would "fix", and
+/// every one of those fixes would be a silent divergence from the interpreter.
+/// The negative cases are the reason `array_index_operand` is shared rather than
+/// reimplemented in the JIT arm.
+#[test]
+fn array_index_operand_coercion_is_pinned() {
+    use super::array_index_operand;
+
+    // Ordinary indices.
+assert_eq!(array_index_operand(Value::i32(0)), 0);
+assert_eq!(array_index_operand(Value::i32(7)), 7);
+assert_eq!(array_index_operand(Value::f64(3.0)), 3);
+
+// A negative i32 WRAPS to a huge usize rather than clamping or erroring, which
+// is why `arr[-1]` reports index 18446744073709551615 out of bounds.
+assert_eq!(array_index_operand(Value::i32(-1)), usize::MAX);
+assert_eq!(array_index_operand(Value::i32(-2)), usize::MAX - 1);
+
+// A negative f64 truncates toward zero, so it SUCCEEDS as index 0. This is the
+// sharpest divergence: the same negative offset errors as an i32 and works as
+// an f64.
+assert_eq!(array_index_operand(Value::f64(-0.5)), 0);
+assert_eq!(array_index_operand(Value::f64(-3.9)), 0);
+
+// A fractional f64 truncates.
+assert_eq!(array_index_operand(Value::f64(2.9)), 2);
+
+// Non-numeric operands silently become index 0, so arr["x"] reads arr[0].
+assert_eq!(array_index_operand(Value::null()), 0);
+assert_eq!(array_index_operand(Value::bool(true)), 0);
+}
 }
