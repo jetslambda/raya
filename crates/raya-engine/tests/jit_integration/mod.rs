@@ -2237,8 +2237,8 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     }
 
     /// Declines, so a cast routes to the interpreter rather than silently passing.
-    /// `CastObjectMinFields` is still `Rejected` AND still on
-    /// `produces_incorrect_native_results`, so no compiled test reaches this yet.
+    /// `CastObjectMinFields` is promoted as of D4.10; this stub is not the real
+    /// helper and no differential routes through it.
     unsafe extern "C" fn stub_cast_object_min_fields(
         _object: u64,
         _required_fields: u64,
@@ -2525,8 +2525,8 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     }
 
     /// Declines, so a cast routes to the interpreter rather than silently passing.
-    /// `CastObjectMinFields` is still `Rejected` AND still on
-    /// `produces_incorrect_native_results`, so no compiled test reaches this yet.
+    /// `CastObjectMinFields` is promoted as of D4.10; this stub is not the real
+    /// helper and no differential routes through it.
     unsafe extern "C" fn stub_cast_object_min_fields(
         _object: u64,
         _required_fields: u64,
@@ -2814,8 +2814,8 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     }
 
     /// Declines, so a cast routes to the interpreter rather than silently passing.
-    /// `CastObjectMinFields` is still `Rejected` AND still on
-    /// `produces_incorrect_native_results`, so no compiled test reaches this yet.
+    /// `CastObjectMinFields` is promoted as of D4.10; this stub is not the real
+    /// helper and no differential routes through it.
     unsafe extern "C" fn stub_cast_object_min_fields(
         _object: u64,
         _required_fields: u64,
@@ -3105,8 +3105,8 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     }
 
     /// Declines, so a cast routes to the interpreter rather than silently passing.
-    /// `CastObjectMinFields` is still `Rejected` AND still on
-    /// `produces_incorrect_native_results`, so no compiled test reaches this yet.
+    /// `CastObjectMinFields` is promoted as of D4.10; this stub is not the real
+    /// helper and no differential routes through it.
     unsafe extern "C" fn stub_cast_object_min_fields(
         _object: u64,
         _required_fields: u64,
@@ -3403,8 +3403,8 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     }
 
     /// Declines, so a cast routes to the interpreter rather than silently passing.
-    /// `CastObjectMinFields` is still `Rejected` AND still on
-    /// `produces_incorrect_native_results`, so no compiled test reaches this yet.
+    /// `CastObjectMinFields` is promoted as of D4.10; this stub is not the real
+    /// helper and no differential routes through it.
     unsafe extern "C" fn stub_cast_object_min_fields(
         _object: u64,
         _required_fields: u64,

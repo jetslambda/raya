@@ -2073,8 +2073,24 @@ unsafe extern "C" fn helper_dyn_get_keyed(
             //   * no dynamic map at all -> nothing to look up -> NULL, computed here;
             //   * a dynamic map exists -> the lookup needs interning, so DECLINE and let
             //     the interpreter do it.
+            // A NOMINAL receiver DECLINES, and a cross-model review of PR #1 caught
+            // this as a P1 silent wrong value. With no field index the interpreter
+            // falls through to a METHOD-SLOT lookup and returns a BOUND METHOD; this
+            // arm used to answer `null`, so a compiled function returned null for a
+            // method reference the interpreter resolves to something callable. The
+            // exit reported `Completed`, so nothing caught it.
+            //
+            // Only a receiver with no nominal type can be answered natively, because
+            // only then is `null` the interpreter's answer rather than a bound method.
+            if obj.nominal_type_id_usize().is_some() {
+                return JIT_INTERPRETER_FALLBACK_SENTINEL;
+            }
             match obj.dyn_map() {
+                // No dynamic map means nothing to look up, and with no nominal type
+                // the interpreter also answers null here.
                 None => Value::null().raw(),
+                // A dynamic map is keyed by an INTERNED `PropKey`, which only the
+                // interpreter can mint, so hand back rather than reimplement it.
                 Some(_) => JIT_INTERPRETER_FALLBACK_SENTINEL,
             }
         }
@@ -2118,6 +2134,12 @@ unsafe extern "C" fn helper_dyn_set_keyed(
     }
     // The interpreter raises on a key that is neither an integer nor a numeric
     // string, so there is no sentinel-free way to reproduce it here.
+    //
+    // NOTE on the `Struct` arm below: an earlier comment here said Struct "needs
+    // structural_object_shapes, which the bridge does not carry". That is FALSE -
+    // D4.10 established the bridge carries those registries, and DynGetKeyed's Struct
+    // read arm uses them. This arm is inert because `DynSetKeyed` is unpromoted for
+    // Struct (blocked on ALY-73), not because the registry is missing.
     let Ok((_, array_index)) = crate::vm::interpreter::opcodes::types::dyn_key_parts(
         Value::from_raw(key_raw),
     ) else {
@@ -3524,16 +3546,35 @@ mod tests {
             //     interpreter falls back to the object's dynamic property map, ending
             //     in `Value::null()`.
             //
-            // So the helper now COMPUTES null here: the key resolves to no field
-            // index, and this object has no dynamic map, so there is nothing to look
-            // up. The decline path that remains is a receiver that HAS a dynamic map,
-            // because that lookup needs an interned `PropKey` only the interpreter can
-            // mint.
+            // `obj_raw` here is `Object::new_nominal(1, 5, 1)` -- a NOMINAL object --
+            // and a cross-model review of PR #1 found that asserting null for it was
+            // wrong: with no field index the interpreter falls through to a METHOD-SLOT
+            // lookup and returns a BOUND METHOD, so a compiled function returned null for
+            // a callable. The helper now DECLINES any nominal receiver.
+            //
+            // This test asserted the bug until that fix, which is worth remembering:
+            // the fixture's shape and the assertion disagreed, and the suite was green.
             let zero = Value::i32(0);
-            let raw = unsafe { helper_dyn_get_keyed(obj_raw, zero.raw(), ss) };
+            assert_eq!(
+                unsafe { helper_dyn_get_keyed(obj_raw, zero.raw(), ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL,
+                "a NOMINAL receiver with no field index must decline: the interpreter \
+                 may resolve a bound method there"
+            );
+
+            // The STRUCTURAL case is the one that computes null: no nominal type means
+            // no method slot, so with no dynamic map there is nothing to look up and
+            // null IS the interpreter's answer.
+            let structural_raw = {
+                let mut gc = shared.gc.lock();
+                let p = gc.allocate(Object::new_structural(1, 1));
+                unsafe { Value::from_raw(Value::from_ptr(NonNull::new(p.as_ptr()).unwrap()).raw()) }
+            };
+            let raw = unsafe { helper_dyn_get_keyed(structural_raw.raw(), zero.raw(), ss) };
             assert!(
                 unsafe { Value::from_raw(raw) }.is_null(),
-                "an unknown Struct field with no dynamic map must answer null, got 0x{raw:016X}"
+                "a STRUCTURAL receiver with no field index and no dynamic map must \
+                 answer null, got 0x{raw:016X}"
             );
 
             // Non-node target also defers.

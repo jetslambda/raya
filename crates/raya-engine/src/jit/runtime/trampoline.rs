@@ -374,7 +374,7 @@ pub struct RuntimeHelperTable {
     /// Declines when the offset is out of range so the interpreter can raise.
     pub init_object_field: unsafe extern "C" fn(u64, u64, u64, *mut ()) -> i8,
     /// Field-count cast: (object, required_fields, shared_state) -> -1 decline, 0 false,
-    /// 1 true. Tri-state because both interpreter failure paths are errors, not `false`.
+    /// 1 pass. NOT tri-state and never -1: both interpreter failure paths are errors, not `false`.
     pub cast_object_min_fields: unsafe extern "C" fn(u64, u64, *mut ()) -> i8,
 }
 
