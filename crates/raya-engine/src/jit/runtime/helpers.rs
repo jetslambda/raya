@@ -1110,16 +1110,26 @@ unsafe fn jit_array_ptr_checked(value: Value) -> Option<NonNull<crate::vm::objec
 /// Load `array[index]`. Returns the element, or the interpreter-fallback
 /// sentinel when the receiver is not an array or the index is out of bounds.
 /// Reads never validate element types, matching the interpreter.
-unsafe extern "C" fn helper_array_load(array_raw: u64, index: i64, _shared_state: *mut ()) -> u64 {
+unsafe extern "C" fn helper_array_load(array_raw: u64, index_raw: u64, _shared_state: *mut ()) -> u64 {
     let array_value = Value::from_raw(array_raw);
     let Some(array_ptr) = jit_array_ptr_checked(array_value) else {
         return JIT_INTERPRETER_FALLBACK_SENTINEL;
     };
-    if index < 0 {
-        return JIT_INTERPRETER_FALLBACK_SENTINEL;
-    }
+    // The index arrives as a boxed `Value` and is coerced by the interpreter's OWN
+    // function, not by an `i64` parameter. That is the whole point of the signature:
+    // an `i64` cannot represent "non-numeric", which is the case where this coercion
+    // is most surprising (`arr["x"]` reads `arr[0]`).
+    //
+    // Note there is no `index < 0` guard any more, and it is not missing by accident:
+    // a negative `i32` coerces to `usize::MAX` inside `array_index_operand`, so
+    // `get` returns `None` and this declines — which is right, because the
+    // interpreter raises "Array index 18446744073709551615 out of bounds" and the
+    // sentinel hands it back to the interpreter to raise exactly that.
+    let index = crate::vm::interpreter::opcodes::arrays::array_index_operand(
+        Value::from_raw(index_raw),
+    );
     let array = &*array_ptr.as_ptr();
-    match array.get(index as usize) {
+    match array.get(index) {
         Some(value) => value.raw(),
         None => JIT_INTERPRETER_FALLBACK_SENTINEL,
     }
@@ -1131,7 +1141,7 @@ unsafe extern "C" fn helper_array_load(array_raw: u64, index: i64, _shared_state
 /// the element constraint (the interpreter then produces the exact error).
 unsafe extern "C" fn helper_array_store(
     array_raw: u64,
-    index: i64,
+    index_raw: u64,
     value_raw: u64,
     _shared_state: *mut (),
 ) -> i8 {
@@ -1139,11 +1149,15 @@ unsafe extern "C" fn helper_array_store(
     let Some(array_ptr) = jit_array_ptr_checked(array_value) else {
         return JIT_STORE_FALLBACK;
     };
-    if index < 0 {
-        return JIT_STORE_FALLBACK;
-    }
+    // Boxed index, coerced by the interpreter's own function — see the note on
+    // `helper_array_load`. As there, the absent `index < 0` guard is not an
+    // omission: a negative `i32` becomes `usize::MAX`, `checked_set` reports
+    // `OutOfBounds`, and this declines so the interpreter raises the real message.
+    let index = crate::vm::interpreter::opcodes::arrays::array_index_operand(
+        Value::from_raw(index_raw),
+    );
     let array = &mut *array_ptr.as_ptr();
-    match array.checked_set(index as usize, Value::from_raw(value_raw)) {
+    match array.checked_set(index, Value::from_raw(value_raw)) {
         Ok(()) => JIT_STORE_SUCCESS,
         Err(_) => JIT_STORE_FALLBACK,
     }
@@ -3540,25 +3554,82 @@ mod tests {
 
             // len == 2, slots start null.
             assert_eq!(unsafe { helper_array_len(arr_val.raw(), ss) }, 2);
-            assert!(unsafe { Value::from_raw(helper_array_load(arr_val.raw(), 0, ss)) }.is_null());
+            assert!(unsafe { Value::from_raw(helper_array_load(arr_val.raw(), Value::i32(0).raw(), ss)) }.is_null());
 
             // store then load.
             assert_eq!(
-                unsafe { helper_array_store(arr_val.raw(), 0, Value::i32(7).raw(), ss) },
+                unsafe { helper_array_store(arr_val.raw(), Value::i32(0).raw(), Value::i32(7).raw(), ss) },
                 JIT_STORE_SUCCESS
             );
             assert_eq!(
-                unsafe { Value::from_raw(helper_array_load(arr_val.raw(), 0, ss)).as_i32() },
+                unsafe { Value::from_raw(helper_array_load(arr_val.raw(), Value::i32(0).raw(), ss)).as_i32() },
                 Some(7)
             );
 
+            // ---- The index coercion, through the helper --------------------------
+            //
+            // These four cases are the reason `array_load`/`array_store` take a boxed
+            // `Value` instead of an `i64`. Every one of them looks like a bug and is
+            // the interpreter's actual behaviour; a "sanitising" helper that clamped,
+            // rejected or defaulted would fail here rather than diverge in production.
+            {
+                // A non-numeric index means element 0. It does NOT decline — this is
+                // the case an i64 signature could not even represent.
+                assert_eq!(
+                    unsafe {
+                        Value::from_raw(helper_array_load(
+                            arr_val.raw(),
+                            Value::null().raw(),
+                            ss,
+                        ))
+                        .as_i32()
+                    },
+                    Some(7),
+                    "a null index must read element 0, matching the interpreter"
+                );
+                // A negative i32 wraps to usize::MAX, so the read is out of bounds and
+                // the helper declines for the interpreter to raise.
+                assert_eq!(
+                    unsafe { helper_array_load(arr_val.raw(), Value::i32(-1).raw(), ss) },
+                    JIT_INTERPRETER_FALLBACK_SENTINEL,
+                    "a negative i32 index wraps out of bounds and must decline"
+                );
+                assert_eq!(
+                    unsafe {
+                        helper_array_store(
+                            arr_val.raw(),
+                            Value::i32(-1).raw(),
+                            Value::i32(1).raw(),
+                            ss,
+                        )
+                    },
+                    JIT_STORE_FALLBACK,
+                    "a negative i32 index must not wrap around into a write"
+                );
+                // A negative f64 truncates toward zero and SUCCEEDS at element 0. This
+                // is the asymmetry that makes the coercion genuinely dangerous: the
+                // same negative offset errors as an i32 and works as an f64.
+                assert_eq!(
+                    unsafe {
+                        Value::from_raw(helper_array_load(
+                            arr_val.raw(),
+                            Value::f64(-0.5).raw(),
+                            ss,
+                        ))
+                        .as_i32()
+                    },
+                    Some(7),
+                    "a negative f64 index truncates to 0 and must read element 0"
+                );
+            }
+
             // out-of-bounds store falls back; load falls back with the sentinel.
             assert_eq!(
-                unsafe { helper_array_store(arr_val.raw(), 5, Value::i32(1).raw(), ss) },
+                unsafe { helper_array_store(arr_val.raw(), Value::i32(5).raw(), Value::i32(1).raw(), ss) },
                 JIT_STORE_FALLBACK
             );
             assert_eq!(
-                unsafe { helper_array_load(arr_val.raw(), 5, ss) },
+                unsafe { helper_array_load(arr_val.raw(), Value::i32(5).raw(), ss) },
                 JIT_INTERPRETER_FALLBACK_SENTINEL
             );
 
@@ -3584,11 +3655,11 @@ mod tests {
                 JIT_ARRAY_LEN_FALLBACK_SENTINEL
             );
             assert_eq!(
-                unsafe { helper_array_load(string_val.raw(), 0, ss) },
+                unsafe { helper_array_load(string_val.raw(), Value::i32(0).raw(), ss) },
                 JIT_INTERPRETER_FALLBACK_SENTINEL
             );
             assert_eq!(
-                unsafe { helper_array_store(string_val.raw(), 0, Value::i32(1).raw(), ss) },
+                unsafe { helper_array_store(string_val.raw(), Value::i32(0).raw(), Value::i32(1).raw(), ss) },
                 JIT_STORE_FALLBACK
             );
             assert_eq!(
@@ -3609,16 +3680,16 @@ mod tests {
             let arr_ptr = unsafe { helper_alloc_array(2, 1, module_ptr, ss) };
             let arr_val = unsafe { Value::from_ptr(NonNull::new(arr_ptr.cast::<u8>()).unwrap()) };
             assert_eq!(
-                unsafe { helper_array_store(arr_val.raw(), 0, Value::bool(true).raw(), ss) },
+                unsafe { helper_array_store(arr_val.raw(), Value::i32(0).raw(), Value::bool(true).raw(), ss) },
                 JIT_STORE_SUCCESS
             );
             assert_eq!(
-                unsafe { helper_array_store(arr_val.raw(), 0, Value::i32(1).raw(), ss) },
+                unsafe { helper_array_store(arr_val.raw(), Value::i32(0).raw(), Value::i32(1).raw(), ss) },
                 JIT_STORE_FALLBACK
             );
             // null is always accepted, even into a typed slot.
             assert_eq!(
-                unsafe { helper_array_store(arr_val.raw(), 0, Value::null().raw(), ss) },
+                unsafe { helper_array_store(arr_val.raw(), Value::i32(0).raw(), Value::null().raw(), ss) },
                 JIT_STORE_SUCCESS
             );
         });

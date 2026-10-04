@@ -2094,12 +2094,12 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     ) -> *mut () {
         std::ptr::null_mut()
     }
-    unsafe extern "C" fn stub_array_load(_array: u64, _index: i64, _shared_state: *mut ()) -> u64 {
+    unsafe extern "C" fn stub_array_load(_array: u64, _index: u64, _shared_state: *mut ()) -> u64 {
         0
     }
     unsafe extern "C" fn stub_array_store(
         _array: u64,
-        _index: i64,
+        _index: u64,
         _value: u64,
         _shared_state: *mut (),
     ) -> i8 {
@@ -2335,12 +2335,12 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     ) -> *mut () {
         std::ptr::null_mut()
     }
-    unsafe extern "C" fn stub_array_load(_array: u64, _index: i64, _shared_state: *mut ()) -> u64 {
+    unsafe extern "C" fn stub_array_load(_array: u64, _index: u64, _shared_state: *mut ()) -> u64 {
         0
     }
     unsafe extern "C" fn stub_array_store(
         _array: u64,
-        _index: i64,
+        _index: u64,
         _value: u64,
         _shared_state: *mut (),
     ) -> i8 {
@@ -2577,12 +2577,12 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     ) -> *mut () {
         std::ptr::null_mut()
     }
-    unsafe extern "C" fn stub_array_load(_array: u64, _index: i64, _shared_state: *mut ()) -> u64 {
+    unsafe extern "C" fn stub_array_load(_array: u64, _index: u64, _shared_state: *mut ()) -> u64 {
         0
     }
     unsafe extern "C" fn stub_array_store(
         _array: u64,
-        _index: i64,
+        _index: u64,
         _value: u64,
         _shared_state: *mut (),
     ) -> i8 {
@@ -2821,12 +2821,12 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     ) -> *mut () {
         std::ptr::null_mut()
     }
-    unsafe extern "C" fn stub_array_load(_array: u64, _index: i64, _shared_state: *mut ()) -> u64 {
+    unsafe extern "C" fn stub_array_load(_array: u64, _index: u64, _shared_state: *mut ()) -> u64 {
         0
     }
     unsafe extern "C" fn stub_array_store(
         _array: u64,
-        _index: i64,
+        _index: u64,
         _value: u64,
         _shared_state: *mut (),
     ) -> i8 {
@@ -3072,12 +3072,12 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     ) -> *mut () {
         std::ptr::null_mut()
     }
-    unsafe extern "C" fn stub_array_load(_array: u64, _index: i64, _shared_state: *mut ()) -> u64 {
+    unsafe extern "C" fn stub_array_load(_array: u64, _index: u64, _shared_state: *mut ()) -> u64 {
         0
     }
     unsafe extern "C" fn stub_array_store(
         _array: u64,
-        _index: i64,
+        _index: u64,
         _value: u64,
         _shared_state: *mut (),
     ) -> i8 {

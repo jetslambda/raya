@@ -292,9 +292,13 @@ pub struct RuntimeHelperTable {
     /// Interned constant string: (pool_index, module, shared_state) -> raw string pointer
     pub const_string: unsafe extern "C" fn(u32, *const (), *mut ()) -> *mut (),
     /// Array element load: (array_val, index, shared_state) -> element_val or fallback sentinel
-    pub array_load: unsafe extern "C" fn(u64, i64, *mut ()) -> u64,
+    /// `index` is a boxed `Value`, not an `i64`: the interpreter's array index
+    /// coercion accepts non-numeric operands (meaning index 0), which an `i64`
+    /// cannot represent. See `array_index_operand`.
+    pub array_load: unsafe extern "C" fn(u64, u64, *mut ()) -> u64,
     /// Array element store: (array_val, index, value, shared_state) -> 1 success / 0 fallback
-    pub array_store: unsafe extern "C" fn(u64, i64, u64, *mut ()) -> i8,
+    /// `index` is a boxed `Value` for the same reason as `array_load`.
+    pub array_store: unsafe extern "C" fn(u64, u64, u64, *mut ()) -> i8,
     /// Array push: (array_val, value, shared_state) -> 1 success / 0 fallback
     pub array_push: unsafe extern "C" fn(u64, u64, *mut ()) -> i8,
     /// Array pop: (array_val, shared_state) -> popped_val (null if empty) or fallback sentinel
