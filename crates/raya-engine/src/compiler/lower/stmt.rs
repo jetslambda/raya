@@ -2643,7 +2643,46 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_return(&mut self, ret: &ast::ReturnStatement) {
-        let value = ret.value.as_ref().map(|e| self.lower_expr(e));
+        // ALY-97: the enclosing function's declared return type is already
+        // reachable here via `current_function`, and an integer literal lowered
+        // as `i32` disagrees with a signature recorded as `f64`. `verify_module`'s
+        // typed-signature check requires exact identity, so `return 1;` in a
+        // number-returning function made the WHOLE module report invalid and
+        // `Bytecode.validate` return false for it.
+        //
+        // Scoped deliberately to a literal in RETURN position only. Widening every
+        // int literal in a number-returning function would turn loop counters
+        // (`for (let i = 0; i < 10; i++)`) into floats, which the verifier would
+        // then reject where int is expected — trading one rejection for another.
+        //
+        // The reverse direction is untouched: an `int`-declared function still gets
+        // `i32`, and a float where `int` is declared is still emitted as a float
+        // and still rejected, because truncation is not something the runtime
+        // performs (`Opcode::Return` returns the popped value verbatim).
+        let value = match ret.value.as_ref() {
+            Some(ast::Expression::IntLiteral(lit)) => {
+                let returns_number = self.current_function.as_ref().is_some_and(|f| {
+                    matches!(
+                        self.type_ctx.get(f.return_ty),
+                        Some(crate::parser::types::Type::Primitive(
+                            crate::parser::types::PrimitiveType::Number
+                        ))
+                    )
+                });
+                if returns_number {
+                    let ty = TypeId::new(crate::parser::types::context::TypeContext::NUMBER_TYPE_ID);
+                    let dest = self.alloc_register(ty);
+                    self.emit(IrInstr::Assign {
+                        dest: dest.clone(),
+                        value: IrValue::Constant(IrConstant::F64(lit.value as f64)),
+                    });
+                    Some(dest)
+                } else {
+                    ret.value.as_ref().map(|e| self.lower_expr(e))
+                }
+            }
+            other => other.map(|e| self.lower_expr(e)),
+        };
 
         // Inline finally blocks from innermost to outermost.
         // Drain the stack to prevent recursive re-inlining: if a finally block
