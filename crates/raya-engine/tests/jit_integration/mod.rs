@@ -2203,6 +2203,17 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     ) -> u64 {
         raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
+
+    /// Returns the fallback status so a bad future promotion lands in the
+    /// interpreter rather than corrupting an array.
+    unsafe extern "C" fn stub_dyn_set_keyed(
+        _object: u64,
+        _key: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2298,6 +2309,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             bind_method: stub_bind_method,
             await_task: stub_await_task,
             dyn_get_keyed: stub_dyn_get_keyed,
+            dyn_set_keyed: stub_dyn_set_keyed,
         },
     };
 
@@ -2444,6 +2456,17 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     ) -> u64 {
         raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
+
+    /// Returns the fallback status so a bad future promotion lands in the
+    /// interpreter rather than corrupting an array.
+    unsafe extern "C" fn stub_dyn_set_keyed(
+        _object: u64,
+        _key: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2539,6 +2562,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             bind_method: stub_bind_method,
             await_task: stub_await_task,
             dyn_get_keyed: stub_dyn_get_keyed,
+            dyn_set_keyed: stub_dyn_set_keyed,
         },
     };
 
@@ -2686,6 +2710,17 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     ) -> u64 {
         raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
+
+    /// Returns the fallback status so a bad future promotion lands in the
+    /// interpreter rather than corrupting an array.
+    unsafe extern "C" fn stub_dyn_set_keyed(
+        _object: u64,
+        _key: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2788,6 +2823,7 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             bind_method: stub_bind_method,
             await_task: stub_await_task,
             dyn_get_keyed: stub_dyn_get_keyed,
+            dyn_set_keyed: stub_dyn_set_keyed,
         },
     };
 
@@ -2930,6 +2966,17 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     ) -> u64 {
         raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
+
+    /// Returns the fallback status so a bad future promotion lands in the
+    /// interpreter rather than corrupting an array.
+    unsafe extern "C" fn stub_dyn_set_keyed(
+        _object: u64,
+        _key: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -3032,6 +3079,7 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             bind_method: stub_bind_method,
             await_task: stub_await_task,
             dyn_get_keyed: stub_dyn_get_keyed,
+            dyn_set_keyed: stub_dyn_set_keyed,
         },
     };
 
@@ -3181,6 +3229,17 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     ) -> u64 {
         raya_engine::jit::runtime::helpers::JIT_INTERPRETER_FALLBACK_SENTINEL
     }
+
+    /// Returns the fallback status so a bad future promotion lands in the
+    /// interpreter rather than corrupting an array.
+    unsafe extern "C" fn stub_dyn_set_keyed(
+        _object: u64,
+        _key: u64,
+        _value: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // JIT_STORE_FALLBACK
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -3292,6 +3351,7 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             bind_method: stub_bind_method,
             await_task: stub_await_task,
             dyn_get_keyed: stub_dyn_get_keyed,
+            dyn_set_keyed: stub_dyn_set_keyed,
         },
     };
 
@@ -7199,4 +7259,177 @@ fn dyn_get_keyed_array_view_matches_interpreter() {
     // opcode with a different handler).
     let v = both_engines(keyed_array_module(Some(99), None), "out-of-range key");
     assert!(v.is_null(), "an out-of-range keyed read must be null");
+}
+
+
+/// D4.9, differentially: `DynSetKeyed` against an **array** receiver.
+///
+/// The corpus is built around one fact that makes this opcode unlike anything else
+/// on the branch, and the fact looks like a bug if you do not know it:
+///
+/// | | `DynSetKeyed` | `StoreElem` |
+/// |---|---|---|
+/// | index past the end | **grows** via `resize(index + 1, null)` | `OutOfBounds` error |
+/// | element constraint | **not checked at all** | enforced by `checked_set` |
+///
+/// The interpreter's `DynSetKeyed` arm assigns `arr.elements[index] = value`
+/// directly after an optional `resize`. So a string stored into an `I32`-constrained
+/// array *succeeds* — and `dyn_set_keyed_constraint_is_not_enforced` below pins that.
+/// A helper that reused `array_store` would refuse to grow and reject the value, and
+/// "it should enforce the element type" is exactly what a bug report would say. It
+/// would be a divergence.
+#[test]
+fn dyn_set_keyed_array_view_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    fn both_engines(
+        module: std::sync::Arc<Module>,
+        label: &str,
+    ) -> raya_engine::vm::value::Value {
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref()).expect(label);
+
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] must complete natively, not fall back"
+        );
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert_eq!(
+            native.raw(),
+            interpreted.raw(),
+            "[{label}] engines disagree on the same bytecode"
+        );
+        native
+    }
+
+    // `array[11, 22, null]`, then `DynSetKeyed` with the given key and value, then
+    // read `read_slot` back.
+    fn set_then_read(
+        type_id: u32,
+        set_key: Option<i32>,
+        set_key_str: Option<&str>,
+        set_value: i32,
+        read_slot: i32,
+    ) -> std::sync::Arc<Module> {
+        let mut module = make_vm_module(Vec::new(), 0, 0);
+        let key_idx = set_key_str.map(|s| module.constants.add_string(s.to_string()));
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, 3);
+        emit(&mut code, Opcode::NewArray);
+        code.extend_from_slice(&type_id.to_le_bytes());
+        emit_i32(&mut code, 11);
+        emit(&mut code, Opcode::InitArray);
+        code.extend_from_slice(&0u16.to_le_bytes());
+        emit_i32(&mut code, 22);
+        emit(&mut code, Opcode::InitArray);
+        code.extend_from_slice(&1u16.to_le_bytes());
+
+        // DynSetKeyed consumes the array, so keep a copy to read back afterwards.
+        emit(&mut code, Opcode::Dup); // [arr, arr]
+        match (set_key, key_idx) {
+            (Some(k), _) => emit_i32(&mut code, k),
+            (None, Some(idx)) => emit_const_str(&mut code, idx),
+            (None, None) => unreachable!("a keyed set needs one key"),
+        }
+        emit_i32(&mut code, set_value);
+        emit(&mut code, Opcode::DynSetKeyed); // [arr]
+        emit_i32(&mut code, read_slot);
+        emit(&mut code, Opcode::LoadElem);
+        emit(&mut code, Opcode::Return);
+        module.functions[0].code = code;
+        module.functions[0].name = "main".to_string();
+        finalize_module(module)
+    }
+
+    // In-range write, read back.
+    let v = both_engines(set_then_read(6, Some(1), None, 99, 1), "in-range set");
+    assert_eq!(v.as_i32(), Some(99), "an in-range keyed set must be visible");
+
+    // Numeric STRING key resolves to the same index.
+    let v = both_engines(set_then_read(6, None, Some("1"), 77, 1), "string key set");
+    assert_eq!(v.as_i32(), Some(77), "a numeric string key must set that element");
+
+    // BEYOND THE END: this GROWS, and the interpreter fills the gap with null.
+    let v = both_engines(set_then_read(6, Some(5), None, 42, 5), "growing set");
+    assert_eq!(
+        v.as_i32(),
+        Some(42),
+        "an out-of-range keyed set must GROW the array rather than fail"
+    );
+}
+
+/// The constraint case, on its own because it is the one that would be "fixed" by
+/// mistake: the interpreter does **not** enforce the element constraint on
+/// `DynSetKeyed`, and neither may the helper.
+///
+/// An `I32`-constrained array (`NewArray` element id 0) given a **string** by
+/// `DynSetKeyed`. The interpreter stores it. If the helper used `checked_set`, or
+/// re-derived `helper_array_store`, it would fall back — the exit kind would be
+/// `Suspended` instead of `Completed`, and this fails.
+#[test]
+fn dyn_set_keyed_constraint_is_not_enforced() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    let mut module = make_vm_module(Vec::new(), 0, 0);
+    let str_idx = module.constants.add_string("not an i32".to_string());
+    let mut code: Vec<u8> = Vec::new();
+    emit_i32(&mut code, 1);
+    emit(&mut code, Opcode::NewArray);
+    code.extend_from_slice(&0u32.to_le_bytes()); // element id 0 == I32
+    emit(&mut code, Opcode::Dup);
+    emit_i32(&mut code, 0);
+    emit_const_str(&mut code, str_idx);
+    emit(&mut code, Opcode::DynSetKeyed); // [arr]
+    emit_i32(&mut code, 0);
+    emit(&mut code, Opcode::LoadElem); // read it back
+    emit(&mut code, Opcode::Return);
+    module.functions[0].code = code;
+    module.functions[0].name = "main".to_string();
+    let module = finalize_module(module);
+
+    let mut vm = Vm::with_worker_count(1);
+    let interpreted = vm
+        .execute(module.as_ref())
+        .expect("the interpreter MUST accept a string in an I32 array here");
+    assert_eq!(
+        string_contents(interpreted),
+        "not an i32",
+        "the interpreter must store the unconstrained value, not reject it"
+    );
+
+    let (safepoint, shared) = new_shared_vm_state();
+    let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx =
+        raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = Vec::new();
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+    let (raw_bits, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+
+    assert_eq!(
+        exit.kind,
+        JitExitKind::Completed as u32,
+        "the JIT must store the value unchecked too -- falling back here would mean it \\
+         enforced the constraint, which the interpreter does not"
+    );
+    let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+    assert_eq!(string_contents(native), "not an i32");
 }

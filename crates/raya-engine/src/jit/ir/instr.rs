@@ -840,10 +840,17 @@ pub enum JitInstr {
         stack: Vec<Reg>,
         bytecode_offset: u32,
     },
+    /// `stack` and `bytecode_offset` are REQUIRED, not optional: every path this
+    /// helper cannot complete -- `Struct`, any non-array receiver, a non-index key --
+    /// is an interpreter error, and `emit_interpreter_boundary_exit` needs both to
+    /// hand control back. Without them the fail-closed returns would be unobservable
+    /// and the whole arm dead. Same shape as the gap the RefCell opcodes had in D4.4.
     DynSetKeyed {
         object: Reg,
         index: Reg,
         value: Reg,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     DynArrayPush {
         array: Reg,

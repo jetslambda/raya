@@ -665,6 +665,7 @@ impl fmt::Display for JitInstr {
                 object,
                 index,
                 value,
+                ..
             } => write!(f, "json.index_set {}[{}], {}", object, index, value),
             JitInstr::DynArrayPush { array, value } => write!(f, "json.push {}, {}", array, value),
             JitInstr::DynArrayPop { dest, array } => write!(f, "{} = json.pop {}", dest, array),

@@ -1957,6 +1957,10 @@ fn lift_instruction(
             stack.push(dest);
         }
         Opcode::DynSetKeyed => {
+            // Snapshot BEFORE the three pops: the interpreter resuming at
+            // `bytecode_offset` re-executes this opcode and must find all three
+            // operands on the stack.
+            let pre_stack = stack.clone_state();
             let value = stack.pop(instr.offset)?;
             let index = stack.pop(instr.offset)?;
             let object = stack.pop(instr.offset)?;
@@ -1964,6 +1968,8 @@ fn lift_instruction(
                 object,
                 index,
                 value,
+                stack: pre_stack,
+                bytecode_offset: instr.offset as u32,
             });
         }
 

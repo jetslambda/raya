@@ -181,6 +181,13 @@ pub const HELPER_ARRAY_LEN_OFFSET: i32 =
 pub const HELPER_AWAIT_TASK_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, await_task) as i32;
 
+/// Byte offset of the dynamic keyed-set helper in [`RuntimeContext`].
+///
+/// Returns [`JIT_STORE_SUCCESS`] or [`JIT_STORE_FALLBACK`]; the interpreter raises
+/// whatever error the fallback stands for.
+pub const HELPER_DYN_SET_KEYED_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, dyn_set_keyed) as i32;
+
 /// Byte offset of the dynamic keyed-get helper in [`RuntimeContext`].
 ///
 /// Returns the value unchanged for `Str`/`Arr`, or the interpreter-fallback
@@ -339,6 +346,10 @@ pub struct RuntimeHelperTable {
     /// Dynamic keyed get: (object, key, shared_state) -> value, or the
     /// interpreter-fallback sentinel for the views this declines.
     pub dyn_get_keyed: unsafe extern "C" fn(u64, u64, *mut ()) -> u64,
+    /// Dynamic keyed set: (object, key, value, shared_state) -> status. Unlike
+    /// `array_store` this GROWS the receiver and does not enforce the element
+    /// constraint, because the interpreter's `DynSetKeyed` arm does neither.
+    pub dyn_set_keyed: unsafe extern "C" fn(u64, u64, u64, *mut ()) -> i8,
 }
 
 /// Validate the boxed arguments at a JIT entry boundary against a verified

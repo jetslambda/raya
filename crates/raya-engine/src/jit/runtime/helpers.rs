@@ -220,6 +220,7 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         bind_method: helper_bind_method,
         await_task: helper_await_task,
         dyn_get_keyed: helper_dyn_get_keyed,
+        dyn_set_keyed: helper_dyn_set_keyed,
     }
 }
 
@@ -1894,6 +1895,79 @@ unsafe extern "C" fn helper_dyn_get_keyed(
         // interpreter's business.
         _ => JIT_INTERPRETER_FALLBACK_SENTINEL,
     }
+}
+
+/// `DynSetKeyed` against an array receiver. Returns [`JIT_STORE_SUCCESS`] when the
+/// store happened, or [`JIT_STORE_FALLBACK`] so the interpreter raises the real error.
+///
+/// Deliberately NOT `helper_array_store`, and the difference is the whole point:
+///
+/// | | `DynSetKeyed` (this) | `StoreElem` (`helper_array_store`) |
+/// |---|---|---|
+/// | out of range | **grows** via `resize(index + 1, null)` | `OutOfBounds` error |
+/// | element constraint | **not checked** | enforced by `checked_set` |
+///
+/// The interpreter's `DynSetKeyed` arm assigns `arr.elements[index] = value`
+/// directly after an optional `resize`, so it never validates the element type and
+/// never refuses an out-of-range index. Reusing `helper_array_store` here would have
+/// been a real miscompile -- refusing to grow, and rejecting values the interpreter
+/// accepts. "It should enforce the element type" is the shape of a bug report that
+/// is actually a divergence, and the differential pins this case.
+///
+/// A non-array receiver, and a string key that is not a valid index (`"length"`,
+/// say), both FALLBACK: the interpreter raises a `TypeError` in each case, and a
+/// helper cannot raise.
+unsafe extern "C" fn helper_dyn_set_keyed(
+    object_raw: u64,
+    key_raw: u64,
+    value_raw: u64,
+    shared_state: *mut (),
+) -> i8 {
+    if shared_state.is_null() {
+        return JIT_STORE_FALLBACK;
+    }
+    let bridge = &*(shared_state.cast::<JitRuntimeBridgeContext>());
+    if bridge.gc.is_null() {
+        return JIT_STORE_FALLBACK;
+    }
+    // The interpreter raises on a key that is neither an integer nor a numeric
+    // string, so there is no sentinel-free way to reproduce it here.
+    let Ok((_, array_index)) = crate::vm::interpreter::opcodes::types::dyn_key_parts(
+        Value::from_raw(key_raw),
+    ) else {
+        return JIT_STORE_FALLBACK;
+    };
+    let object_value = Value::from_raw(object_raw);
+    let value = Value::from_raw(value_raw);
+    use crate::vm::json::view::{js_classify, JSView};
+    let JSView::Arr(ptr) = js_classify(object_value) else {
+        // `Struct` declines (it needs `structural_object_shapes`, which the bridge
+        // does not carry). Everything else -- including `Str`, which is a hard
+        // `TypeError` for `DynSetKeyed` -- raises in the interpreter.
+        return JIT_STORE_FALLBACK;
+    };
+    // `Arr` only: the interpreter requires a parseable index and raises otherwise.
+    let Some(index) = array_index else {
+        return JIT_STORE_FALLBACK;
+    };
+    // Root the receiver and the value across the resize. A `Vec` reallocation is not
+    // a GC event, so strictly nothing can move, but this mirrors
+    // `helper_array_push` and keeps the two growing paths honest if the collector
+    // ever changes.
+    let Some(_scope) = EphemeralRootScope::open(bridge, &[object_value, value]) else {
+        return JIT_STORE_FALLBACK;
+    };
+    // The pointer from `js_classify`, exactly as the interpreter uses it -- not a
+    // second `jit_array_ptr_checked`, which would re-derive the same header check.
+    // The interpreter does the same cast: `&mut *(ptr as *mut Array)`. The view
+    // classifier hands back a `*const`, and the mutation is in-place on a GC-owned
+    // object, so the const is cast away rather than the classifier being bypassed.
+    let array = &mut *(ptr as *mut crate::vm::object::Array);
+    if index >= array.elements.len() {
+        array.elements.resize(index + 1, Value::null());
+    }
+    array.elements[index] = value;
+    JIT_STORE_SUCCESS
 }
 
 // ---------------------------------------------------------------------------

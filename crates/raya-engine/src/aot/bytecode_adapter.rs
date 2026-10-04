@@ -1023,7 +1023,7 @@ impl LiftedFunction {
                 helper: HelperCall::DynGetProp,
                 args: vec![object.0, index.0],
             }),
-            JitInstr::DynSetKeyed { object, index, value } => out.push(SmInstr::CallHelper {
+            JitInstr::DynSetKeyed { object, index, value, .. } => out.push(SmInstr::CallHelper {
                 dest: None,
                 helper: HelperCall::DynSetProp,
                 args: vec![object.0, index.0, value.0],

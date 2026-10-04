@@ -67,6 +67,7 @@ pub struct LoweringContext<'a> {
     sig_array_load: Option<ir::SigRef>,
     sig_array_pop: Option<ir::SigRef>,
     sig_array_push: Option<ir::SigRef>,
+    sig_dyn_set_keyed: Option<ir::SigRef>,
     sig_alloc_array: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.object_get_shape_field
     sig_object_get_shape_field: Option<ir::SigRef>,
@@ -215,6 +216,7 @@ impl<'a> LoweringContext<'a> {
             sig_array_load: None,
             sig_array_pop: None,
             sig_array_push: None,
+            sig_dyn_set_keyed: None,
             sig_alloc_array: None,
             sig_object_get_shape_field: None,
             sig_object_set_shape_field: None,
@@ -1399,6 +1401,77 @@ impl<'a> LoweringContext<'a> {
                 builder.switch_to_block(done);
                 let merged = builder.block_params(done)[0];
                 self.def_reg(builder, *dest, merged);
+            }
+            JitInstr::DynSetKeyed {
+                object,
+                index,
+                value,
+                stack,
+                bytecode_offset,
+            } => {
+                // `Arr` only. The helper GROWS the receiver and does NOT enforce the
+                // element constraint, because the interpreter's `DynSetKeyed` arm
+                // assigns `elements[index]` directly after an optional `resize` and
+                // does neither. Reusing `array_store` here would refuse to grow and
+                // reject values the interpreter accepts -- a real miscompile, and one
+                // that reads like a bug fix rather than a divergence.
+                //
+                // Everything else FALLBACKs: `Struct` needs the shape registry the
+                // bridge lacks, and every non-array receiver (including `Str`) is a
+                // `TypeError` in the interpreter, which a helper cannot raise.
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "dyn set keyed exit stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let null_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let done = builder.create_block();
+                builder
+                    .ins()
+                    .brif(is_ctx_null, null_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+                builder.seal_block(null_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_DYN_SET_KEYED_OFFSET,
+                );
+                let sig = self.dyn_set_keyed_sig(builder);
+                let object_val = self.boxed_reg_value(builder, *object);
+                let index_val = self.boxed_reg_value(builder, *index);
+                let value_val = self.boxed_reg_value(builder, *value);
+                let call = builder.ins().call_indirect(
+                    sig,
+                    fn_ptr,
+                    &[object_val, index_val, value_val, shared_state],
+                );
+                let status = builder.inst_results(call)[0];
+                let ok = builder.ins().icmp_imm(
+                    condcodes::IntCC::Equal,
+                    status,
+                    crate::jit::runtime::helpers::JIT_STORE_SUCCESS as i64,
+                );
+                builder.ins().brif(ok, done, &[], fallback_block, &[]);
+                builder.seal_block(fallback_block);
+
+                builder.switch_to_block(fallback_block);
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.switch_to_block(null_block);
+                builder.ins().jump(done, &[]);
+
+                builder.seal_block(done);
+                builder.switch_to_block(done);
             }
             JitInstr::LoadElem {
                 dest,
@@ -3886,6 +3959,21 @@ impl<'a> LoweringContext<'a> {
         sig.returns.push(AbiParam::new(types::I64)); // array ptr, or null
         let sig_ref = builder.func.import_signature(sig);
         self.sig_alloc_array = Some(sig_ref);
+        sig_ref
+    }
+
+    fn dyn_set_keyed_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_dyn_set_keyed {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I64)); // object (boxed Value)
+        sig.params.push(AbiParam::new(types::I64)); // key (boxed Value)
+        sig.params.push(AbiParam::new(types::I64)); // value (boxed Value)
+        sig.params.push(AbiParam::new(types::I64)); // shared_state ptr
+        sig.returns.push(AbiParam::new(types::I8)); // status
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_dyn_set_keyed = Some(sig_ref);
         sig_ref
     }
 

@@ -226,6 +226,15 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // level. So the corpus is no longer narrowed: Str and Arr are both
         // engine-proven, and Struct declines by design.
         | Opcode::DynGetKeyed
+        // D4.9: `Arr` only, and only now that D4.8 made arrays constructible in
+        // compiled code -- D4.7 declined this opcode purely on reachability.
+        //
+        // The helper GROWS the receiver and does NOT enforce the element constraint,
+        // because the interpreter's arm assigns `elements[index]` directly after an
+        // optional `resize` and does neither. `Struct` still declines (no shape
+        // registry on the bridge); every non-array receiver, `Str` included, is a
+        // `TypeError` the helper cannot raise.
+        | Opcode::DynSetKeyed
         // D4.8, first slice. `NewArray` + `ArrayLen` only, deliberately: `NewArray`
         // bootstraps array construction, so nothing else in the family can be
         // differentially tested until it exists. `ArrayLen` comes with it as the
@@ -679,12 +688,15 @@ mod tests {
         // So the one view it could own cannot be reached, and a helper written for it
         // would be dead code that reads as live -- the hazard this milestone keeps
         // meeting. Helper-level evidence alone is what D4.3 proved insufficient.
+        // D4.9 REVERSED this decline, and the reason above is kept rather than
+        // deleted, because it was right when written: D4.7's only objection was
+        // reachability, and D4.8 removed it by promoting the array family.
         assert_eq!(
             jit_support(Opcode::DynSetKeyed),
-            JitSupport::Rejected,
-            "DynSetKeyed has no reachable, evidenceable view; see the comment above"
+            JitSupport::HelperExact,
+            "DynSetKeyed is promoted for the Arr view only"
         );
-        assert!(!opcode_supported_for_jit(Opcode::DynSetKeyed));
+        assert!(opcode_supported_for_jit(Opcode::DynSetKeyed));
     }
 
     #[test]
