@@ -3486,8 +3486,21 @@ pub(crate) fn object_field_index(
         crate::vm::reflect::ClassMetadataRegistry,
     >,
     layouts: &parking_lot::RwLock<crate::vm::interpreter::class_registry::RuntimeLayoutRegistry>,
-    // Named `structural_object_shapes` on `Interpreter`, `structural_layout_shapes` on
-    // `SharedVmState`. Same registry.
+    // NOT the same registry as `SharedVmState`'s `structural_layout_shapes`, whatever the
+    // parameter name suggests. `get_field_index_for_value` passes
+    // `&self.structural_object_shapes` -- a field on `Interpreter` (`core.rs:301`), a
+    // distinct `&RwLock` from the one `SharedVmState` owns.
+    //
+    // DO NOT "consolidate" these two. `shared_state.rs` documents that an earlier attempt
+    // nearly did exactly that, and that doing so "would have changed which shapes
+    // resolve"; there is a regression test there to keep the two apart. A layout
+    // registered only on `SharedVmState` is invisible to this function, and resolution
+    // then falls through to the positional `legacy_object_literal_field_index`, which
+    // can resolve to the WRONG SLOT. Compiled programs are shielded only because
+    // `RuntimeLayoutRegistry::register_layout_shape` happens to call
+    // `register_global_layout_names` as a side effect -- an undocumented coupling, and
+    // the only thing standing between that latent bug and any caller that registers
+    // shapes on the shared state alone (a JIT harness, for one).
     structural_layout_shapes: &parking_lot::RwLock<
         rustc_hash::FxHashMap<crate::vm::object::LayoutId, Vec<String>>,
     >,
