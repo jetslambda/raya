@@ -3373,6 +3373,100 @@ pub(crate) fn descriptor_accessor_for(
     Some(accessor)
 }
 
+/// Is `field_name` writable on `obj_val`?
+///
+/// `pub(crate)` and free-standing so a JIT helper can ask the same question the
+/// interpreter does, rather than approximating it.
+///
+/// **The permissive defaults ARE the contract, and each one looks like an oversight:**
+///
+///   * no descriptor at all -> writable
+///   * no `writable` field on the descriptor -> writable
+///   * a `writable` that is neither bool nor i32 -> writable
+///
+/// That last one is a genuine "cannot tell, so allow" rather than a bug. **Tightening
+/// any of the three turns a permitted write into a decline** — a silent behaviour
+/// change shaped exactly like a bug fix, which is the D4.3 failure mode.
+pub(crate) fn is_field_writable_for(
+    obj_val: Value,
+    field_name: &str,
+    metadata: &parking_lot::Mutex<crate::vm::reflect::MetadataStore>,
+    class_metadata: &parking_lot::RwLock<crate::vm::reflect::ClassMetadataRegistry>,
+    layouts: &parking_lot::RwLock<crate::vm::interpreter::class_registry::RuntimeLayoutRegistry>,
+    structural_layout_shapes: &parking_lot::RwLock<
+        rustc_hash::FxHashMap<crate::vm::object::LayoutId, Vec<String>>,
+    >,
+) -> bool {
+    let descriptor = {
+        let metadata = metadata.lock();
+        metadata.get_metadata_property(NODE_DESCRIPTOR_METADATA_KEY, obj_val, field_name)
+    };
+    let Some(descriptor) = descriptor else {
+        return true;
+    };
+    let Some(descriptor_ptr) = (unsafe { descriptor.as_ptr::<Object>() }) else {
+        return true;
+    };
+    let descriptor_obj = unsafe { &*descriptor_ptr.as_ptr() };
+    let Some(index) = object_field_index(descriptor_obj, "writable", class_metadata, layouts, structural_layout_shapes) else {
+        return true;
+    };
+    let Some(writable) = descriptor_obj.get_field(index) else {
+        return true;
+    };
+    if let Some(b) = writable.as_bool() {
+        b
+    } else if let Some(i) = writable.as_i32() {
+        i != 0
+    } else {
+        true
+    }
+}
+
+/// Write `value` through the Node-compat descriptor for `field_name`, if one exists.
+///
+/// No-op when there is no descriptor or it has no `value` slot — which is what makes
+/// it safe to call unconditionally after a plain field write. Its middle step is
+/// already the shared `object_field_index`, so this is the shortest of the three
+/// descriptor extractions.
+pub(crate) fn sync_descriptor_value_for(
+    obj_val: Value,
+    field_name: &str,
+    value: Value,
+    metadata: &parking_lot::Mutex<crate::vm::reflect::MetadataStore>,
+    class_metadata: &parking_lot::RwLock<crate::vm::reflect::ClassMetadataRegistry>,
+    layouts: &parking_lot::RwLock<crate::vm::interpreter::class_registry::RuntimeLayoutRegistry>,
+    structural_layout_shapes: &parking_lot::RwLock<
+        rustc_hash::FxHashMap<crate::vm::object::LayoutId, Vec<String>>,
+    >,
+) {
+    let descriptor = {
+        let metadata = metadata.lock();
+        metadata.get_metadata_property(NODE_DESCRIPTOR_METADATA_KEY, obj_val, field_name)
+    };
+    let Some(descriptor) = descriptor else {
+        return;
+    };
+    let Some(descriptor_ptr) = (unsafe { descriptor.as_ptr::<Object>() }) else {
+        return;
+    };
+    let descriptor_obj = unsafe { &*descriptor_ptr.as_ptr() };
+    let Some(value_index) = object_field_index(
+        descriptor_obj,
+        "value",
+        class_metadata,
+        layouts,
+        structural_layout_shapes,
+    ) else {
+        return;
+    };
+    // The interpreter discards this result too; a descriptor whose `value` slot is out
+    // of range is a malformed descriptor, not a reason to fail the write. The cast is
+    // the same `as_ptr::<Object>() -> &mut` the interpreter performs.
+    let descriptor_mut = unsafe { &mut *(descriptor_ptr.as_ptr() as *mut Object) };
+    let _ = descriptor_mut.checked_set_field(value_index, value);
+}
+
 /// Resolve `field_name` to a field index on `obj`.
 ///
 /// `pub(crate)` and free-standing so a JIT helper and the interpreter share **one**

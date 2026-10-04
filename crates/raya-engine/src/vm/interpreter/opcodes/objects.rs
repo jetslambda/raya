@@ -392,39 +392,31 @@ impl<'a> Interpreter<'a> {
     }
 
     pub(crate) fn is_field_writable(&self, obj_val: Value, field_name: &str) -> bool {
-        let metadata = self.metadata.lock();
-        let Some(descriptor) =
-            metadata.get_metadata_property(NODE_DESCRIPTOR_METADATA_KEY, obj_val, field_name)
-        else {
-            return true;
-        };
-        let Some(writable) = self.get_value_field_by_name(descriptor, "writable") else {
-            return true;
-        };
-        if let Some(b) = writable.as_bool() {
-            b
-        } else if let Some(i) = writable.as_i32() {
-            i != 0
-        } else {
-            true
-        }
+        // Delegates to the shared function so a JIT helper asks the identical
+        // question. Its three permissive defaults are part of the contract -- see the
+        // doc comment there.
+        crate::vm::interpreter::opcodes::native::is_field_writable_for(
+            obj_val,
+            field_name,
+            &self.metadata,
+            &self.class_metadata,
+            &self.layouts,
+            self.structural_object_shapes,
+        )
     }
 
     pub(crate) fn sync_descriptor_value(&self, obj_val: Value, field_name: &str, value: Value) {
-        let descriptor = {
-            let metadata = self.metadata.lock();
-            metadata.get_metadata_property(NODE_DESCRIPTOR_METADATA_KEY, obj_val, field_name)
-        };
-        let Some(descriptor) = descriptor else {
-            return;
-        };
-        let Some(value_index) = self.field_index_for_value(descriptor, "value") else {
-            return;
-        };
-        if let Some(desc_ptr) = unsafe { descriptor.as_ptr::<Object>() } {
-            let desc = unsafe { &mut *desc_ptr.as_ptr() };
-            let _ = desc.checked_set_field(value_index, value);
-        }
+        // Delegates to the shared function; its middle step is already the shared
+        // `object_field_index`, so this extraction adds no new resolution logic.
+        crate::vm::interpreter::opcodes::native::sync_descriptor_value_for(
+            obj_val,
+            field_name,
+            value,
+            &self.metadata,
+            &self.class_metadata,
+            &self.layouts,
+            self.structural_object_shapes,
+        );
     }
 
     pub(crate) fn descriptor_accessor(
