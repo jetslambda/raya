@@ -234,6 +234,21 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // optional `resize` and does neither. `Struct` still declines (no shape
         // registry on the bridge); every non-array receiver, `Str` included, is a
         // `TypeError` the helper cannot raise.
+        // D4.10: the field-count cast, and object construction.
+        //
+        // `CastObjectMinFields` is a CHECKED PASS-THROUGH: it consults no descriptor
+        // accessor and invokes no frame, which is structurally unlike `StoreFieldShape`
+        // and is why this one is promotable and that one is not. It also has no `false`
+        // outcome -- a field count below the requirement is a `TypeError` -- so all
+        // three of its failure paths decline rather than answer.
+        | Opcode::CastObjectMinFields
+        // `ObjectLiteral`/`InitObject` have no descriptor surface either: construction
+        // happens before any property can have been defined, and `checked_set_field` is
+        // a pure bounds-checked slot write. They were blocked only because no PROMOTED
+        // opcode could observe their result; `CastObjectMinFields` above is exactly
+        // that observer for a STRUCTURAL object.
+        | Opcode::ObjectLiteral
+        | Opcode::InitObject
         | Opcode::DynSetKeyed
         // D4.8, first slice. `NewArray` + `ArrayLen` only, deliberately: `NewArray`
         // bootstraps array construction, so nothing else in the family can be

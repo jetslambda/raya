@@ -7608,3 +7608,119 @@ fn dyn_set_keyed_constraint_is_not_enforced() {
     let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
     assert_eq!(string_contents(native), "not an i32");
 }
+
+
+/// D4.10: `CastObjectMinFields` and object construction, differentially.
+///
+/// It is a **checked pass-through**: the interpreter pushes the OBJECT back unchanged,
+/// so there is no boolean to compare and no `false` outcome anywhere. Every failure
+/// path is a `TypeError` a helper cannot raise, so each must DECLINE rather than answer.
+///
+/// | case | expected |
+/// |---|---|
+/// | enough fields | `Completed`; the object passes through |
+/// | **not** enough fields | interpreter raises; JIT declines (`Suspended` + `InterpreterBoundary`) |
+/// | non-object receiver | interpreter raises; JIT declines |
+///
+/// Object comparison is "is it a pointer", never raw bits: the two engines each
+/// allocate their own object, so the pointers necessarily differ.
+#[test]
+fn cast_object_min_fields_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::{JitExitKind, JitSuspendReason};
+    use raya_engine::vm::interpreter::Vm;
+
+    fn program(with_object: bool, field_count: u16, required: u16) -> std::sync::Arc<Module> {
+        let mut module = make_vm_module(Vec::new(), 0, 0);
+        let mut code: Vec<u8> = Vec::new();
+        if with_object {
+            emit(&mut code, Opcode::ObjectLiteral);
+            code.extend_from_slice(&1u32.to_le_bytes()); // layout id, non-zero
+            code.extend_from_slice(&field_count.to_le_bytes());
+        } else {
+            emit_i32(&mut code, 5); // an integer: not an object
+        }
+        emit(&mut code, Opcode::CastObjectMinFields);
+        code.extend_from_slice(&required.to_le_bytes());
+        emit(&mut code, Opcode::Return);
+        module.functions[0].code = code;
+        module.functions[0].name = "main".to_string();
+        finalize_module(module)
+    }
+
+    fn jit_side(
+        module: std::sync::Arc<Module>,
+    ) -> (u32, u32, u64) {
+        let (safepoint, shared) = new_shared_vm_state();
+        let task =
+            std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+        (exit.kind, exit.suspend_reason, raw_bits)
+    }
+
+    fn interpreter(
+        module: &Module,
+    ) -> Result<raya_engine::vm::value::Value, String> {
+        let mut vm = Vm::with_worker_count(1);
+        vm.execute(module).map_err(|e| e.to_string())
+    }
+
+    // --- Case 1: enough fields -> the object passes through, natively.
+    {
+        let module = program(true, 3, 2);
+        let interpreted = interpreter(&module).expect("interpreter must pass the cast");
+        let (kind, _, raw_bits) = jit_side(module);
+        assert_eq!(
+            kind,
+            JitExitKind::Completed as u32,
+            "a sufficient cast must complete natively"
+        );
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert!(
+            native.is_ptr() && interpreted.is_ptr(),
+            "both engines must return the object, not a boolean and not null"
+        );
+    }
+
+    // --- Case 2: field count below the requirement -> BOTH raise / decline.
+    {
+        let module = program(true, 1, 5);
+        assert!(
+            interpreter(&module).is_err(),
+            "the interpreter must RAISE when the field count is too low -- this is an \
+             error, NOT a false cast"
+        );
+        let (kind, reason, _) = jit_side(module);
+        assert_eq!(
+            kind,
+            JitExitKind::Suspended as u32,
+            "a too-small field count must DECLINE, not answer false"
+        );
+        assert_eq!(reason, JitSuspendReason::InterpreterBoundary as u32);
+    }
+
+    // --- Case 3: non-object receiver -> BOTH raise / decline.
+    {
+        let module = program(false, 0, 1);
+        assert!(
+            interpreter(&module).is_err(),
+            "the interpreter must raise on a non-object receiver"
+        );
+        let (kind, reason, _) = jit_side(module);
+        assert_eq!(
+            kind,
+            JitExitKind::Suspended as u32,
+            "a non-object receiver must DECLINE"
+        );
+        assert_eq!(reason, JitSuspendReason::InterpreterBoundary as u32);
+    }
+}

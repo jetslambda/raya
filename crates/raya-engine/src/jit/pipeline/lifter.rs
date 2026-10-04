@@ -1158,8 +1158,12 @@ fn lift_instruction(
                 stack.push(dest);
             }
         }
+        // `CastObjectMinFields` was in this rejection list and has been lifted and
+        // lowered (D4.10). It is a CHECKED PASS-THROUGH with no descriptor accessor and
+        // no frame invocation -- structurally unlike `StoreFieldShape`, which is why
+        // that one stays demoted and this one does not. Keeping it here would have made
+        // its lifter arm unreachable, since this arm matches first.
         Opcode::CastTupleLen
-        | Opcode::CastObjectMinFields
         | Opcode::CastArrayElemKind
         | Opcode::CastKindMask => {
             return Err(LiftError::UnsupportedOpcode {
