@@ -1842,6 +1842,15 @@ unsafe extern "C" fn helper_alloc_struct_object(
     // compiler already emits a TAGGED structural layout id
     // (`STRUCTURAL_LAYOUT_ID_TAG | n`), exactly as the interpreter's handler receives
     // it, so nothing is added or stripped here.
+    //
+    // `type_index == 0` is the interpreter's "object literal is missing structural
+    // layout id" ERROR, checked here so the helper mirrors that validation rather than
+    // allocating an object against a layout id that names nothing -- which would build
+    // an object no later field lookup could read. Returning null sends the lowering
+    // down its existing fallback path.
+    if type_index == 0 {
+        return std::ptr::null_mut();
+    }
     let allocated = gc.allocate(crate::vm::object::Object::new_structural(
         type_index,
         field_count as usize,

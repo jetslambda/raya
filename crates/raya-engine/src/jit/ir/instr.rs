@@ -818,6 +818,11 @@ pub enum JitInstr {
         /// Always EMPTY. The field values arrive as the separate `InitObjectField`
         /// instructions that follow, one per slot -- not as part of this instruction.
         fields: Vec<Reg>,
+        /// Required, not optional: `type_index == 0` is an error in the interpreter
+        /// ("object literal is missing structural layout id"), and the allocation can
+        /// fail, so this instruction must be able to hand control back.
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
     },
     TupleLiteral {
         dest: Reg,

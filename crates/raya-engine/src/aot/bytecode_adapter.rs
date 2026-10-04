@@ -1009,6 +1009,7 @@ impl LiftedFunction {
                 type_index,
                 field_count,
                 fields,
+                ..
             } => {
                 out.push(SmInstr::CallHelper {
                     dest: Some(dest.0),

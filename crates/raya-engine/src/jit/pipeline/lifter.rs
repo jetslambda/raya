@@ -1804,12 +1804,18 @@ fn lift_instruction(
                 arg_count,
             } = instr.operands
             {
+                // Snapshot BEFORE the push: `ObjectLiteral` pushes rather than pops,
+                // and an interpreter resuming at `bytecode_offset` re-executes it with
+                // the same operand stack it had.
+                let pre_stack = stack.clone_state();
                 let dest = func.alloc_reg(JitType::Ptr);
                 func.block_mut(block).instrs.push(JitInstr::ObjectLiteral {
                     dest,
                     type_index,
                     field_count: arg_count,
                     fields: Vec::new(),
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
                 });
                 stack.push(dest);
             }

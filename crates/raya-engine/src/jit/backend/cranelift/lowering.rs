@@ -62,6 +62,7 @@ pub struct LoweringContext<'a> {
     sig_bind_method: Option<ir::SigRef>,
     sig_await_task: Option<ir::SigRef>,
     sig_dyn_get_keyed: Option<ir::SigRef>,
+    sig_alloc_struct_object: Option<ir::SigRef>,
     sig_array_len: Option<ir::SigRef>,
     sig_array_store: Option<ir::SigRef>,
     sig_array_load: Option<ir::SigRef>,
@@ -211,6 +212,7 @@ impl<'a> LoweringContext<'a> {
             sig_bind_method: None,
             sig_await_task: None,
             sig_dyn_get_keyed: None,
+            sig_alloc_struct_object: None,
             sig_array_len: None,
             sig_array_store: None,
             sig_array_load: None,
@@ -1472,6 +1474,83 @@ impl<'a> LoweringContext<'a> {
 
                 builder.seal_block(done);
                 builder.switch_to_block(done);
+            }
+            JitInstr::ObjectLiteral {
+                dest,
+                type_index,
+                field_count,
+                stack,
+                bytecode_offset,
+                ..
+            } => {
+                // Allocates only. The slot VALUES arrive as the separate
+                // `InitObjectField` instructions that follow -- `fields` is always empty.
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "object literal exit stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let null_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let done = builder.create_block();
+                builder.append_block_param(done, types::I64);
+                builder
+                    .ins()
+                    .brif(is_ctx_null, null_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+                builder.seal_block(null_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_ALLOC_STRUCT_OBJECT_OFFSET,
+                );
+                let sig = self.alloc_struct_object_sig(builder);
+                // Both operands pass through unchanged: `LayoutId` is a `u32` alias and
+                // the compiler already emits a TAGGED structural layout id.
+                //
+                // `type_index == 0` needs no arm-side check: the helper rejects it and
+                // returns null, which the `is_null` branch below already routes to the
+                // boundary exit. Checking it here instead would mean a `continue` inside
+                // a match that is not in a loop.
+                let type_index_val = builder.ins().iconst(types::I64, *type_index as i64);
+                let count_val = builder.ins().iconst(types::I64, *field_count as i64);
+                let call = builder.ins().call_indirect(
+                    sig,
+                    fn_ptr,
+                    &[type_index_val, count_val, shared_state],
+                );
+                let result = builder.inst_results(call)[0];
+                // The helper returns NULL on failure rather than a sentinel, matching
+                // `helper_alloc_object`. A null object must NOT be pushed on: the
+                // interpreter raises, so hand back instead.
+                let is_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, result, 0);
+                builder
+                    .ins()
+                    .brif(is_null, fallback_block, &[], done, &[ir::BlockArg::Value(result)]);
+                builder.seal_block(fallback_block);
+
+                builder.switch_to_block(fallback_block);
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.switch_to_block(null_block);
+                let null = abi::emit_null(builder);
+                builder
+                    .ins()
+                    .jump(done, &[ir::BlockArg::Value(null)]);
+
+                builder.seal_block(done);
+                builder.switch_to_block(done);
+                let merged = builder.block_params(done)[0];
+                self.def_reg(builder, *dest, merged);
             }
             JitInstr::LoadElem {
                 dest,
@@ -4043,6 +4122,20 @@ impl<'a> LoweringContext<'a> {
         sig.returns.push(AbiParam::new(types::I32)); // length or i32::MIN
         let sig_ref = builder.func.import_signature(sig);
         self.sig_array_len = Some(sig_ref);
+        sig_ref
+    }
+
+    fn alloc_struct_object_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_alloc_struct_object {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I64)); // type_index
+        sig.params.push(AbiParam::new(types::I64)); // field_count
+        sig.params.push(AbiParam::new(types::I64)); // shared_state ptr
+        sig.returns.push(AbiParam::new(types::I64)); // object ptr, or null
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_alloc_struct_object = Some(sig_ref);
         sig_ref
     }
 
