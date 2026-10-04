@@ -466,6 +466,22 @@ pub enum JitInstr {
     /// `stack` and `bytecode_offset` are required, not optional: `checked_set_field`
     /// turns an out-of-range offset into a `RuntimeError`, which a leaf helper cannot
     /// raise, so the arm MUST be able to hand control back.
+    /// `CastObjectMinFields`: does this object have at least `required_fields`?
+    ///
+    /// The interpreter counts `field_count().max(dyn_map().len())` and compares. It
+    /// consults **no descriptor accessor and invokes no frame** — unlike
+    /// `StoreFieldShape`, which is why this one is promotable and that one is not.
+    ///
+    /// `stack`/`bytecode_offset` are required because both failure paths are
+    /// interpreter `TypeError`s: a non-pointer receiver and a wrong-`TypeId` receiver.
+    /// A helper cannot raise either, so the only correct response is to decline.
+    CastObjectMinFields {
+        dest: Reg,
+        object: Reg,
+        required_fields: u16,
+        stack: Vec<Reg>,
+        bytecode_offset: u32,
+    },
     InitObjectField {
         object: Reg,
         offset: u16,
@@ -1122,6 +1138,7 @@ impl JitInstr {
             | JitInstr::StoreFieldShape { .. }
             | JitInstr::StoreElem { .. }
             | JitInstr::ArrayPush { .. }
+            | JitInstr::CastObjectMinFields { .. }
             | JitInstr::InitObjectField { .. }
             | JitInstr::InitArray { .. }
             | JitInstr::StoreCaptured { .. }

@@ -62,6 +62,7 @@ pub struct LoweringContext<'a> {
     sig_bind_method: Option<ir::SigRef>,
     sig_await_task: Option<ir::SigRef>,
     sig_dyn_get_keyed: Option<ir::SigRef>,
+    sig_cast_object_min_fields: Option<ir::SigRef>,
     sig_init_object_field: Option<ir::SigRef>,
     sig_alloc_struct_object: Option<ir::SigRef>,
     sig_array_len: Option<ir::SigRef>,
@@ -213,6 +214,7 @@ impl<'a> LoweringContext<'a> {
             sig_bind_method: None,
             sig_await_task: None,
             sig_dyn_get_keyed: None,
+            sig_cast_object_min_fields: None,
             sig_init_object_field: None,
             sig_alloc_struct_object: None,
             sig_array_len: None,
@@ -1627,6 +1629,80 @@ impl<'a> LoweringContext<'a> {
 
                 builder.seal_block(done);
                 builder.switch_to_block(done);
+            }
+            JitInstr::CastObjectMinFields {
+                dest,
+                object,
+                required_fields,
+                stack,
+                bytecode_offset,
+            } => {
+                // A CHECKED PASS-THROUGH: the interpreter pushes the OBJECT back
+                // unchanged when the field count suffices, and there is no boolean and
+                // no `false` outcome anywhere. All three failure paths are `TypeError`s
+                // a helper cannot raise, so all three DECLINE.
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "cast object min fields exit stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let null_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let done = builder.create_block();
+                builder.append_block_param(done, types::I64);
+                builder
+                    .ins()
+                    .brif(is_ctx_null, null_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+                builder.seal_block(null_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_CAST_OBJECT_MIN_FIELDS_OFFSET,
+                );
+                let sig = self.cast_object_min_fields_sig(builder);
+                let object_val = self.boxed_reg_value(builder, *object);
+                let required_val = builder.ins().iconst(types::I64, *required_fields as i64);
+                let call = builder.ins().call_indirect(
+                    sig,
+                    fn_ptr,
+                    &[object_val, required_val, shared_state],
+                );
+                let status = builder.inst_results(call)[0];
+                let pass = builder.ins().iconst(
+                    types::I8,
+                    crate::jit::runtime::helpers::OBJECT_MIN_FIELDS_PASS as i64,
+                );
+                let ok = builder
+                    .ins()
+                    .icmp(condcodes::IntCC::Equal, status, pass);
+                builder
+                    .ins()
+                    .brif(ok, done, &[ir::BlockArg::Value(object_val)], fallback_block, &[]);
+                builder.seal_block(fallback_block);
+
+                builder.switch_to_block(fallback_block);
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.switch_to_block(null_block);
+                let null = abi::emit_null(builder);
+                builder
+                    .ins()
+                    .jump(done, &[ir::BlockArg::Value(null)]);
+
+                builder.seal_block(done);
+                builder.switch_to_block(done);
+                let merged = builder.block_params(done)[0];
+                self.def_reg(builder, *dest, merged);
             }
             JitInstr::LoadElem {
                 dest,
@@ -4227,6 +4303,20 @@ impl<'a> LoweringContext<'a> {
         sig.returns.push(AbiParam::new(types::I8)); // status
         let sig_ref = builder.func.import_signature(sig);
         self.sig_init_object_field = Some(sig_ref);
+        sig_ref
+    }
+
+    fn cast_object_min_fields_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_cast_object_min_fields {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I64)); // object (boxed Value)
+        sig.params.push(AbiParam::new(types::I64)); // required_fields
+        sig.params.push(AbiParam::new(types::I64)); // shared_state ptr
+        sig.returns.push(AbiParam::new(types::I8)); // -1 decline, 0 false, 1 true
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_cast_object_min_fields = Some(sig_ref);
         sig_ref
     }
 

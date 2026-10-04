@@ -255,6 +255,16 @@ impl fmt::Display for JitInstr {
                 offset,
                 value,
             } => write!(f, "store.field {}.{}, {}", object, offset, value),
+            JitInstr::CastObjectMinFields {
+                dest,
+                object,
+                required_fields,
+                ..
+            } => write!(
+                f,
+                "{} = object.minFields({}, {})",
+                dest, object, required_fields
+            ),
             JitInstr::InitObjectField {
                 object,
                 offset,

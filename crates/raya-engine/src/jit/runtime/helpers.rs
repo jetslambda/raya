@@ -223,6 +223,7 @@ pub fn runtime_helpers() -> RuntimeHelperTable {
         dyn_set_keyed: helper_dyn_set_keyed,
         alloc_struct_object: helper_alloc_struct_object,
         init_object_field: helper_init_object_field,
+        cast_object_min_fields: helper_cast_object_min_fields,
     }
 }
 
@@ -1897,6 +1898,52 @@ unsafe extern "C" fn helper_init_object_field(
         Ok(()) => JIT_STORE_SUCCESS,
         // Out of bounds. The interpreter raises; decline so it does.
         Err(_) => JIT_STORE_FALLBACK,
+    }
+}
+
+/// `CastObjectMinFields` is a CHECKED PASS-THROUGH, not a boolean cast: on success the
+/// interpreter pushes `obj_val` back unchanged, and a field count that is too small is
+/// an ERROR rather than `false`. So there are only two outcomes, and one of them is a
+/// decline.
+pub const OBJECT_MIN_FIELDS_PASS: i8 = 1;
+pub const OBJECT_MIN_FIELDS_DECLINE: i8 = 0;
+
+/// `CastObjectMinFields`: does `object` have at least `required_fields`? If so, PASS.
+///
+/// Mirrors `exec_object_min_fields_cast` exactly: an `is_ptr` check, a `TypeId` check
+/// via `jit_object_ptr_checked`, then `field_count().max(dyn_map().len())`.
+///
+/// All THREE interpreter failure paths DECLINE, because all three are `TypeError`s a
+/// helper cannot raise: a non-pointer receiver, a wrong-`TypeId` receiver, and a field
+/// count below the requirement. **Returning a "false"-shaped answer for any of them
+/// would silently convert a `TypeError` into a failed cast**, which is the D4.3
+/// divergence shape. Note the third is also an ERROR and not `false` — that is the part
+/// a boolean-shaped mental model gets wrong.
+unsafe extern "C" fn helper_cast_object_min_fields(
+    object_raw: u64,
+    required_fields: u64,
+    shared_state: *mut (),
+) -> i8 {
+    if shared_state.is_null() {
+        return OBJECT_MIN_FIELDS_DECLINE;
+    }
+    let _bridge = &*(shared_state.cast::<JitRuntimeBridgeContext>());
+    let object_value = Value::from_raw(object_raw);
+    // BOXED by the caller: a heap `Value` in a register is untagged, and
+    // `jit_object_ptr_checked` reads the tag via `is_ptr()`.
+    let Some(object_ptr) = jit_object_ptr_checked(object_value) else {
+        return OBJECT_MIN_FIELDS_DECLINE;
+    };
+    let object = unsafe { &*object_ptr.as_ptr() };
+    let effective_field_count = object
+        .field_count()
+        .max(object.dyn_map().map(|m| m.len()).unwrap_or(0));
+    if effective_field_count >= required_fields as usize {
+        OBJECT_MIN_FIELDS_PASS
+    } else {
+        // The interpreter raises `Cannot cast object(field_count=N) to required field
+        // count M` here. Decline so it raises the real message.
+        OBJECT_MIN_FIELDS_DECLINE
     }
 }
 

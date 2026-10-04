@@ -2235,6 +2235,17 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     ) -> i8 {
         0 // JIT_STORE_FALLBACK
     }
+
+    /// Declines, so a cast routes to the interpreter rather than silently passing.
+    /// `CastObjectMinFields` is still `Rejected` AND still on
+    /// `produces_incorrect_native_results`, so no compiled test reaches this yet.
+    unsafe extern "C" fn stub_cast_object_min_fields(
+        _object: u64,
+        _required_fields: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // OBJECT_MIN_FIELDS_DECLINE
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2333,6 +2344,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
             dyn_set_keyed: stub_dyn_set_keyed,
             alloc_struct_object: stub_alloc_struct_object,
             init_object_field: stub_init_object_field,
+            cast_object_min_fields: stub_cast_object_min_fields,
         },
     };
 
@@ -2511,6 +2523,17 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     ) -> i8 {
         0 // JIT_STORE_FALLBACK
     }
+
+    /// Declines, so a cast routes to the interpreter rather than silently passing.
+    /// `CastObjectMinFields` is still `Rejected` AND still on
+    /// `produces_incorrect_native_results`, so no compiled test reaches this yet.
+    unsafe extern "C" fn stub_cast_object_min_fields(
+        _object: u64,
+        _required_fields: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // OBJECT_MIN_FIELDS_DECLINE
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2609,6 +2632,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
             dyn_set_keyed: stub_dyn_set_keyed,
             alloc_struct_object: stub_alloc_struct_object,
             init_object_field: stub_init_object_field,
+            cast_object_min_fields: stub_cast_object_min_fields,
         },
     };
 
@@ -2788,6 +2812,17 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     ) -> i8 {
         0 // JIT_STORE_FALLBACK
     }
+
+    /// Declines, so a cast routes to the interpreter rather than silently passing.
+    /// `CastObjectMinFields` is still `Rejected` AND still on
+    /// `produces_incorrect_native_results`, so no compiled test reaches this yet.
+    unsafe extern "C" fn stub_cast_object_min_fields(
+        _object: u64,
+        _required_fields: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // OBJECT_MIN_FIELDS_DECLINE
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -2893,6 +2928,7 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
             dyn_set_keyed: stub_dyn_set_keyed,
             alloc_struct_object: stub_alloc_struct_object,
             init_object_field: stub_init_object_field,
+            cast_object_min_fields: stub_cast_object_min_fields,
         },
     };
 
@@ -3067,6 +3103,17 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     ) -> i8 {
         0 // JIT_STORE_FALLBACK
     }
+
+    /// Declines, so a cast routes to the interpreter rather than silently passing.
+    /// `CastObjectMinFields` is still `Rejected` AND still on
+    /// `produces_incorrect_native_results`, so no compiled test reaches this yet.
+    unsafe extern "C" fn stub_cast_object_min_fields(
+        _object: u64,
+        _required_fields: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // OBJECT_MIN_FIELDS_DECLINE
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -3172,6 +3219,7 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
             dyn_set_keyed: stub_dyn_set_keyed,
             alloc_struct_object: stub_alloc_struct_object,
             init_object_field: stub_init_object_field,
+            cast_object_min_fields: stub_cast_object_min_fields,
         },
     };
 
@@ -3353,6 +3401,17 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     ) -> i8 {
         0 // JIT_STORE_FALLBACK
     }
+
+    /// Declines, so a cast routes to the interpreter rather than silently passing.
+    /// `CastObjectMinFields` is still `Rejected` AND still on
+    /// `produces_incorrect_native_results`, so no compiled test reaches this yet.
+    unsafe extern "C" fn stub_cast_object_min_fields(
+        _object: u64,
+        _required_fields: u64,
+        _shared_state: *mut (),
+    ) -> i8 {
+        0 // OBJECT_MIN_FIELDS_DECLINE
+    }
     unsafe extern "C" fn stub_alloc_string(
         _data_ptr: *const u8,
         _len: usize,
@@ -3467,6 +3526,7 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
             dyn_set_keyed: stub_dyn_set_keyed,
             alloc_struct_object: stub_alloc_struct_object,
             init_object_field: stub_init_object_field,
+            cast_object_min_fields: stub_cast_object_min_fields,
         },
     };
 

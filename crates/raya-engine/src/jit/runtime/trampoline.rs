@@ -188,6 +188,12 @@ pub const HELPER_AWAIT_TASK_OFFSET: i32 =
 pub const HELPER_DYN_SET_KEYED_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, dyn_set_keyed) as i32;
 
+/// Byte offset of the `CastObjectMinFields` helper in [`RuntimeContext`].
+///
+/// Returns -1 to decline, 0 for false, 1 for true.
+pub const HELPER_CAST_OBJECT_MIN_FIELDS_OFFSET: i32 = RUNTIME_CONTEXT_HELPERS_OFFSET
+    + std::mem::offset_of!(RuntimeHelperTable, cast_object_min_fields) as i32;
+
 /// Byte offset of the `InitObject` slot-write helper in [`RuntimeContext`].
 ///
 /// Returns [`JIT_STORE_SUCCESS`] or [`JIT_STORE_FALLBACK`].
@@ -367,6 +373,9 @@ pub struct RuntimeHelperTable {
     /// One `InitObject` slot write: (object, offset, value, shared_state) -> status.
     /// Declines when the offset is out of range so the interpreter can raise.
     pub init_object_field: unsafe extern "C" fn(u64, u64, u64, *mut ()) -> i8,
+    /// Field-count cast: (object, required_fields, shared_state) -> -1 decline, 0 false,
+    /// 1 true. Tri-state because both interpreter failure paths are errors, not `false`.
+    pub cast_object_min_fields: unsafe extern "C" fn(u64, u64, *mut ()) -> i8,
 }
 
 /// Validate the boxed arguments at a JIT entry boundary against a verified

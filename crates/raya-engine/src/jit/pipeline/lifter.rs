@@ -1848,6 +1848,24 @@ fn lift_instruction(
                 .push(JitInstr::TupleGet { dest, tuple });
             stack.push(dest);
         }
+        Opcode::CastObjectMinFields => {
+            if let Operands::U16(required_fields) = instr.operands {
+                // Snapshot BEFORE the pop: the interpreter resuming at
+                // `bytecode_offset` re-executes this opcode and must find the receiver
+                // on the stack again.
+                let pre_stack = stack.clone_state();
+                let object = stack.pop(instr.offset)?;
+                let dest = func.alloc_reg(JitType::Value);
+                func.block_mut(block).instrs.push(JitInstr::CastObjectMinFields {
+                    dest,
+                    object,
+                    required_fields,
+                    stack: pre_stack,
+                    bytecode_offset: instr.offset as u32,
+                });
+                stack.push(dest);
+            }
+        }
         Opcode::InitObject => {
             if let Operands::U16(field_offset) = instr.operands {
                 // Snapshot BEFORE the pop: the interpreter resuming at
