@@ -527,6 +527,20 @@ fn abs_of_id(id: u32, module: &Module) -> AbsType {
 }
 
 fn abs_of_descriptor(d: &RuntimeTypeDescriptor, module: &Module) -> AbsType {
+    // `AnyValue` is the fallback for a type the compiler could not resolve — it
+    // means "no type information", not "some concrete type". It has a primitive
+    // id (prim::ANY_VALUE = 6), so the `primitive_id()` arm below turned it into
+    // `AbsType::Known(6)`, and `check_assignable` then demanded an EXACT match
+    // against it. That made every unresolved type fail against everything:
+    //
+    //   function f(): int { return 7; } return f();
+    //   -> TypeMismatch { expected: Known(6), actual: Known(0) }
+    //
+    // Mapping it to `AbsType::Any` restores its meaning: `check_assignable`
+    // already treats `Any` as compatible in both directions.
+    if matches!(d, RuntimeTypeDescriptor::AnyValue) {
+        return AbsType::Any;
+    }
     match d.primitive_id() {
         Some(id) => AbsType::Known(id.0),
         None => match module.runtime_types.iter().position(|t| t == d) {
