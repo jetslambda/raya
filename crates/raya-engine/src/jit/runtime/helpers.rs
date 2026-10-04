@@ -1034,7 +1034,7 @@ unsafe extern "C" fn helper_alloc_object(
 /// to the caller immediately.
 unsafe extern "C" fn helper_alloc_array(
     type_index: u32,
-    capacity: usize,
+    len_raw: u64,
     module_ptr: *const (),
     shared_state: *mut (),
 ) -> *mut () {
@@ -1051,6 +1051,20 @@ unsafe extern "C" fn helper_alloc_array(
         let module = &*(module_ptr.cast::<Module>());
         jit_resolve_array_element_descriptor(module, type_index)
     };
+    // Boxed length, coerced by the interpreter's own function, exactly as
+    // `helper_array_load`/`_store` do for the index. `NewArray` pops a length off
+    // the operand stack and runs it through `array_index_operand`, so a length of
+    // `null` is 0 and a negative `i32` wraps to a huge `usize` -- which
+    // `Array::with_element_type` will try to reserve. An `i64`/`usize` parameter
+    // could not express that, and the arm would have had to reimplement it in IR.
+    let capacity = crate::vm::interpreter::opcodes::arrays::array_index_operand(
+        Value::from_raw(len_raw),
+    );
+    // NOTE: no `EphemeralRootScope` here, and it is deliberate. The length is
+    // coerced to a `usize` BEFORE the allocation, so no `Value` is live across the
+    // `gc.allocate` call -- `type_index`, `capacity` and `module_ptr` are all plain
+    // integers. `helper_new_refcell` roots because it holds the initial `Value`
+    // across its allocation; this one does not.
     let mut gc = (&*bridge.gc).lock();
     let array_ptr = gc.allocate(Array::with_element_type(
         type_index as usize,
@@ -2975,7 +2989,7 @@ mod tests {
             // Baseline: nothing rooted.
             assert!(shared.ephemeral_gc_roots.read().is_empty());
 
-            let arr_ptr = unsafe { helper_alloc_array(6, 2, module_ptr, ss) };
+            let arr_ptr = unsafe { helper_alloc_array(6, Value::i32(2).raw(), module_ptr, ss) };
             let arr_val = unsafe { Value::from_ptr(NonNull::new(arr_ptr.cast::<u8>()).unwrap()) };
 
             assert_eq!(
@@ -3003,7 +3017,7 @@ mod tests {
             let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
             let module_ptr = Arc::as_ptr(&module) as *const ();
 
-            let arr_ptr = unsafe { helper_alloc_array(6, 2, module_ptr, ss) };
+            let arr_ptr = unsafe { helper_alloc_array(6, Value::i32(2).raw(), module_ptr, ss) };
             let arr_val = unsafe { Value::from_ptr(NonNull::new(arr_ptr.cast::<u8>()).unwrap()) };
             let len_before = unsafe { helper_array_len(arr_val.raw(), ss) };
 
@@ -3548,7 +3562,7 @@ mod tests {
             let module_ptr = Arc::as_ptr(&module) as *const ();
 
             // Dynamic array (AnyValue element id 6), capacity 2.
-            let arr_ptr = unsafe { helper_alloc_array(6, 2, module_ptr, ss) };
+            let arr_ptr = unsafe { helper_alloc_array(6, Value::i32(2).raw(), module_ptr, ss) };
             assert!(!arr_ptr.is_null());
             let arr_val = unsafe { Value::from_ptr(NonNull::new(arr_ptr.cast::<u8>()).unwrap()) };
 
@@ -3677,7 +3691,7 @@ mod tests {
             let module_ptr = Arc::as_ptr(&module) as *const ();
 
             // Bool-typed array (element id 2): storing a bool succeeds, an i32 falls back.
-            let arr_ptr = unsafe { helper_alloc_array(2, 1, module_ptr, ss) };
+            let arr_ptr = unsafe { helper_alloc_array(2, Value::i32(1).raw(), module_ptr, ss) };
             let arr_val = unsafe { Value::from_ptr(NonNull::new(arr_ptr.cast::<u8>()).unwrap()) };
             assert_eq!(
                 unsafe { helper_array_store(arr_val.raw(), Value::i32(0).raw(), Value::bool(true).raw(), ss) },

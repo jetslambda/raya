@@ -2088,7 +2088,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_returns_value() {
     }
     unsafe extern "C" fn stub_alloc_array(
         _type_id: u32,
-        _capacity: usize,
+        _len: u64,
         _module: *const (),
         _shared_state: *mut (),
     ) -> *mut () {
@@ -2329,7 +2329,7 @@ fn jit_native_call_zero_arg_ctx_fastpath_sentinel_suspends() {
     }
     unsafe extern "C" fn stub_alloc_array(
         _type_id: u32,
-        _capacity: usize,
+        _len: u64,
         _module: *const (),
         _shared_state: *mut (),
     ) -> *mut () {
@@ -2571,7 +2571,7 @@ fn jit_native_call_args_ctx_fastpath_returns_value() {
     }
     unsafe extern "C" fn stub_alloc_array(
         _type_id: u32,
-        _capacity: usize,
+        _len: u64,
         _module: *const (),
         _shared_state: *mut (),
     ) -> *mut () {
@@ -2815,7 +2815,7 @@ fn jit_native_call_args_ctx_fastpath_sentinel_suspends() {
     }
     unsafe extern "C" fn stub_alloc_array(
         _type_id: u32,
-        _capacity: usize,
+        _len: u64,
         _module: *const (),
         _shared_state: *mut (),
     ) -> *mut () {
@@ -3066,7 +3066,7 @@ fn jit_check_preemption_exits_with_suspend_kind_when_helper_requests_preempt() {
     }
     unsafe extern "C" fn stub_alloc_array(
         _type_id: u32,
-        _capacity: usize,
+        _len: u64,
         _module: *const (),
         _shared_state: *mut (),
     ) -> *mut () {
@@ -6362,4 +6362,164 @@ fn dyn_get_keyed_string_view_matches_interpreter() {
             }
         }
     }
+}
+
+
+/// D4.8's first slice, differentially: `NewArray` + `ArrayLen` on the **same
+/// bytecode** through both engines.
+///
+/// These two are promoted together for a structural reason, not a convenient one.
+/// `NewArray` is what bootstraps array construction: until a natively-compiled
+/// function can *make* an array, no other array opcode can be differentially
+/// tested at all, because the test program could not contain one. `ArrayLen` is
+/// the simplest consumer that needs no index coercion.
+///
+/// Both programs complete natively — `exit.kind == Completed` is asserted, so a
+/// silent fallback to the interpreter fails the test rather than passing with the
+/// right answer. That distinction is the whole reason `JitExitKind` is inspected
+/// everywhere on this branch.
+///
+/// Lengths compared as `i32`, never as raw bits: the array is a heap pointer and
+/// each engine allocates its own, so pointer identity is meaningless between them.
+#[test]
+fn new_array_and_array_len_match_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // (label, length operand)
+    let cases: Vec<(&str, i32)> = vec![("empty", 0), ("three", 3), ("one", 1)];
+
+    for (label, len) in cases {
+        // `[len] -> [arr] -> len`, i.e. NewArray then ArrayLen.
+        let mut code: Vec<u8> = Vec::new();
+        emit_i32(&mut code, len);
+        emit(&mut code, Opcode::NewArray);
+        // `NewArray`'s operand is a u32 element-type id. 6 is `AnyValue`, i.e. a
+        // dynamic array that accepts any element -- the unconstrained case, so this
+        // differential is about the array machinery and not about element checking.
+        code.extend_from_slice(&6u32.to_le_bytes());
+        emit(&mut code, Opcode::ArrayLen);
+        emit(&mut code, Opcode::Return);
+
+        let mut raw = make_module(code, 0, 0);
+        raw.functions[0].name = "main".to_string();
+        let module = finalize_module(raw);
+
+        // Engine 1: the interpreter, on the identical module.
+        let mut vm = Vm::with_worker_count(1);
+        let interpreted = vm.execute(module.as_ref()).expect("interpreter NewArray/ArrayLen");
+
+        // Engine 2: the JIT, on the same module.
+        let (safepoint, shared) = new_shared_vm_state();
+        let task = std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(
+            0,
+            module.clone(),
+            None,
+        ));
+        let (_resolved_natives, bridge) =
+            build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+        let mut ctx =
+            raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+        let mut locals: Vec<u64> = Vec::new();
+        let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+        let (raw_bits, exit) = jit_compile_and_call_with_locals_exit_and_ctx(
+            &jit_func,
+            &mut locals,
+            (&mut ctx as *mut _),
+        );
+
+        assert_eq!(
+            exit.kind,
+            JitExitKind::Completed as u32,
+            "[{label}] NewArray/ArrayLen must complete natively, not fall back"
+        );
+        // Compare the DECODED value, not the raw register. Both engines return a
+        // boxed `Value`, and `Value::i32(0).raw()` is `0xFFF9000000000000`, not 0 —
+        // an earlier version of this assertion compared raw bits to `len as u64`
+        // and failed on correct code with "left: 18444773748872577024".
+        let native = unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) };
+        assert_eq!(
+            native.as_i32(),
+            Some(len),
+            "[{label}] the JIT returned the wrong length"
+        );
+        assert_eq!(
+            native.raw(),
+            interpreted.raw(),
+            "[{label}] engines disagree on the same bytecode"
+        );
+        assert_eq!(
+            interpreted.as_i32(),
+            Some(len),
+            "[{label}] the interpreter baseline disagrees, so the case itself is wrong"
+        );
+    }
+}
+
+/// The length coercion, differentially. `NewArray`'s length operand goes through
+/// `array_index_operand`, whose behaviour is deliberately surprising, and this is
+/// the engine-level counterpart to `array_index_operand_coercion_is_pinned`.
+///
+/// Two cases, and they are the two that disagree with intuition:
+///
+///   * a **non-numeric** length is 0, so a null length builds an empty array
+///   * a **negative** length wraps to `usize::MAX`, which both engines then try to
+///     reserve. That case is deliberately NOT asserted here: it aborts the process
+///     in *both* engines, which is pre-existing interpreter behaviour rather than
+///     something this milestone should either copy or quietly change. It is
+///     recorded in the spec instead, because "matching a crash" is not a contract
+///     worth pinning in a test.
+#[test]
+fn new_array_length_coercion_matches_interpreter() {
+    use raya_engine::jit::runtime::trampoline::JitExitKind;
+    use raya_engine::vm::interpreter::Vm;
+
+    // A null length must mean 0 -- not a fallback, and not an error.
+    let mut code: Vec<u8> = Vec::new();
+    code.push(Opcode::ConstNull as u8);
+    emit(&mut code, Opcode::NewArray);
+    code.extend_from_slice(&6u32.to_le_bytes());
+    emit(&mut code, Opcode::ArrayLen);
+    emit(&mut code, Opcode::Return);
+
+    let mut raw = make_module(code, 0, 0);
+    raw.functions[0].name = "main".to_string();
+    let module = finalize_module(raw);
+
+    let mut vm = Vm::with_worker_count(1);
+    let interpreted = vm.execute(module.as_ref()).expect("interpreter null length");
+
+    let (safepoint, shared) = new_shared_vm_state();
+    let task =
+        std::sync::Arc::new(raya_engine::vm::scheduler::Task::new(0, module.clone(), None));
+    let (_resolved_natives, bridge) = build_bridge_and_ctx(&safepoint, &shared, &task, &module);
+    let mut ctx =
+        raya_engine::jit::runtime::helpers::build_runtime_context(&bridge, module.as_ref());
+    let mut locals: Vec<u64> = Vec::new();
+    let jit_func = lift_function(&module.functions[0], &module, 0).expect("Lift failed");
+    let (raw_bits, exit) =
+        jit_compile_and_call_with_locals_exit_and_ctx(&jit_func, &mut locals, (&mut ctx as *mut _));
+
+    assert_eq!(
+        exit.kind,
+        JitExitKind::Completed as u32,
+        "a null length must be handled natively as 0"
+    );
+    // Decoded, not raw: see the note in the test above. `Value::i32(0).raw()` is
+    // `0xFFF9000000000000`.
+    assert_eq!(
+        unsafe { raya_engine::vm::value::Value::from_raw(raw_bits) }.as_i32(),
+        Some(0),
+        "a null length must build an empty array"
+    );
+    assert_eq!(
+        raw_bits,
+        interpreted.raw(),
+        "engines disagree about a null length"
+    );
+    assert_eq!(
+        interpreted.as_i32(),
+        Some(0),
+        "the interpreter baseline disagrees about a null length"
+    );
 }

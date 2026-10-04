@@ -219,7 +219,17 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // value. Engine-level Arr evidence is still gated on the array family
         // (all Rejected under D4.2), so the differential covers Str only and says
         // so in its own doc comment.
-        | Opcode::DynGetKeyed => JitSupport::HelperExact,
+        | Opcode::DynGetKeyed
+        // D4.8, first slice. `NewArray` + `ArrayLen` only, deliberately: `NewArray`
+        // bootstraps array construction, so nothing else in the family can be
+        // differentially tested until it exists. `ArrayLen` comes with it as the
+        // simplest consumer that needs no index coercion.
+        //
+        // `ArrayLen`'s sentinel is `i32::MIN`, which no valid length can equal, so
+        // its fallback comparison cannot swallow a real answer. The other six stay
+        // `Rejected` and `array_opcodes_are_rejected_until_exact` is updated below.
+        | Opcode::NewArray
+        | Opcode::ArrayLen => JitSupport::HelperExact,
         Opcode::StoreFieldExact => JitSupport::InterpreterBoundary,
         Opcode::LoadFieldExact
         | Opcode::OptionalFieldExact
@@ -648,14 +658,17 @@ mod tests {
 
     #[test]
     fn array_opcodes_are_rejected_until_exact() {
-        // Fail-closed posture (D4.2): no array opcode is JIT-selectable until
-        // its native/helper path is proven exact and covered by JIT-active
-        // differential tests. InitArray in particular stays rejected.
+        // Fail-closed posture (D4.2): an array opcode is JIT-selectable only once its
+        // path is proven exact AND covered by JIT-active differential tests. D4.8's
+        // first slice promotes `NewArray` and `ArrayLen` on that evidence; the other
+        // six stay rejected, and `InitArray` in particular stays rejected.
+        //
+        // The promoted pair is asserted explicitly below rather than being quietly
+        // dropped from this list: a guard that silently shrinks is how `BindMethod`
+        // and `EndTry` were excluded by accident.
         for op in [
-            Opcode::NewArray,
             Opcode::LoadElem,
             Opcode::StoreElem,
-            Opcode::ArrayLen,
             Opcode::ArrayPush,
             Opcode::ArrayPop,
             Opcode::ArrayLiteral,
@@ -664,6 +677,12 @@ mod tests {
             assert_eq!(jit_support(op), JitSupport::Rejected, "{op:?}");
             assert!(!opcode_supported_for_jit(op), "{op:?} must not be selectable");
         }
+
+        // The pair D4.8 promoted, pinned with the reason it is safe to pin.
+        assert_eq!(jit_support(Opcode::NewArray), JitSupport::HelperExact);
+        assert!(opcode_supported_for_jit(Opcode::NewArray));
+        assert_eq!(jit_support(Opcode::ArrayLen), JitSupport::HelperExact);
+        assert!(opcode_supported_for_jit(Opcode::ArrayLen));
     }
 
     #[test]

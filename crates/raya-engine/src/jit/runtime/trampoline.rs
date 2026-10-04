@@ -155,6 +155,10 @@ pub const HELPER_VALUE_TO_STRING_OFFSET: i32 =
 pub const HELPER_CONST_STRING_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, const_string) as i32;
 /// Byte offset of the array-load helper in [`RuntimeContext`].
+/// Byte offset of the array-allocation helper in [`RuntimeContext`].
+pub const HELPER_ALLOC_ARRAY_OFFSET: i32 =
+    RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, alloc_array) as i32;
+
 pub const HELPER_ARRAY_LOAD_OFFSET: i32 =
     RUNTIME_CONTEXT_HELPERS_OFFSET + std::mem::offset_of!(RuntimeHelperTable, array_load) as i32;
 /// Byte offset of the array-store helper in [`RuntimeContext`].
@@ -251,7 +255,9 @@ pub struct RuntimeHelperTable {
     /// Allocate a new nominal object: (local_nominal_type_index, module_ptr, shared_state) -> obj_ptr
     pub alloc_object: unsafe extern "C" fn(u32, *const (), *mut ()) -> *mut (),
     /// Allocate a new array: (element_type_index, capacity, module_ptr, shared_state) -> array_ptr
-    pub alloc_array: unsafe extern "C" fn(u32, usize, *const (), *mut ()) -> *mut (),
+    /// `len` is a boxed `Value` for the same reason as `array_load`: the
+    /// interpreter coerces the length through `array_index_operand`.
+    pub alloc_array: unsafe extern "C" fn(u32, u64, *const (), *mut ()) -> *mut (),
     /// Allocate a new string: (data_ptr, len, shared_state) -> string_ptr
     pub alloc_string: unsafe extern "C" fn(*const u8, usize, *mut ()) -> *mut (),
     /// GC safepoint poll: (shared_state)

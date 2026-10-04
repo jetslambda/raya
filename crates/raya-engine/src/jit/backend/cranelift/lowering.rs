@@ -62,6 +62,8 @@ pub struct LoweringContext<'a> {
     sig_bind_method: Option<ir::SigRef>,
     sig_await_task: Option<ir::SigRef>,
     sig_dyn_get_keyed: Option<ir::SigRef>,
+    sig_array_len: Option<ir::SigRef>,
+    sig_alloc_array: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.object_get_shape_field
     sig_object_get_shape_field: Option<ir::SigRef>,
     /// Imported signature for RuntimeHelperTable.object_set_shape_field
@@ -204,6 +206,8 @@ impl<'a> LoweringContext<'a> {
             sig_bind_method: None,
             sig_await_task: None,
             sig_dyn_get_keyed: None,
+            sig_array_len: None,
+            sig_alloc_array: None,
             sig_object_get_shape_field: None,
             sig_object_set_shape_field: None,
             sig_object_implements_shape: None,
@@ -984,6 +988,148 @@ impl<'a> LoweringContext<'a> {
                     )));
                 }
                 self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+            }
+            JitInstr::NewArray {
+                dest,
+                type_index,
+                len,
+                stack,
+                bytecode_offset,
+            } => {
+                // Null ctx to null, else call the helper. The helper signals failure
+                // by returning a NULL pointer (not a sentinel), matching
+                // `helper_alloc_object`/`NewObject`, so the test is `== 0`.
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "new array exit stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let null_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let done = builder.create_block();
+                builder.append_block_param(done, types::I64);
+                builder
+                    .ins()
+                    .brif(is_ctx_null, null_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+                builder.seal_block(null_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let module_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::RUNTIME_CONTEXT_MODULE_OFFSET,
+                );
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_ALLOC_ARRAY_OFFSET,
+                );
+                let sig = self.alloc_array_sig(builder);
+                let type_index_val = builder.ins().iconst(types::I64, *type_index as i64);
+                // Boxed: the length is an operand `Value` and the interpreter coerces
+                // it with `array_index_operand`, so the helper does the coercion.
+                let len_val = self.boxed_reg_value(builder, *len);
+                let call = builder.ins().call_indirect(
+                    sig,
+                    fn_ptr,
+                    &[type_index_val, len_val, module_ptr, shared_state],
+                );
+                let result = builder.inst_results(call)[0];
+
+                let is_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, result, 0);
+                builder
+                    .ins()
+                    .brif(is_null, fallback_block, &[], done, &[ir::BlockArg::Value(result)]);
+                builder.seal_block(fallback_block);
+
+                builder.switch_to_block(fallback_block);
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.switch_to_block(null_block);
+                let null = abi::emit_null(builder);
+                builder.ins().jump(done, &[ir::BlockArg::Value(null)]);
+
+                builder.seal_block(done);
+                builder.switch_to_block(done);
+                let merged = builder.block_params(done)[0];
+                self.def_reg(builder, *dest, merged);
+            }
+            JitInstr::ArrayLen {
+                dest,
+                array,
+                stack,
+                bytecode_offset,
+            } => {
+                if stack.len() > JIT_EXIT_MAX_NATIVE_ARGS {
+                    return Err(LowerError::UnsupportedInstruction(format!(
+                        "array len exit stack has {} values; maximum is {}",
+                        stack.len(),
+                        JIT_EXIT_MAX_NATIVE_ARGS
+                    )));
+                }
+                let ctx = self.params.ctx_ptr;
+                let is_ctx_null = builder.ins().icmp_imm(condcodes::IntCC::Equal, ctx, 0);
+                let call_block = builder.create_block();
+                let null_block = builder.create_block();
+                let fallback_block = builder.create_block();
+                let done = builder.create_block();
+                builder.append_block_param(done, types::I32);
+                builder
+                    .ins()
+                    .brif(is_ctx_null, null_block, &[], call_block, &[]);
+                builder.seal_block(call_block);
+                builder.seal_block(null_block);
+
+                builder.switch_to_block(call_block);
+                let shared_state = builder.ins().load(types::I64, MemFlags::trusted(), ctx, 0);
+                let fn_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    ctx,
+                    crate::jit::runtime::trampoline::HELPER_ARRAY_LEN_OFFSET,
+                );
+                let sig = self.array_len_sig(builder);
+                let array_val = self.boxed_reg_value(builder, *array);
+                let call =
+                    builder
+                        .ins()
+                        .call_indirect(sig, fn_ptr, &[array_val, shared_state]);
+                let result = builder.inst_results(call)[0];
+
+                // `JIT_ARRAY_LEN_FALLBACK_SENTINEL` is `i32::MIN`, which no valid
+                // length can equal, so this comparison cannot swallow a real answer.
+                let sentinel = builder
+                    .ins()
+                    .iconst(types::I32, i64::from(crate::jit::runtime::helpers::JIT_ARRAY_LEN_FALLBACK_SENTINEL) as i32 as i64);
+                let is_fallback =
+                    builder
+                        .ins()
+                        .icmp(condcodes::IntCC::Equal, result, sentinel);
+                builder
+                    .ins()
+                    .brif(is_fallback, fallback_block, &[], done, &[ir::BlockArg::Value(result)]);
+                builder.seal_block(fallback_block);
+
+                builder.switch_to_block(fallback_block);
+                self.emit_interpreter_boundary_exit(builder, stack, *bytecode_offset);
+
+                builder.switch_to_block(null_block);
+                let null = builder.ins().iconst(types::I32, 0);
+                builder.ins().jump(done, &[ir::BlockArg::Value(null)]);
+
+                builder.seal_block(done);
+                builder.switch_to_block(done);
+                let merged = builder.block_params(done)[0];
+                self.def_reg(builder, *dest, merged);
             }
             JitInstr::DynGetKeyed {
                 dest,
@@ -3164,6 +3310,34 @@ impl<'a> LoweringContext<'a> {
             .call_indirect(sig, fn_ptr, &[index, module_ptr, shared_state]);
         let string_ptr = builder.inst_results(call)[0];
         self.def_reg(builder, dest, string_ptr);
+    }
+
+    fn alloc_array_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_alloc_array {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I64)); // type_index
+        sig.params.push(AbiParam::new(types::I64)); // len (boxed Value)
+        sig.params.push(AbiParam::new(types::I64)); // module ptr
+        sig.params.push(AbiParam::new(types::I64)); // shared_state ptr
+        sig.returns.push(AbiParam::new(types::I64)); // array ptr, or null
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_alloc_array = Some(sig_ref);
+        sig_ref
+    }
+
+    fn array_len_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
+        if let Some(sig) = self.sig_array_len {
+            return sig;
+        }
+        let mut sig = ir::Signature::new(builder.func.signature.call_conv);
+        sig.params.push(AbiParam::new(types::I64)); // array (boxed Value)
+        sig.params.push(AbiParam::new(types::I64)); // shared_state ptr
+        sig.returns.push(AbiParam::new(types::I32)); // length or i32::MIN
+        let sig_ref = builder.func.import_signature(sig);
+        self.sig_array_len = Some(sig_ref);
+        sig_ref
     }
 
     fn dyn_get_keyed_sig(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::SigRef {
