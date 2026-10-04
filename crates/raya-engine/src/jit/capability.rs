@@ -702,15 +702,19 @@ mod tests {
     #[test]
     fn array_opcodes_are_rejected_until_exact() {
         // Fail-closed posture (D4.2): an array opcode is JIT-selectable only once its
-        // path is proven exact AND covered by JIT-active differential tests. D4.8's
-        // first slice promotes `NewArray` and `ArrayLen` on that evidence; the other
-        // six stay rejected, and `InitArray` in particular stays rejected.
+        // path is proven exact AND covered by JIT-active differential tests.
         //
-        // The promoted pair is asserted explicitly below rather than being quietly
-        // dropped from this list: a guard that silently shrinks is how `BindMethod`
-        // and `EndTry` were excluded by accident.
-        // What D4.8 has promoted so far, pinned explicitly with the reason each is
-        // safe to pin rather than quietly dropped from the list above.
+        // ALL EIGHT now meet that bar, so this guard asserts them promoted rather than
+        // rejected. It previously listed them as rejected and shrank slice by slice as
+        // each was promoted -- and its comment went stale twice over while the
+        // assertions underneath stayed correct, which is precisely the
+        // "excluded by accident, read as live" shape this branch was created to fix.
+        // A cross-model review of PR #1 caught the stale comment (documentation only,
+        // the test body was correct).
+        //
+        // Each is listed explicitly with the reason it is safe to pin, so promoting a
+        // ninth means adding it HERE with its evidence rather than deleting it from a
+        // list and trusting the catch-all.
         for op in [
             Opcode::NewArray,
             Opcode::ArrayLen,
