@@ -1004,11 +1004,24 @@ impl LiftedFunction {
                 helper: HelperCall::Typeof,
                 args: vec![operand.0],
             }),
-            JitInstr::ObjectLiteral { dest, type_index, fields } => {
+            JitInstr::ObjectLiteral {
+                dest,
+                type_index,
+                field_count,
+                fields,
+            } => {
                 out.push(SmInstr::CallHelper {
                     dest: Some(dest.0),
                     helper: HelperCall::AllocStructuralObject,
-                    args: vec![*type_index, fields.len() as u32],
+                    // Was `fields.len()`, which is ALWAYS 0 for this variant -- so
+                    // this backend was asking for a zero-field object. It now uses
+                    // the slot count the lifter actually carries.
+                    //
+                    // NOTE: the `fields` loop below is therefore DEAD in this backend,
+                    // because the values arrive as separate `InitObjectField`
+                    // instructions. This AOT path expects them inline, so it does not
+                    // mirror the compiler's emission -- recorded, not fixed here.
+                    args: vec![*type_index, *field_count as u32],
                 });
                 for (field_index, value) in fields.iter().enumerate() {
                     out.push(SmInstr::CallHelper {

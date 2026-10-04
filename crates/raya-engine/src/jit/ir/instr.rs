@@ -809,6 +809,14 @@ pub enum JitInstr {
     ObjectLiteral {
         dest: Reg,
         type_index: u32,
+        /// Number of slots to allocate. REQUIRED, because
+        /// `Object::new_structural(layout_id, field_count)` sizes its `fields` vector
+        /// from it, and the `InitObjectField` writes that follow are bounds-checked
+        /// against it. Allocating zero slots would make every one of those writes fail
+        /// and the whole literal fall back.
+        field_count: u16,
+        /// Always EMPTY. The field values arrive as the separate `InitObjectField`
+        /// instructions that follow, one per slot -- not as part of this instruction.
         fields: Vec<Reg>,
     },
     TupleLiteral {

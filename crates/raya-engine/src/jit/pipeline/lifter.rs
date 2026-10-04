@@ -1799,13 +1799,16 @@ fn lift_instruction(
         Opcode::ObjectLiteral => {
             if let Operands::Call {
                 func_index: type_index,
-                arg_count: _,
+                // The decoder reuses `Call` to carry ObjectLiteral's `u32 type_index`
+                // + `u16 field_count` pair, so the slot count arrives as `arg_count`.
+                arg_count,
             } = instr.operands
             {
                 let dest = func.alloc_reg(JitType::Ptr);
                 func.block_mut(block).instrs.push(JitInstr::ObjectLiteral {
                     dest,
                     type_index,
+                    field_count: arg_count,
                     fields: Vec::new(),
                 });
                 stack.push(dest);

@@ -614,9 +614,10 @@ impl fmt::Display for JitInstr {
             JitInstr::ObjectLiteral {
                 dest,
                 type_index,
+                field_count,
                 fields,
             } => {
-                write!(f, "{} = object.literal @{} {{", dest, type_index)?;
+                write!(f, "{} = object.literal @{}/{} {{", dest, type_index, field_count)?;
                 format_args_list(f, fields)?;
                 write!(f, "}}")
             }
