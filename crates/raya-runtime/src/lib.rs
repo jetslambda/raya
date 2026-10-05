@@ -199,12 +199,16 @@ impl Default for Runtime {
 
 /// Default [`TypeMode`] implied by an entry file's extension (task C9).
 ///
-/// `.ts`/`.tsx`/`.mts`/`.cts` entries run with TypeScript semantics;
-/// anything else defers to the builtin-mode default. Explicit
+/// `.ts`/`.tsx`/`.mts`/`.cts` entries run with TypeScript semantics and
+/// `.js`/`.jsx`/`.mjs`/`.cjs` entries with JavaScript semantics, so a plain
+/// JS file is not held to TypeScript's strict rules (implicit `any` and
+/// unknown-narrowing both fire under `TypeMode::Ts` and reject idiomatic JS).
+/// Anything else defers to the builtin-mode default. Explicit
 /// `RuntimeOptions::type_mode` always wins over this.
 pub(crate) fn default_type_mode_for_path(path: &Path) -> Option<TypeMode> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("ts") | Some("tsx") | Some("mts") | Some("cts") => Some(TypeMode::Ts),
+        Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => Some(TypeMode::Js),
         _ => None,
     }
 }
@@ -556,7 +560,8 @@ impl Runtime {
         let module = match path.extension().and_then(|e| e.to_str()) {
             Some("ryb") => self.load_bytecode(&path)?,
             Some("raya") => self.compile_file(&path)?,
-            Some("ts") | Some("tsx") | Some("mts") | Some("cts") => {
+            Some("ts") | Some("tsx") | Some("mts") | Some("cts") | Some("js") | Some("jsx")
+        | Some("mjs") | Some("cjs") => {
                 self.compile_program_file(&path)?.entry
             }
             #[cfg(feature = "aot")]
@@ -2586,5 +2591,39 @@ mod structural_slot_tests {
         let actual = "obj(prop:a:rw:req:number,prop:b:rw:req:number,prop:c:rw:req:number)";
         let slot_map = Runtime::structural_slot_map(expected, actual).expect("slot map expected");
         assert_eq!(slot_map, vec![Some(0), Some(1), Some(2), None, None]);
+    }
+}
+
+#[cfg(test)]
+mod al_y109_js_entry_tests {
+    use super::default_type_mode_for_path;
+    use crate::compile::TypeMode;
+    use std::path::Path;
+
+    fn mode(name: &str) -> Option<TypeMode> {
+        default_type_mode_for_path(Path::new(name))
+    }
+
+    #[test]
+    fn ts_extensions_use_typescript_semantics() {
+        for f in ["a.ts", "a.tsx", "a.mts", "a.cts"] {
+            assert_eq!(mode(f), Some(TypeMode::Ts), "{f}");
+        }
+    }
+
+    #[test]
+    fn js_extensions_use_javascript_semantics() {
+        // Not TypeMode::Ts: under Ts semantics, implicit `any` and
+        // unknown-narrowing fire and reject idiomatic JavaScript.
+        for f in ["a.js", "a.jsx", "a.mjs", "a.cjs"] {
+            assert_eq!(mode(f), Some(TypeMode::Js), "{f}");
+        }
+    }
+
+    #[test]
+    fn unknown_extensions_defer_to_builtin_mode_default() {
+        assert_eq!(mode("a.raya"), None);
+        assert_eq!(mode("a.ryb"), None);
+        assert_eq!(mode("noext"), None);
     }
 }
