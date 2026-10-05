@@ -460,6 +460,57 @@ impl<'a> Interpreter<'a> {
     /// See /workspace/specs/2026-10-03-raya-d4-fixed-layout-objects.md and the
     /// characterization test
     /// `field_access_through_a_proxy_currently_raises_and_that_is_a_defect`.
+    /// ALY-54: a TYPED heap-pointer check, in the same shape as
+    /// `ensure_object_receiver` below.
+    ///
+    /// `is_ptr()` alone asks only "is this a heap pointer?", not "is this the right
+    /// KIND of heap object?". The closure and RefCell handlers used it alone and then
+    /// reinterpreted the result with `as_ptr::<T>()`, so any heap value handed to
+    /// `LoadRefCell` / `StoreRefCell` / `SetClosureCapture` was silently reinterpretted
+    /// as a `RefCell` / `Closure`. That is type confusion, and its only real guard was the
+    /// accident that those layouts happen to line up.
+    ///
+    /// The JIT helpers must mirror this EXACTLY in the same change or the two engines
+    /// diverge — see the note above `helper_jit_set_closure_capture`.
+    pub(in crate::vm::interpreter) fn ensure_typed_ptr(
+        value: Value,
+        expected_type_id: std::any::TypeId,
+        expected_name: &'static str,
+        context: &'static str,
+    ) -> Result<Value, VmError> {
+        if !value.is_ptr() {
+            return Err(VmError::TypeError(format!(
+                "Expected {} for {}",
+                expected_name, context
+            )));
+        }
+        let header = unsafe {
+            &*header_ptr_from_value_ptr(value.as_ptr::<u8>().unwrap().as_ptr())
+        };
+        if header.type_id() == expected_type_id {
+            return Ok(value);
+        }
+        let kind = if header.type_id() == std::any::TypeId::of::<Object>() {
+            "Object"
+        } else if header.type_id() == std::any::TypeId::of::<Array>() {
+            "Array"
+        } else if header.type_id() == std::any::TypeId::of::<RayaString>() {
+            "RayaString"
+        } else if header.type_id() == std::any::TypeId::of::<Closure>() {
+            "Closure"
+        } else if header.type_id() == std::any::TypeId::of::<crate::vm::object::RefCell>() {
+            "RefCell"
+        } else if header.type_id() == std::any::TypeId::of::<BoundMethod>() {
+            "BoundMethod"
+        } else {
+            "UnknownGcType"
+        };
+        Err(VmError::TypeError(format!(
+            "Expected {} for {}, got {}",
+            expected_name, context, kind
+        )))
+    }
+
     pub(in crate::vm::interpreter) fn ensure_object_receiver(
         value: Value,
         context: &'static str,

@@ -2388,10 +2388,17 @@ unsafe extern "C" fn helper_set_closure_capture(
     _shared_state: *mut (),
 ) -> i8 {
     let closure_value = Value::from_raw(closure_raw);
-    // Deliberately the interpreter's weak `is_ptr()` check, not a TypeId
-    // comparison. See ALY-54: strengthening it here would diverge from the
-    // interpreter rather than fix anything.
+    // ALY-54: was a deliberately weak `is_ptr()` check, kept in step with the
+    // interpreter's. Now both sides check the GC-header TypeId, in this same change.
     if !closure_value.is_ptr() {
+        return JIT_STORE_FALLBACK;
+    }
+    // ALY-54: same typed check the interpreter uses — one implementation,
+    // so the two engines cannot drift apart.
+    if !crate::vm::interpreter::opcodes::closures::typed_ptr_matches(
+        closure_value,
+        std::any::TypeId::of::<crate::vm::object::Closure>(),
+    ) {
         return JIT_STORE_FALLBACK;
     }
     let Some(ptr) = closure_value.as_ptr::<crate::vm::object::Closure>() else {
@@ -2492,7 +2499,12 @@ unsafe extern "C" fn helper_new_refcell(initial_raw: u64, shared_state: *mut ())
 /// rather than raising it: a leaf helper cannot raise a catchable error.
 unsafe extern "C" fn helper_load_refcell(refcell_raw: u64, _shared_state: *mut ()) -> u64 {
     let refcell_value = Value::from_raw(refcell_raw);
-    if !refcell_value.is_ptr() {
+    // ALY-54: same typed check the interpreter uses — one implementation,
+    // so the two engines cannot drift apart.
+    if !crate::vm::interpreter::opcodes::closures::typed_ptr_matches(
+        refcell_value,
+        std::any::TypeId::of::<crate::vm::object::RefCell>(),
+    ) {
         return JIT_INTERPRETER_FALLBACK_SENTINEL;
     }
     let ptr = refcell_value.as_ptr::<crate::vm::object::RefCell>();
@@ -2515,7 +2527,12 @@ unsafe extern "C" fn helper_store_refcell(
     _shared_state: *mut (),
 ) -> i8 {
     let refcell_value = Value::from_raw(refcell_raw);
-    if !refcell_value.is_ptr() {
+    // ALY-54: same typed check the interpreter uses — one implementation,
+    // so the two engines cannot drift apart.
+    if !crate::vm::interpreter::opcodes::closures::typed_ptr_matches(
+        refcell_value,
+        std::any::TypeId::of::<crate::vm::object::RefCell>(),
+    ) {
         return JIT_STORE_FALLBACK;
     }
     let value = Value::from_raw(value_raw);
