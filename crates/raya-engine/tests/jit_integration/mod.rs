@@ -7974,3 +7974,52 @@ fn aly54_refcell_rejects_non_refcell_receiver() {
         "ALY-54: the TypeError must name both the expected kind and the ACTUAL kind, got: {msg}"
     );
 }
+
+
+/// ALY-54, second opcode. `StoreRefCell` had the same weak check as `LoadRefCell`.
+#[test]
+fn aly54_store_refcell_rejects_non_refcell_receiver() {
+    let mut code = Vec::new();
+    emit_i32(&mut code, 0);                                  // len = 0
+    emit(&mut code, Opcode::NewArray);
+    code.extend_from_slice(&0u32.to_le_bytes());             // type_index
+    emit_i32(&mut code, 99);                                  // the value to store
+    emit(&mut code, Opcode::StoreRefCell);
+    emit(&mut code, Opcode::Return);
+
+    let module = make_vm_module(code, 0, 0);
+    let mut vm = raya_engine::Vm::new();
+    let err = vm
+        .execute(&module)
+        .expect_err("ALY-54: StoreRefCell must reject a non-RefCell heap receiver");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("RefCell") && msg.contains("Array"),
+        "ALY-54: TypeError must name expected and ACTUAL kind, got: {msg}"
+    );
+}
+
+/// ALY-54, third opcode. `SetClosureCapture` had the same weak check, with the same
+/// consequence: a non-Closure heap value reinterpreted as a `Closure`.
+#[test]
+fn aly54_set_closure_capture_rejects_non_closure_receiver() {
+    let mut code = Vec::new();
+    emit_i32(&mut code, 0);                                  // len = 0
+    emit(&mut code, Opcode::NewArray);
+    code.extend_from_slice(&0u32.to_le_bytes());             // type_index
+    emit_i32(&mut code, 99);                                  // the captured value
+    emit(&mut code, Opcode::SetClosureCapture);
+    code.extend_from_slice(&0u16.to_le_bytes());             // capture_index
+    emit(&mut code, Opcode::Return);
+
+    let module = make_vm_module(code, 0, 0);
+    let mut vm = raya_engine::Vm::new();
+    let err = vm
+        .execute(&module)
+        .expect_err("ALY-54: SetClosureCapture must reject a non-Closure heap receiver");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Closure") && msg.contains("Array"),
+        "ALY-54: TypeError must name expected and ACTUAL kind, got: {msg}"
+    );
+}
