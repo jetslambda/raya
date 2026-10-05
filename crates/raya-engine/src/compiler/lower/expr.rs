@@ -6333,8 +6333,8 @@ impl<'a> Lowerer<'a> {
                 // never reaches `lower_return`. Route it through the same helper so
                 // `() => 2` in a `number`-typed context emits `f64` instead of `i32`
                 // and the signature and the operand agree.
-                let result = self.emit_return_value(Some(expr));
-                self.set_terminator(crate::ir::Terminator::Return(result));
+                let result = self.lower_expr(expr);
+                self.set_terminator(crate::ir::Terminator::Return(Some(result)));
             }
             ast::ArrowBody::Block(block) => {
                 for stmt in &block.statements {

@@ -2662,38 +2662,8 @@ impl<'a> Lowerer<'a> {
     /// Used by BOTH return paths: `ReturnStatement` (block bodies) and an
     /// expression-bodied arrow, which has no `ReturnStatement` at all and would
     /// otherwise bypass this entirely.
-    pub(crate) fn emit_return_value(
-        &mut self,
-        value: Option<&ast::Expression>,
-    ) -> Option<Register> {
-        let literal = match value {
-            Some(ast::Expression::IntLiteral(lit)) => Some(lit),
-            _ => None,
-        };
-        let returns_number = self.current_function.as_ref().is_some_and(|f| {
-            matches!(
-                self.type_ctx.get(f.return_ty),
-                Some(crate::parser::types::Type::Primitive(
-                    crate::parser::types::PrimitiveType::Number
-                ))
-            )
-        });
-        match (literal, returns_number) {
-            (Some(lit), true) => {
-                let ty = TypeId::new(crate::parser::types::context::TypeContext::NUMBER_TYPE_ID);
-                let dest = self.alloc_register(ty);
-                self.emit(IrInstr::Assign {
-                    dest: dest.clone(),
-                    value: IrValue::Constant(IrConstant::F64(lit.value as f64)),
-                });
-                Some(dest)
-            }
-            _ => value.map(|e| self.lower_expr(e)),
-        }
-    }
-
     fn lower_return(&mut self, ret: &ast::ReturnStatement) {
-        let value = self.emit_return_value(ret.value.as_ref());
+        let value = ret.value.as_ref().map(|e| self.lower_expr(e));
 
         // Inline finally blocks from innermost to outermost.
         // Drain the stack to prevent recursive re-inlining: if a finally block
