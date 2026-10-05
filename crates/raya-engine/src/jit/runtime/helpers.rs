@@ -2499,6 +2499,13 @@ unsafe extern "C" fn helper_new_refcell(initial_raw: u64, shared_state: *mut ())
 /// rather than raising it: a leaf helper cannot raise a catchable error.
 unsafe extern "C" fn helper_load_refcell(refcell_raw: u64, _shared_state: *mut ()) -> u64 {
     let refcell_value = Value::from_raw(refcell_raw);
+    // Keep the original non-pointer guard explicitly. ALY-54 replaced it with the
+    // typed check; typed_ptr_matches does test is_ptr() internally, so behaviour is
+    // preserved, but a safety guard that lives only in another module is one refactor
+    // away from being dropped by accident.
+    if !refcell_value.is_ptr() {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
     // ALY-54: same typed check the interpreter uses — one implementation,
     // so the two engines cannot drift apart.
     if !crate::vm::interpreter::opcodes::closures::typed_ptr_matches(
