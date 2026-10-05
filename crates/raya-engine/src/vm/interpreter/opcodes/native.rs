@@ -26,6 +26,37 @@ use std::sync::Arc;
 use super::objects::NODE_DESCRIPTOR_METADATA_KEY;
 const IMPORTED_CLASS_TYPE_HANDLE_KEY: &str = "__raya_type_handle__";
 
+/// Render one console argument. Strings print bare (no quotes); numbers and
+/// booleans print as their JS-equivalent source text; pointers fall back to the
+/// VM's own Display impl.
+fn format_console_value(_interp: &Interpreter<'_>, v: Value) -> String {
+    if v.is_ptr() {
+        if let Some(s) = (unsafe { v.as_ptr::<RayaString>() }) {
+            return unsafe { &*s.as_ptr() }.data.clone();
+        }
+        return format!("{:?}", v);
+    }
+    if v.is_null() {
+        return "null".to_string();
+    }
+    if let Some(b) = v.as_bool() {
+        return b.to_string();
+    }
+    if let Some(i) = v.as_i32() {
+        return i.to_string();
+    }
+    if let Some(f) = v.as_f64() {
+        return f.to_string();
+    }
+    if let Some(u) = v.as_u32() {
+        return u.to_string();
+    }
+    if let Some(f) = v.as_f32() {
+        return f.to_string();
+    }
+    format!("{:?}", v)
+}
+
 fn value_as_string(arg: Value) -> Result<String, VmError> {
     if !arg.is_ptr() {
         return Err(VmError::TypeError("Expected string".to_string()));
@@ -799,6 +830,31 @@ impl<'a> Interpreter<'a> {
 
                 // Execute native call - handle channel operations specially for suspension
                 match native_id {
+                    id if id == crate::compiler::native_id::CONSOLE_LOG
+                        || id == crate::compiler::native_id::CONSOLE_INFO
+                        || id == crate::compiler::native_id::CONSOLE_WARN
+                        || id == crate::compiler::native_id::CONSOLE_ERROR =>
+                    {
+                        let mut out = String::new();
+                        for a in &args {
+                            if !out.is_empty() {
+                                out.push(' ');
+                            }
+                            out.push_str(&format_console_value(self, *a));
+                        }
+                        let to_stderr = id == crate::compiler::native_id::CONSOLE_WARN
+                            || id == crate::compiler::native_id::CONSOLE_ERROR;
+                        if to_stderr {
+                            eprintln!("{}", out);
+                        } else {
+                            println!("{}", out);
+                        }
+                        if let Err(e) = stack.push(Value::null()) {
+                            return OpcodeResult::Error(e);
+                        }
+                        OpcodeResult::Continue
+                    }
+
                     id if id == crate::compiler::native_id::OBJECT_NEW => {
                         let value = match self.alloc_object_descriptor() {
                             Ok(v) => v,
