@@ -3901,6 +3901,29 @@ mod tests {
         });
     }
 
+    /// ALY-54: a heap value of the WRONG TYPE must be refused, not only a non-pointer.
+    /// Both engines now compare the GC-header TypeId via `typed_ptr_matches`.
+    #[test]
+    fn refcell_helpers_reject_wrong_type_heap_receivers() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+            let module_ptr = Arc::as_ptr(&module) as *const ();
+            // A real, rooted heap Array: a pointer, but not a RefCell.
+            let arr_ptr = unsafe { helper_alloc_array(6, Value::i32(2).raw(), module_ptr, ss) };
+            let arr_val = unsafe { Value::from_ptr(NonNull::new(arr_ptr.cast::<u8>()).unwrap()) };
+            assert_eq!(
+                unsafe { helper_load_refcell(arr_val.raw(), ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL,
+                "ALY-54: a heap Array must not be reinterpreted as a RefCell"
+            );
+            assert_ne!(
+                unsafe { helper_store_refcell(arr_val.raw(), Value::i32(1).raw(), ss) },
+                JIT_STORE_SUCCESS,
+                "ALY-54: storing into a heap Array as if it were a RefCell must be refused"
+            );
+        });
+    }
     #[test]
     fn new_refcell_fails_closed_without_a_root_set() {
         let (shared, module, code_cache, task) = array_helper_fixture();
