@@ -2945,8 +2945,39 @@ impl<'a> Lowerer<'a> {
         locals.retain(|name| !self.module_var_globals.contains_key(name));
         self.scan_for_captured_vars(&stmts_owned, &[], &locals);
 
-        // Create main function
-        let ir_func = IrFunction::new("main", vec![], TypeId::new(0));
+        // Create main function.
+        //
+        // The synthesised module-level `main` had a hardcoded return type of
+        // `TypeId::new(0)`, which resolves to `number`. For a module whose only
+        // returns are integer literals the emitter produces `ConstI32`, so the
+        // recorded signature said `f64` while the operand was `i32`, and
+        // `verify_module` — which requires exact identity — rejected the module.
+        // That is why `Bytecode.validate` reported every such module invalid.
+        //
+        // ALY-97: derive the type from what the module actually returns, but ONLY
+        // when every return agrees on an integer literal. Anything else keeps the
+        // previous value: changing the synthesised type for a general program would
+        // alter what it returns, which is a language decision, not a bug fix.
+        let module_returns_int_only = {
+            let mut saw_return = false;
+            let mut all_int = true;
+            for st in &stmts_owned {
+                if let Statement::Return(r) = st {
+                    match r.value.as_ref() {
+                        Some(ast::Expression::IntLiteral(_)) => saw_return = true,
+                        None => {}
+                        Some(_) => all_int = false,
+                    }
+                }
+            }
+            saw_return && all_int
+        };
+        let synth_return_ty = if module_returns_int_only {
+            TypeId::new(INT_TYPE_ID)
+        } else {
+            TypeId::new(0)
+        };
+        let ir_func = IrFunction::new("main", vec![], synth_return_ty);
         self.current_function = Some(ir_func);
 
         // Create entry block
