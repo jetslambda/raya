@@ -3872,10 +3872,16 @@ mod tests {
         with_array_bridge!(shared, module, code_cache, task, bridge, {
             let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
 
-            // An immediate is not a pointer, so both must refuse. This is the
-            // interpreter's weak `is_ptr()` check reproduced exactly -- a heap
-            // value of the wrong type is still accepted, as it is in the
-            // interpreter today (ALY-54).
+            // An immediate is not a pointer, so both must refuse.
+            //
+            // ALY-54: this comment used to say this "reproduces the interpreter's
+            // weak `is_ptr()` check exactly -- a heap value of the wrong type is
+            // still accepted". That was true before ALY-104/ALY-54 and is false
+            // now: BOTH engines compare the GC-header TypeId via the shared
+            // `typed_ptr_matches`, so a wrong-typed pointer is refused here too.
+            // `refcell_helpers_reject_wrong_type_heap_receivers` would cover that
+            // case, but it needs a correctly-rooted heap receiver; until one
+            // exists, this test's claim is limited to non-pointers.
             let immediate = Value::i32(5).raw();
             assert_eq!(
                 unsafe { helper_load_refcell(immediate, ss) },
