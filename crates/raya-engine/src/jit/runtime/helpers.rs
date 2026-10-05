@@ -3886,9 +3886,9 @@ mod tests {
             // still accepted". That was true before ALY-104/ALY-54 and is false
             // now: BOTH engines compare the GC-header TypeId via the shared
             // `typed_ptr_matches`, so a wrong-typed pointer is refused here too.
-            // `refcell_helpers_reject_wrong_type_heap_receivers` would cover that
-            // case, but it needs a correctly-rooted heap receiver; until one
-            // exists, this test's claim is limited to non-pointers.
+            // The wrong-typed-pointer case is covered by
+            // `refcell_helpers_reject_wrong_type_heap_receivers` below, which
+            // allocates a real rooted heap Array. This test covers non-pointers.
             let immediate = Value::i32(5).raw();
             assert_eq!(
                 unsafe { helper_load_refcell(immediate, ss) },
