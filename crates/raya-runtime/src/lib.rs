@@ -627,6 +627,12 @@ impl Runtime {
         let module = match path.extension().and_then(|e| e.to_str()) {
             Some("ryb") => self.load_bytecode(path)?,
             Some("raya") => self.compile_file(path)?,
+            Some("ts") | Some("tsx") | Some("mts") | Some("cts") => {
+                self.compile_program_file(path)?.entry
+            }
+            Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => {
+                self.compile_program_file(path)?.entry
+            }
             _ => {
                 return Err(RuntimeError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
