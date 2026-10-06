@@ -7,6 +7,8 @@ pub use harness::*;
 mod args;
 #[path = "e2e/arrays.rs"]
 mod arrays;
+#[path = "e2e/console.rs"]
+mod console;
 #[path = "e2e/conditionals.rs"]
 mod conditionals;
 #[path = "e2e/decorators.rs"]

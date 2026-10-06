@@ -376,6 +376,10 @@ pub const PATH_WITH_EXT: u16 = 0x600C;
 pub const JSON_STRINGIFY: u16 = 0x0C00;
 /// JSON.parse(json: string): any
 pub const JSON_PARSE: u16 = 0x0C01;
+pub const CONSOLE_LOG: u16 = 0x0C10;
+pub const CONSOLE_INFO: u16 = 0x0C11;
+pub const CONSOLE_WARN: u16 = 0x0C12;
+pub const CONSOLE_ERROR: u16 = 0x0C13;
 /// Merge all properties from source into dest: Object.assign(dest, source)
 /// Args: [dest_object, source_object]
 pub const JSON_MERGE: u16 = 0x0C03;

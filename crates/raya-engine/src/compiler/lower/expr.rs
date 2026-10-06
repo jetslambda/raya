@@ -2050,6 +2050,27 @@ impl<'a> Lowerer<'a> {
                         }
                     }
                 }
+
+                if obj_name == "console" {
+                    use crate::compiler::native_id::{
+                        CONSOLE_ERROR, CONSOLE_INFO, CONSOLE_LOG, CONSOLE_WARN,
+                    };
+                    let nid = match method_name {
+                        "log" => Some(CONSOLE_LOG),
+                        "info" => Some(CONSOLE_INFO),
+                        "warn" => Some(CONSOLE_WARN),
+                        "error" => Some(CONSOLE_ERROR),
+                        _ => None,
+                    };
+                    if let Some(native_id) = nid {
+                        self.emit(IrInstr::NativeCall {
+                            dest: Some(dest.clone()),
+                            native_id,
+                            args,
+                        });
+                        return dest;
+                    }
+                }
             }
 
             // Promise<T> is represented by a raw task handle internally.

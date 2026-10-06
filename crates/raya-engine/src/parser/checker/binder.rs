@@ -750,6 +750,7 @@ impl<'a> Binder<'a> {
 
         // Register JSON global object with static methods
         self.register_json_global();
+        self.register_console_global();
     }
 
     /// Register the JSON global object with static methods
@@ -760,6 +761,61 @@ impl<'a> Binder<'a> {
     ///
     /// JSON.parse returns the `json` type, which supports duck typing:
     /// property access returns json values.
+    /// Register the `console` global object.
+    ///
+    /// BISECT VARIANT A: binder half ONLY. No native ids, no lowerer branch,
+    /// no interpreter dispatch. Proves whether merely interning a console
+    /// Class + Function types perturbs array element-type resolution.
+    fn register_console_global(&mut self) {
+        let any_ty = self.type_ctx.any_type();
+        let mut sm: Vec<MethodSignature> = Vec::new();
+        for n in ["log", "info", "warn", "error"] {
+            let fty = self.type_ctx.intern(Type::Function(
+                crate::parser::types::ty::FunctionType {
+                    params: vec![],
+                    return_type: any_ty,
+                    is_async: false,
+                    min_params: 0,
+                    rest_param: Some(any_ty),
+                },
+            ));
+            sm.push(MethodSignature {
+                name: n.to_string(),
+                ty: fty,
+                type_params: vec![],
+                visibility: Default::default(),
+            });
+        }
+        let console_class = ClassType {
+            name: "console".to_string(),
+            type_params: vec![],
+            properties: vec![],
+            methods: vec![],
+            static_properties: vec![],
+            static_methods: sm,
+            extends: None,
+            implements: vec![],
+            is_abstract: false,
+        };
+        let console_ty = self.type_ctx.intern(Type::Class(console_class));
+        let symbol = Symbol {
+            name: "console".to_string(),
+            kind: SymbolKind::Class,
+            ty: console_ty,
+            flags: SymbolFlags {
+                is_exported: false,
+                is_const: true,
+                is_async: false,
+                is_readonly: true,
+                is_imported: false,
+            },
+            scope_id: self.symbols.current_scope_id(),
+            span: Span { start: 0, end: 0, line: 0, column: 0 },
+            referenced: false,
+        };
+        let _ = self.symbols.define(symbol);
+    }
+
     fn register_json_global(&mut self) {
         let string_ty = self.type_ctx.string_type();
         let any_ty = self.type_ctx.any_type();
