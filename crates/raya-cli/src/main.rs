@@ -409,6 +409,23 @@ fn parse_type_mode(mode: &str) -> anyhow::Result<TypeMode> {
     }
 }
 
+/// Whether a `run` target is a plain-JavaScript entry file.
+///
+/// `raya run app.js` with no `--mode` should use the JS surface and JS type
+/// rules. Without this the CLI defaults every entry to `TypeMode::Raya`, which
+/// holds plain JS to TypeScript's strict rules: implicit `any` and
+/// unknown-narrowing both fire and reject idiomatic JavaScript.
+///
+/// Only consulted when `--mode` is absent, so an explicit flag always wins.
+fn is_js_entry(target: &str) -> bool {
+    matches!(
+        std::path::Path::new(target)
+            .extension()
+            .and_then(|e| e.to_str()),
+        Some("js") | Some("jsx") | Some("mjs") | Some("cjs")
+    )
+}
+
 fn resolve_type_mode(mode: Option<&str>, node_compat: bool) -> anyhow::Result<TypeMode> {
     match mode {
         Some(mode) => parse_type_mode(mode),
@@ -469,7 +486,11 @@ fn dispatch(cmd: Commands) -> anyhow::Result<()> {
             prof_interval,
             node_compat,
             mode,
-        } => commands::run::execute(commands::run::RunArgs {
+        } => {
+        let node_compat =
+            node_compat || (mode.is_none() && target.as_deref().is_some_and(is_js_entry));
+        let type_mode = resolve_type_mode(mode.as_deref(), node_compat)?;
+        commands::run::execute(commands::run::RunArgs {
             target,
             args,
             watch,
@@ -485,8 +506,9 @@ fn dispatch(cmd: Commands) -> anyhow::Result<()> {
             cpu_prof,
             prof_interval,
             node_compat,
-            type_mode: resolve_type_mode(mode.as_deref(), node_compat)?,
-        }),
+            type_mode,
+        })
+        }
 
         Commands::Debug {
             target,
@@ -715,3 +737,23 @@ mod tests {
         assert_eq!(mode, TypeMode::Js);
     }
 }
+
+#[cfg(test)]
+mod js_entry_tests {
+    use super::is_js_entry;
+
+    #[test]
+    fn js_extensions_are_js_entries() {
+        for f in ["app.js", "app.jsx", "app.mjs", "app.cjs", "/abs/path/app.js"] {
+            assert!(is_js_entry(f), "{f} should be a JS entry");
+        }
+    }
+
+    #[test]
+    fn non_js_extensions_are_not_js_entries() {
+        for f in ["app.ts", "app.tsx", "app.raya", "app.ryb", "js", "app.json"] {
+            assert!(!is_js_entry(f), "{f} should not be a JS entry");
+        }
+    }
+}
+
