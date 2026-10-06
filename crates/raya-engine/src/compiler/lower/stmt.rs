@@ -14,6 +14,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ForOfIterableKind {
     Array,
+    /// ALY-98: a string is iterable in JavaScript. Without this arm a string
+    /// resolved to `Unknown` and was lowered THROUGH THE ARRAY PATH, so the
+    /// failure surfaced at runtime as "Expected array" rather than as a compile
+    /// diagnostic.
+    String,
     ClassIterator,
     Unknown,
 }
@@ -93,6 +98,11 @@ impl<'a> Lowerer<'a> {
 
         match ty {
             Type::Array(arr) => (ForOfIterableKind::Array, arr.element, None),
+            // ALY-98: strings iterate by character, yielding one-character strings.
+            Type::Primitive(crate::parser::types::PrimitiveType::String)
+            | Type::StringLiteral(_) => {
+                (ForOfIterableKind::String, TypeId::new(super::STRING_TYPE_ID), None)
+            }
             Type::Set(set_ty) => (
                 ForOfIterableKind::ClassIterator,
                 set_ty.element,
@@ -381,6 +391,29 @@ impl<'a> Lowerer<'a> {
         // Normalize iterable to an indexable array for loop lowering.
         let array_reg = match iter_kind {
             ForOfIterableKind::Array | ForOfIterableKind::Unknown => self.lower_expr(&for_of.right),
+            // ALY-98: a string iterates by character. `split("")` already yields an
+            // array of one-character strings in this runtime and `SPLIT` is already a
+            // registered method id, so emit that call directly rather than building a
+            // synthetic AST node — the Lowerer holds `&Interner` and cannot intern a new
+            // symbol — and reuse the array loop below unchanged.
+            ForOfIterableKind::String => {
+                use crate::vm::builtin::string as bs;
+                let object = self.lower_expr(&for_of.right);
+                let sep = self.alloc_register(TypeId::new(super::STRING_TYPE_ID));
+                self.emit(IrInstr::Assign {
+                    dest: sep.clone(),
+                    value: IrValue::Constant(IrConstant::String(String::new())),
+                });
+                let dest = self.alloc_register(TypeId::new(super::ARRAY_TYPE_ID));
+                self.emit(IrInstr::CallMethodExact {
+                    dest: Some(dest.clone()),
+                    object,
+                    method: bs::SPLIT,
+                    args: vec![sep],
+                    optional: false,
+                });
+                dest
+            }
             ForOfIterableKind::ClassIterator => {
                 let source_reg = self.lower_expr(&for_of.right);
                 let class_name = match iter_class_name.as_deref() {
