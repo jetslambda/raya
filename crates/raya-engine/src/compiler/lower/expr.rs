@@ -4209,8 +4209,20 @@ impl<'a> Lowerer<'a> {
             // `declared_elem_ty` is hoisted above the spread branch so both paths
             // share one resolution. When there is neither an annotation nor an element
             // we fall back to `never` (unconstrained), not to a float.
+            // ALY-96: a type guessed from ONE element cannot constrain an array
+            // that has already been shown to hold a different type. `let x: unknown
+            // = [1, "ok", 2]` guessed i32 from the first element and then rejected
+            // its own second element with "Cannot store value: array element type is
+            // i32".
+            //
+            // Only derive from the first element when every element agrees. A
+            // heterogeneous literal falls through to `never` (unconstrained), which
+            // is what the source means: the array genuinely does hold mixed values.
+            // Homogeneous literals — the overwhelmingly common case — are unchanged.
+            let first_ty = elements.first().map(|r| r.ty);
+            let homogeneous = first_ty.is_some_and(|t| elements.iter().all(|r| r.ty == t));
             let elem_ty = declared_elem_ty
-                .or_else(|| elements.first().map(|r| r.ty))
+                .or(if homogeneous { first_ty } else { None })
                 .unwrap_or_else(|| TypeId::new(crate::parser::types::context::TypeContext::NEVER_TYPE_ID));
             let element_layout = if elements.is_empty() {
                 None
