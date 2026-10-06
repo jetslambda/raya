@@ -271,8 +271,18 @@ pub fn jit_support(opcode: Opcode) -> JitSupport {
         // simplest consumer that needs no index coercion.
         //
         // `ArrayLen`'s sentinel is `i32::MIN`, which no valid length can equal, so
-        // its fallback comparison cannot swallow a real answer. The other six stay
-        // `Rejected` and `array_opcodes_are_rejected_until_exact` is updated below.
+        // its fallback comparison cannot swallow a real answer.
+        //
+        // ALY-104: this paragraph used to end "The other six stay `Rejected`". That
+        // was true when D4.8's first slice landed and went stale as the later slices
+        // promoted them; ALL EIGHT array opcodes are promoted now, which is what
+        // `array_opcodes_are_rejected_until_exact` asserts below. It was read as
+        // authoritative after it had gone stale, and a ticket was filed to "promote"
+        // opcodes that were already promoted.
+        //
+        // The prose above describes one slice of one change and is not evidence of
+        // what the list below supports. When you change what this list supports, the
+        // assertion in the test is the thing that moves with it.
         | Opcode::NewArray
         | Opcode::ArrayLen
         // D4.8, slice 2: element access. `LoadElem`'s out-of-bounds is a RAISE
