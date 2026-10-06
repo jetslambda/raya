@@ -1375,15 +1375,84 @@ pub fn parse_primary(parser: &mut Parser) -> Result<Expression, ParseError> {
             Ok(Expression::Object(ObjectExpression { properties, span }))
         }
 
-        // Function expression (TODO: not in AST yet)
-        Token::Function => Err(ParseError {
-            kind: ParseErrorKind::InvalidSyntax {
-                reason: "Function expressions not yet implemented".to_string(),
-            },
-            span: start_span,
-            message: "Function expressions not supported yet".to_string(),
-            suggestion: Some("Use arrow functions instead".to_string()),
-        }),
+        // Function expression — desugar to ArrowFunction at parse time.
+        // This supports anonymous function expressions: function (x) { return x; }
+        // Named function expressions (function f(x) { return f(x-1); }) are not yet supported.
+        Token::Function => {
+            parser.advance(); // consume 'function'
+
+            // Optional name (for named function expressions — not yet bound)
+            let _name = if parser.check(&Token::Identifier(Symbol::dummy())) {
+                Some(parser.advance())
+            } else {
+                None
+            };
+
+            // Parameter list
+            parser.expect(Token::LeftParen)?;
+            let mut params = Vec::new();
+            while !parser.check(&Token::RightParen) && !parser.at_eof() {
+                // Simple parameter: identifier with optional type annotation
+                let start_span = parser.current_span();
+                let param_name = if let Token::Identifier(name) = parser.current() {
+                    let name = *name;
+                    let span = parser.current_span();
+                    parser.advance();
+                    crate::parser::ast::Identifier { name, span }
+                } else {
+                    return Err(parser.unexpected_token(&[Token::Identifier(Symbol::dummy())]));
+                };
+                let param_type = if parser.check(&Token::Colon) {
+                    parser.advance(); // consume :
+                    Some(super::types::parse_type_annotation(parser)?)
+                } else {
+                    None
+                };
+                params.push(crate::parser::ast::Parameter {
+                    decorators: vec![],
+                    visibility: None,
+                    pattern: crate::parser::ast::Pattern::Identifier(param_name),
+                    type_annotation: param_type,
+                    optional: false,
+                    default_value: None,
+                    is_rest: false,
+                    span: start_span,
+                });
+                if !parser.check(&Token::RightParen) {
+                    parser.expect(Token::Comma)?;
+                }
+            }
+            parser.expect(Token::RightParen)?;
+
+            // Optional return type annotation: function (x): number => ...
+            let return_type = if parser.check(&Token::Colon) {
+                parser.advance(); // consume :
+                Some(super::types::parse_type_annotation(parser)?)
+            } else {
+                None
+            };
+
+            // Function body: either block { ... } or expression (for concise body)
+            let body = if parser.check(&Token::LeftBrace) {
+                parser.advance(); // consume {
+                let block = parse_block_statement(parser)?;
+                crate::parser::ast::ArrowBody::Block(block)
+            } else {
+                // Concise body: expression
+                let expr = parse_expression(parser)?;
+                crate::parser::ast::ArrowBody::Expression(Box::new(expr))
+            };
+
+            let arrow = ArrowFunction {
+                params,
+                return_type,
+                body,
+                is_async: false,
+                span: parser.combine_spans(&start_span, &parser.current_span()),
+            };
+
+            Ok(Expression::Arrow(arrow))
+        },
 
         // JSX element or fragment: <div>...</div> or <>...</>
         Token::Less if super::jsx::looks_like_jsx(parser) => super::jsx::parse_jsx(parser),
