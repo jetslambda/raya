@@ -1615,14 +1615,20 @@ fn looks_like_arrow_params(parser: &Parser) -> bool {
             Some(Token::Colon) => true,
             // Comma - multiple params, definitely parameters
             Some(Token::Comma) => true,
-            // Closing paren - could be either (x) expr or (x) =>
-            // Need more context - we'll parse as expression and handle single-ident case specially
-            Some(Token::RightParen) => {
-                // Lookahead further: if followed by `:` or `=>`, it's arrow params
-                // We can only look one token ahead, so assume it's expression by default
-                // The expression parsing will handle (x) correctly
-                false
-            }
+            // Closing paren - ambiguous between a parenthesized expression `(x)`
+            // and a single untyped arrow parameter `(x) =>` / `(x): T =>`.
+            //
+            // Look one token PAST the `)`. `=>` or `:` there can only mean arrow
+            // parameters, because no valid expression continues with `)` followed
+            // by either. Anything else stays an expression.
+            //
+            // This returned false unconditionally before, on the stated grounds that
+            // only a one-token lookahead was available. That is not the case --
+            // `peek2` is already used by the rest-parameter branch just above.
+            Some(Token::RightParen) => matches!(
+                parser.peek2(),
+                Some(Token::Arrow) | Some(Token::Colon)
+            ),
             // Any operator means it's an expression
             _ => false,
         }
