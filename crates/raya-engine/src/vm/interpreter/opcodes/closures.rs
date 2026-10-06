@@ -10,6 +10,28 @@ use crate::vm::value::Value;
 use crate::vm::VmError;
 use std::sync::Arc;
 
+
+/// ALY-54: does `value` point at a heap object whose GC header says `expected`?
+///
+/// ONE implementation, used by BOTH the interpreter handlers and the JIT helpers.
+/// The D4.4 note recorded that both sides deliberately reproduced a weak `is_ptr()`
+/// check so they would not diverge — which works right up until the day one side is
+/// changed and the other is not. Sharing the function removes that possibility rather
+/// than managing it.
+///
+/// `is_ptr()` alone asks only "is this a heap pointer?"; it does not ask "is this the
+/// RIGHT KIND?". Reinterpreting the answer to one as the answer to the other is type
+/// confusion whose only guard is that two layouts happen to line up.
+pub(crate) fn typed_ptr_matches(value: Value, expected: std::any::TypeId) -> bool {
+    if !value.is_ptr() {
+        return false;
+    }
+    let header = unsafe {
+        &*crate::vm::gc::header_ptr_from_value_ptr(value.as_ptr::<u8>().unwrap().as_ptr())
+    };
+    header.type_id() == expected
+}
+
 impl<'a> Interpreter<'a> {
     pub(in crate::vm::interpreter) fn exec_closure_ops(
         &mut self,
@@ -131,9 +153,16 @@ impl<'a> Interpreter<'a> {
                     Err(e) => return OpcodeResult::Error(e),
                 };
 
-                if !closure_val.is_ptr() {
-                    return OpcodeResult::Error(VmError::TypeError("Expected closure".to_string()));
-                }
+                // ALY-54: check the GC-header TypeId, not just `is_ptr()`.
+                let closure_val = match crate::vm::interpreter::Interpreter::ensure_typed_ptr(
+                    closure_val,
+                    std::any::TypeId::of::<Closure>(),
+                    "Closure",
+                    "SetClosureCapture",
+                ) {
+                    Ok(v) => v,
+                    Err(e) => return OpcodeResult::Error(e),
+                };
 
                 let closure_ptr = unsafe { closure_val.as_ptr::<Closure>() };
                 let closure = unsafe { &mut *closure_ptr.unwrap().as_ptr() };
@@ -169,9 +198,16 @@ impl<'a> Interpreter<'a> {
                     Err(e) => return OpcodeResult::Error(e),
                 };
 
-                if !refcell_val.is_ptr() {
-                    return OpcodeResult::Error(VmError::TypeError("Expected RefCell".to_string()));
-                }
+                // ALY-54: check the GC-header TypeId, not just `is_ptr()`.
+                let refcell_val = match crate::vm::interpreter::Interpreter::ensure_typed_ptr(
+                    refcell_val,
+                    std::any::TypeId::of::<RefCell>(),
+                    "RefCell",
+                    "RefCell access",
+                ) {
+                    Ok(v) => v,
+                    Err(e) => return OpcodeResult::Error(e),
+                };
 
                 let refcell_ptr = unsafe { refcell_val.as_ptr::<RefCell>() };
                 let refcell = unsafe { &*refcell_ptr.unwrap().as_ptr() };
@@ -192,9 +228,16 @@ impl<'a> Interpreter<'a> {
                     Err(e) => return OpcodeResult::Error(e),
                 };
 
-                if !refcell_val.is_ptr() {
-                    return OpcodeResult::Error(VmError::TypeError("Expected RefCell".to_string()));
-                }
+                // ALY-54: check the GC-header TypeId, not just `is_ptr()`.
+                let refcell_val = match crate::vm::interpreter::Interpreter::ensure_typed_ptr(
+                    refcell_val,
+                    std::any::TypeId::of::<RefCell>(),
+                    "RefCell",
+                    "RefCell access",
+                ) {
+                    Ok(v) => v,
+                    Err(e) => return OpcodeResult::Error(e),
+                };
 
                 let refcell_ptr = unsafe { refcell_val.as_ptr::<RefCell>() };
                 let refcell = unsafe { &mut *refcell_ptr.unwrap().as_ptr() };

@@ -2388,10 +2388,17 @@ unsafe extern "C" fn helper_set_closure_capture(
     _shared_state: *mut (),
 ) -> i8 {
     let closure_value = Value::from_raw(closure_raw);
-    // Deliberately the interpreter's weak `is_ptr()` check, not a TypeId
-    // comparison. See ALY-54: strengthening it here would diverge from the
-    // interpreter rather than fix anything.
+    // ALY-54: was a deliberately weak `is_ptr()` check, kept in step with the
+    // interpreter's. Now both sides check the GC-header TypeId, in this same change.
     if !closure_value.is_ptr() {
+        return JIT_STORE_FALLBACK;
+    }
+    // ALY-54: same typed check the interpreter uses — one implementation,
+    // so the two engines cannot drift apart.
+    if !crate::vm::interpreter::opcodes::closures::typed_ptr_matches(
+        closure_value,
+        std::any::TypeId::of::<crate::vm::object::Closure>(),
+    ) {
         return JIT_STORE_FALLBACK;
     }
     let Some(ptr) = closure_value.as_ptr::<crate::vm::object::Closure>() else {
@@ -2492,7 +2499,19 @@ unsafe extern "C" fn helper_new_refcell(initial_raw: u64, shared_state: *mut ())
 /// rather than raising it: a leaf helper cannot raise a catchable error.
 unsafe extern "C" fn helper_load_refcell(refcell_raw: u64, _shared_state: *mut ()) -> u64 {
     let refcell_value = Value::from_raw(refcell_raw);
+    // Keep the original non-pointer guard explicitly. ALY-54 replaced it with the
+    // typed check; typed_ptr_matches does test is_ptr() internally, so behaviour is
+    // preserved, but a safety guard that lives only in another module is one refactor
+    // away from being dropped by accident.
     if !refcell_value.is_ptr() {
+        return JIT_INTERPRETER_FALLBACK_SENTINEL;
+    }
+    // ALY-54: same typed check the interpreter uses — one implementation,
+    // so the two engines cannot drift apart.
+    if !crate::vm::interpreter::opcodes::closures::typed_ptr_matches(
+        refcell_value,
+        std::any::TypeId::of::<crate::vm::object::RefCell>(),
+    ) {
         return JIT_INTERPRETER_FALLBACK_SENTINEL;
     }
     let ptr = refcell_value.as_ptr::<crate::vm::object::RefCell>();
@@ -2515,7 +2534,12 @@ unsafe extern "C" fn helper_store_refcell(
     _shared_state: *mut (),
 ) -> i8 {
     let refcell_value = Value::from_raw(refcell_raw);
-    if !refcell_value.is_ptr() {
+    // ALY-54: same typed check the interpreter uses — one implementation,
+    // so the two engines cannot drift apart.
+    if !crate::vm::interpreter::opcodes::closures::typed_ptr_matches(
+        refcell_value,
+        std::any::TypeId::of::<crate::vm::object::RefCell>(),
+    ) {
         return JIT_STORE_FALLBACK;
     }
     let value = Value::from_raw(value_raw);
@@ -3855,10 +3879,16 @@ mod tests {
         with_array_bridge!(shared, module, code_cache, task, bridge, {
             let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
 
-            // An immediate is not a pointer, so both must refuse. This is the
-            // interpreter's weak `is_ptr()` check reproduced exactly -- a heap
-            // value of the wrong type is still accepted, as it is in the
-            // interpreter today (ALY-54).
+            // An immediate is not a pointer, so both must refuse.
+            //
+            // ALY-54: this comment used to say this "reproduces the interpreter's
+            // weak `is_ptr()` check exactly -- a heap value of the wrong type is
+            // still accepted". That was true before ALY-104/ALY-54 and is false
+            // now: BOTH engines compare the GC-header TypeId via the shared
+            // `typed_ptr_matches`, so a wrong-typed pointer is refused here too.
+            // The wrong-typed-pointer case is covered by
+            // `refcell_helpers_reject_wrong_type_heap_receivers` below, which
+            // allocates a real rooted heap Array. This test covers non-pointers.
             let immediate = Value::i32(5).raw();
             assert_eq!(
                 unsafe { helper_load_refcell(immediate, ss) },
@@ -3871,6 +3901,29 @@ mod tests {
         });
     }
 
+    /// ALY-54: a heap value of the WRONG TYPE must be refused, not only a non-pointer.
+    /// Both engines now compare the GC-header TypeId via `typed_ptr_matches`.
+    #[test]
+    fn refcell_helpers_reject_wrong_type_heap_receivers() {
+        let (shared, module, code_cache, task) = array_helper_fixture();
+        with_array_bridge!(shared, module, code_cache, task, bridge, {
+            let ss = (&bridge as *const JitRuntimeBridgeContext) as *mut ();
+            let module_ptr = Arc::as_ptr(&module) as *const ();
+            // A real, rooted heap Array: a pointer, but not a RefCell.
+            let arr_ptr = unsafe { helper_alloc_array(6, Value::i32(2).raw(), module_ptr, ss) };
+            let arr_val = unsafe { Value::from_ptr(NonNull::new(arr_ptr.cast::<u8>()).unwrap()) };
+            assert_eq!(
+                unsafe { helper_load_refcell(arr_val.raw(), ss) },
+                JIT_INTERPRETER_FALLBACK_SENTINEL,
+                "ALY-54: a heap Array must not be reinterpreted as a RefCell"
+            );
+            assert_ne!(
+                unsafe { helper_store_refcell(arr_val.raw(), Value::i32(1).raw(), ss) },
+                JIT_STORE_SUCCESS,
+                "ALY-54: storing into a heap Array as if it were a RefCell must be refused"
+            );
+        });
+    }
     #[test]
     fn new_refcell_fails_closed_without_a_root_set() {
         let (shared, module, code_cache, task) = array_helper_fixture();
