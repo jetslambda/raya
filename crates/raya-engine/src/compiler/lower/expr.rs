@@ -213,12 +213,26 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// An integer literal is `i64` in the AST and was narrowed with `as i32`, so a
+    /// value outside i32 was SILENTLY TRUNCATED (`return 2147483648;` became
+    /// `I32(-2147483648)`). Emit F64 for those, which keeps every value a double can
+    /// represent exactly.
+    ///
+    /// This deliberately cannot handle `i32::MIN`, which is written `-2147483648`:
+    /// the parser sees the POSITIVE `2147483648` and widens it. `lower_unary` folds
+    /// that case back to a single i32 constant before reaching here.
     fn lower_int_literal(&mut self, lit: &ast::IntLiteral) -> Register {
-        let ty = TypeId::new(INT_TYPE_ID);
+        let fits_i32 = lit.value >= i32::MIN as i64 && lit.value <= i32::MAX as i64;
+        let ty = TypeId::new(if fits_i32 { INT_TYPE_ID } else { NUMBER_TYPE_ID });
+        let value = if fits_i32 {
+            IrValue::Constant(IrConstant::I32(lit.value as i32))
+        } else {
+            IrValue::Constant(IrConstant::F64(lit.value as f64))
+        };
         let dest = self.alloc_register(ty);
         self.emit(IrInstr::Assign {
             dest: dest.clone(),
-            value: IrValue::Constant(IrConstant::I32(lit.value as i32)),
+            value,
         });
         dest
     }
@@ -941,6 +955,24 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_unary(&mut self, unary: &ast::UnaryExpression) -> Register {
+        // `i32::MIN` is written `-2147483648`, so the parser hands us the POSITIVE
+        // literal and `lower_int_literal` widens it to F64 (it does not fit i32 on its
+        // own). Fold the negation here, where both tokens are visible, so the result is
+        // the i32 the program meant. Without this, widening on overflow breaks
+        // `test_int_negate_min`, `test_int_min_div_neg_one` and `test_int_overflow_sub`.
+        if unary.operator == ast::UnaryOperator::Minus {
+            if let ast::Expression::IntLiteral(lit) = unary.operand.as_ref() {
+                let negated = lit.value.checked_neg();
+                if negated.is_some_and(|v| v >= i32::MIN as i64 && v <= i32::MAX as i64) {
+                    let dest = self.alloc_register(TypeId::new(INT_TYPE_ID));
+                    self.emit(IrInstr::Assign {
+                        dest: dest.clone(),
+                        value: IrValue::Constant(IrConstant::I32(negated.unwrap() as i32)),
+                    });
+                    return dest;
+                }
+            }
+        }
         // Handle increment/decrement operators specially — they need to
         // compute new_value = old ± 1 and store back to the variable
         match unary.operator {
