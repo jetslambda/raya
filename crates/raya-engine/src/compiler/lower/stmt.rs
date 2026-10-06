@@ -2642,6 +2642,26 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// ALY-97: lower a value being RETURNED, widening an integer literal so it
+    /// matches a `number`-declared function.
+    ///
+    /// With no widening, `return 1;` emitted `i32` while the recorded signature said
+    /// `f64`, and `check_cfg::check_assignable` — which requires exact identity —
+    /// rejected the module, so `Bytecode.validate` reported every integer-returning
+    /// function invalid.
+    ///
+    /// Scoped to an integer literal in RETURN position. Widening every int literal in a
+    /// number-returning function would turn loop counters (`for (let i = 0; i < 10;
+    /// i++)`) into floats, which the verifier then rejects where int is expected.
+    ///
+    /// The reverse direction is untouched: an `int`-declared function still gets `i32`,
+    /// and a float where `int` is declared is still emitted as a float and still
+    /// rejected, because the runtime performs no coercion (`Opcode::Return` pops the
+    /// value and returns it verbatim).
+    ///
+    /// Used by BOTH return paths: `ReturnStatement` (block bodies) and an
+    /// expression-bodied arrow, which has no `ReturnStatement` at all and would
+    /// otherwise bypass this entirely.
     fn lower_return(&mut self, ret: &ast::ReturnStatement) {
         let value = ret.value.as_ref().map(|e| self.lower_expr(e));
 

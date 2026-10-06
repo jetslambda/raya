@@ -516,6 +516,13 @@ fn local_type(slot: usize, function: &Function, module: &Module) -> AbsType {
 /// Resolve a descriptor id to an abstract type; unknown complex ids degrade
 /// to Any rather than lying.
 fn abs_of_id(id: u32, module: &Module) -> AbsType {
+    // `prim::ANY_VALUE` means "no type information", not "some concrete type". Like
+    // `abs_of_descriptor` above, it must become the `AbsType::Any` wildcard so that
+    // `check_assignable` and `pop_expect` treat it as compatible in both directions.
+    // Both consumers already do; only the two mapping sites disagreed.
+    if id == crate::compiler::bytecode::types::prim::ANY_VALUE.0 {
+        return AbsType::Any;
+    }
     if id < COMPLEX_BASE {
         AbsType::Known(id)
     } else {
@@ -527,6 +534,20 @@ fn abs_of_id(id: u32, module: &Module) -> AbsType {
 }
 
 fn abs_of_descriptor(d: &RuntimeTypeDescriptor, module: &Module) -> AbsType {
+    // `AnyValue` is the fallback for a type the compiler could not resolve — it
+    // means "no type information", not "some concrete type". It has a primitive
+    // id (prim::ANY_VALUE = 6), so the `primitive_id()` arm below turned it into
+    // `AbsType::Known(6)`, and `check_assignable` then demanded an EXACT match
+    // against it. That made every unresolved type fail against everything:
+    //
+    //   function f(): int { return 7; } return f();
+    //   -> TypeMismatch { expected: Known(6), actual: Known(0) }
+    //
+    // Mapping it to `AbsType::Any` restores its meaning: `check_assignable`
+    // already treats `Any` as compatible in both directions.
+    if matches!(d, RuntimeTypeDescriptor::AnyValue) {
+        return AbsType::Any;
+    }
     match d.primitive_id() {
         Some(id) => AbsType::Known(id.0),
         None => match module.runtime_types.iter().position(|t| t == d) {
